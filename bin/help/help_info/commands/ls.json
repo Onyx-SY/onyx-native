@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "ls": {
+      "Chinese": "用法：ls [选项] [路径]\n功能：列出目录内容（Windows等效 dir 命令）\n核心选项：-l（详细列表）、-a（显示隐藏文件）、-h（人类可读大小）、-t（按时间排序）、-R（递归列出）、-S（按大小排序）、-i（显示inode）\n适配系统：Windows/Linux/Termux全兼容（Windows自动映射dir功能）",
+      "English": "Usage: ls [option] [path]\nFunction: List directory contents (equivalent to dir on Windows)\nCore options: -l (long list), -a (show hidden files), -h (human-readable size), -t (sort by time), -R (recursive), -S (sort by size), -i (show inode)\nCompatible systems: Windows/Linux/Termux (auto-map to dir on Windows)"
+    }
+  }
+}

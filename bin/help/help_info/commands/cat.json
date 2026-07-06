@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "cat": {
+      "Chinese": "用法：cat [选项] <文件...>\n功能：查看或拼接文件内容（Windows等效 type 命令）\n核心选项：-n（显示行号）、-b（仅非空行号）、-v（显示隐藏字符）\n适配系统：Windows/Linux/Termux全兼容（Windows自动映射type功能）",
+      "English": "Usage: cat [option] <file...>\nFunction: Concatenate and print files (equivalent to type on Windows)\nCore options: -n (number lines), -b (number non-empty lines), -v (show non-printing characters)\nCompatible systems: Windows/Linux/Termux (auto-map to type on Windows)"
+    }
+  }
+}

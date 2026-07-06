@@ -1,0 +1,22 @@
+{
+  "_comment": "Onyx MCP server registry — 支持动态变量：{CWD}=当前工作目录, {USER_HOME}=用户主目录。安装：ai -mcp install <name>",
+  "_available": {
+    "filesystem": {"package": "@modelcontextprotocol/server-filesystem", "desc": "文件系统操作（内置）"},
+    "puppeteer": {"package": "@modelcontextprotocol/server-puppeteer", "desc": "浏览器自动化、截图、表单"},
+    "github": {"package": "@modelcontextprotocol/server-github", "desc": "GitHub 仓库/Issue/PR 管理"},
+    "postgres": {"package": "@modelcontextprotocol/server-postgres", "desc": "PostgreSQL 数据库查询"},
+    "sqlite": {"package": "@modelcontextprotocol/server-sqlite", "desc": "SQLite 数据库操作"},
+    "brave-search": {"package": "@modelcontextprotocol/server-brave-search", "desc": "Web 搜索（需 API key）"},
+    "fetch": {"package": "@modelcontextprotocol/server-fetch", "desc": "网页抓取、HTTP API 调用"}
+  },
+  "servers": {
+    "filesystem": {
+      "name": "filesystem",
+      "description": "文件系统操作 (read/write/edit/list/search)",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "{CWD}"],
+      "auto_start": true,
+      "installed": false
+    }
+  }
+}

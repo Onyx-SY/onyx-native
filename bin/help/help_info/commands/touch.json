@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "touch": {
+      "Chinese": "用法：touch [选项] <文件...>\n功能：创建空文件或更新时间戳（Windows等效 copy nul 命令）\n核心选项：-a（更新访问时间）、-m（更新修改时间）、-d（指定时间戳）\n适配系统：Windows/Linux/Termux全兼容（Windows自动映射copy nul功能）",
+      "English": "Usage: touch [option] <file...>\nFunction: Change timestamps or create empty files (equivalent to copy nul on Windows)\nCore options: -a (change access time), -m (change modification time), -d (set timestamp)\nCompatible systems: Windows/Linux/Termux (auto-map to copy nul on Windows)"
+    }
+  }
+}

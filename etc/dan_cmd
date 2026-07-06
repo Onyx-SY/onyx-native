@@ -1,0 +1,128 @@
+rm -rf 
+rm -f
+mkfs.ext4/dev/sda1
+mkfs.vfat/dev/sdb1
+mkfs.ntfs/dev/sdc1
+fdisk/dev/sda
+parted/dev/sda
+dd if=/dev/zero of=/dev/sda bs=1M
+dd if=/dev/urandom of=/dev/sda
+rm-rf /home
+rm-rf /etc
+rm-rf /lib
+rm-rf /usr
+rm-rf /boot
+rm-rf /var
+rm-rf /opt
+rm-rf /root
+rm-rf *
+mv/ /tmp
+chmod-R 777 /
+chmod-R 000 /
+chown-R root:root /
+sudo rm-rf /
+sudo rm-r /
+sudo mkfs/dev/sda
+sudo fdisk/dev/sda
+sudo dd if=/dev/zero of=/dev/sda
+shutdown-h now
+reboot-f
+init 0
+halt-p
+poweroff-f
+echo 1> /proc/sys/kernel/sysrq
+echo b> /proc/sysrq-trigger
+echo c> /proc/sysrq-trigger
+dd if=/dev/urandom of=/dev/mem
+rm-rf .*
+rm-rf --no-preserve-root /
+:(){:|:& };:
+forkbomb
+killall-9 init
+killall-9 systemd
+rm-rf /dev/sda
+rm-rf /dev/null
+rm-rf /dev/zero
+ln-sf /dev/null ~/.bashrc
+find/ -type f -exec rm {} \;
+find/ -type d -exec rm -rf {} \;
+find/ -name "*" -delete
+tar czf/dev/null /
+cat/dev/zero > /dev/sda
+mkfs.ext4/dev/sda
+mkfs.xfs/dev/sda
+yes> /dev/sda
+truncate-s 0 /dev/sda
+pv/dev/zero > /dev/sda
+badblocks-wsv /dev/sda
+hdparm--yes-i-know-what-i-am-doing --sanitize-block-erase /dev/sda
+sg_format/dev/sda
+nvme format/dev/nvme0n1
+blkdiscard/dev/sda
+systemctl disable--now sshd
+systemctl mask systemd-logind
+systemctl stop systemd-journald
+iptables-F
+iptables-X
+iptables-t nat -F
+iptables-P INPUT DROP
+iptables-P OUTPUT DROP
+iptables-P FORWARD DROP
+swapoff-a
+rm-rf /swapfile
+rm-rf /etc/passwd
+rm-rf /etc/shadow
+rm-rf /etc/group
+userdel-r root
+groupdel root
+dd if=/dev/zero of=/boot/vmlinuz
+dd if=/dev/zero of=/initrd.img
+rm-rf /run
+rm-rf /tmp
+rm-rf /proc
+rm-rf /sys
+
+/etc/fstab
+/etc/crypttab
+cryptsetup erase/dev/sda1
+vgremove--force vg00
+lvremove--force /dev/vg00/lv_root
+zpool destroy tank
+btrfs subvolume delete/subvol
+xfs_db-x -c blockget -c blocktrash -c blocktrash /dev/sda1
+debugfs-w /dev/sda1 -R "rm /"
+wipefs-a /dev/sda
+sdmem-fllv
+shred-zufv /dev/sda
+scrub-p dod /dev/sda
+nwipe--autonuke /dev/sda
+dcfldd if=/dev/zero of=/dev/sda
+cat/dev/random > /dev/sda
+openssl enc-aes-256-ctr -pass pass:"$(dd if=/dev/urandom bs=128 count=1 2>/dev/null | base64)" -nosalt </dev/zero | dd of=/dev/sda bs=4M
+dmsetup remove_all
+mdadm--stop /dev/md0
+mdadm--zero-superblock /dev/sda
+rmmod ext4
+rmmod xfs
+rmmod btrfs
+echo 0> /proc/sys/kernel/panic
+echo 1> /proc/sys/kernel/panic_on_oops
+sysctl-w vm.drop_caches=3
+sysctl-w vm.overcommit_memory=2
+echo 1024> /proc/sys/fs/file-max
+ulimit-n 0
+ulimit-u 0
+echo never> /sys/kernel/mm/transparent_hugepage/enabled
+blockdev--setra 0 /dev/sda
+tune2fs-O ^has_journal /dev/sda1
+xfs_repair-L /dev/sda1
+btrfs balance start-dusage=100 /mountpoint
+pvremove/dev/sda1
+sgdisk-Z /dev/sda
+gdisk/dev/sda <<< "x\nz\ny\nn\n"
+parted/dev/sda mklabel gpt
+parted/dev/sda rm 1
+dd if=/dev/zero of=/dev/sda count=1 bs=512
+sfdisk--delete /dev/sda
+cfdisk/dev/sda
+cgdisk/dev/sda

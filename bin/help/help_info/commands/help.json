@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "help": {
+      "Chinese": "用法：help | help <命令/工具名>\n功能：查看全局帮助手册或指定命令/工具的详细帮助信息\n示例：\n  help - 查看所有可用命令和工具\n  help ls - 查看ls命令的详细用法\n  help mktool - 查看mktool工具的详细说明\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: help | help <command/tool name>\nFunction: View global help manual or detailed help for specified command/tool\nExamples:\n  help - View all available commands and tools\n  help ls - View detailed usage of ls command\n  help mktool - View detailed description of mktool\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

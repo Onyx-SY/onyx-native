@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "rm": {
+      "Chinese": "用法：rm [选项] <文件/目录路径>\n功能：删除文件或目录（Windows等效 del/rmdir 命令）\n核心选项：-r（递归删除目录）、-f（强制删除）、-v（显示删除过程）\n适配系统：Windows/Linux/Termux全兼容（Windows自动映射del/rmdir功能）",
+      "English": "Usage: rm [option] <file/directory path>\nFunction: Remove files or directories (equivalent to del/rmdir on Windows)\nCore options: -r (recursive delete), -f (force delete), -v (verbose output)\nCompatible systems: Windows/Linux/Termux (auto-map to del/rmdir on Windows)"
+    }
+  }
+}

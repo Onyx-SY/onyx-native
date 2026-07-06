@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "mkdir": {
+      "Chinese": "用法：mkdir [选项] <目录路径>\n功能：创建新目录\n核心选项：-p（递归创建多级目录）、-m（设置目录权限，Linux专属）\n适配系统：Windows/Linux/Termux全兼容（Windows忽略-m选项）",
+      "English": "Usage: mkdir [option] <directory path>\nFunction: Create new directory\nCore options: -p (create parent directories), -m (set permissions, Linux only)\nCompatible systems: Windows/Linux/Termux (-m ignored on Windows)"
+    }
+  }
+}

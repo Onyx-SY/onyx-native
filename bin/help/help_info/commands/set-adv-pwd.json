@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "set-adv-pwd": {
+      "Chinese": "用法：set-adv-pwd\n功能：修改高级模式（adv）管理员密码\n注意：需先进入adv模式才能修改\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: set-adv-pwd\nFunction: Modify advanced mode (adv) administrator password\nNote: Must enter adv mode first\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

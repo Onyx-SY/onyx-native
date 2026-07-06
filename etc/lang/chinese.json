@@ -1,0 +1,144 @@
+{
+  "cd_handler": {
+    "usage": "用法：cd [选项]... [目录]",
+    "desc": "切换shell工作目录",
+    "version": "cd (Onyx Toolbox) {version}",
+    "invalid_opt": "cd：无效选项 -- '{opt}'",
+    "try_help": "请尝试 'cd --help' 获取更多信息。",
+    "oldpwd_not_set": "cd: OLDPWD 未设置",
+    "cannot_exit_root": "cd: {path}: 无法跳出根目录（/）",
+    "no_such_file": "cd: {path}: 没有那个文件或目录",
+    "not_a_dir": "cd: {path}: 不是目录",
+    "perm_denied": "cd: {path}: 权限不够",
+    "unexpected_error": "cd: 意外错误: {err}",
+    "log_cd_success": "cd 从 '{from_dir}' 切换到 '{to_dir}'",
+    "log_cd_fail": "cd 命令执行失败：{err}"
+  },
+  "adv_pwd_handler": {
+    "usage": "用法：set-adv-pwd",
+    "desc": "功能：修改高级模式的管理员密码",
+    "only_adv_mode": "仅可在adv模式下修改密码，请先切换到adv模式",
+    "input_current": "请输入当前管理员密码：",
+    "pwd_incorrect": "当前密码错误！",
+    "verify_fail": "密码验证失败：{err}",
+    "prompt_new": "正在设置新管理员密码（至少6位）",
+    "input_new1": "请输入新密码：",
+    "input_new2": "请确认新密码：",
+    "pwd_not_match": "两次密码不一致，请重新输入",
+    "pwd_too_short": "密码长度不足6位，请重新输入",
+    "backup_old": "已备份旧密码文件（.onyx_admin_pass.bak）",
+    "set_ok": "✓ 管理员密码修改成功！",
+    "set_fail": "密码修改失败：{err}",
+    "restore_old": "已恢复原密码"
+  },
+  "security.check_sandbox_path": {
+    "os_mode_pass": "OS模式：路径{path}自动通过沙箱校验",
+    "sandbox_disabled": "沙箱已禁用，路径{path}自动放行",
+    "path_block": "沙箱拦截：路径不在允许范围内",
+    "path_error": "路径检查异常：{err}"
+  },
+  "security.check_tool_permission": {
+    "perm_exceed": "当前{mode}模式权限上限{limit}，无法使用{req}级工具",
+    "non_adv_high_perm": "非adv模式禁止使用{req}级权限工具，请切换到adv模式"
+  },
+  "security.check_blocked_cmd": {
+    "base_block": "沙箱拦截：高危命令 → {cmd}（匹配规则：{rule}）",
+    "special_block": "沙箱拦截：Kali专属高危命令 → {cmd}（匹配规则：{rule}）",
+    "adv_confirm": "⚠️ 高危命令，确认执行？(y/N)：",
+    "config_load_fail": "警告：高危命令配置文件读取失败，使用默认拦截规则",
+    "adv_cancelled": "已取消执行高危命令",
+    "captcha_prompt": "验证码: [ {code} ]  — 请输入上方验证码以确认执行",
+    "captcha_wrong": "验证码错误，已取消"
+  },
+  "tool_registry.execute_tool": {
+    "sandbox_block_tool": "沙箱拦截：工具路径不在允许范围内 → {path}",
+    "process_limit": "进程数超过限制（最大{max}个）"
+  },
+  "bootstrap.init_sado_config": {
+    "os_mode_non_root": "OS模式下只有root用户可以初始化sado配置，当前用户为非root，跳过",
+    "os_mode_root_creating": "OS模式(root用户)：正在创建sado配置文件...",
+    "tbs_mode_creating": "TBS模式：正在创建sado配置文件...",
+    "config_created": "sado配置文件已创建：{path}",
+    "config_exists": "sado配置文件已存在：{path}",
+    "config_load_fail": "sado配置文件加载失败：{err}",
+    "config_load_success": "sado配置文件加载成功：共{count}条规则"
+  },
+  "bootstrap.init_admin_password": {
+    "prompt_set": "首次使用高级模式（adv），请设置管理员密码（至少6位）",
+    "input_pwd1": "请输入管理员密码：",
+    "input_pwd2": "请确认管理员密码：",
+    "pwd_not_match": "两次密码不一致，请重新输入",
+    "pwd_too_short": "密码长度不足6位，请重新输入",
+    "dir_create_fail": "创建密码存储目录失败：{err}",
+    "pwd_save_fail": "密码保存失败：{err}",
+    "os_mode_non_root": "OS模式下只有root用户可以初始化ADV密码，当前用户为非root，跳过初始化",
+    "os_mode_root_creating": "OS模式(root用户)：正在初始化ADV密码...",
+    "tbs_mode_creating": "TBS模式：正在初始化ADV密码..."
+  },
+  "bootstrap.verify_admin_password": {
+    "input": "请输入管理员密码：",
+    "incorrect": "密码错误！",
+    "verify_fail": "密码验证失败：{err}"
+  },
+  "config_loader": {
+    "config_not_found": "配置文件不存在：{path}，程序无法启动",
+    "config_format_error": "{file} 格式错误：{err}（行号：{line}，列号：{col}），程序无法启动",
+    "config_read_fail": "{file} 读取失败：{err}，程序无法启动",
+    "missing_required_nodes": "{file} 缺失必要节点：{nodes}，程序无法启动",
+    "config_loaded_success": "{file} 加载成功",
+    "template_reset": "模板不存在，已重置为'def'并修复config.json"
+  },
+  "onyx.execute_tool": {
+    "sandbox_block_tool": "沙箱拦截：工具路径不在允许范围内 → {path}",
+    "process_limit": "进程数超过限制（最大{max}个）"
+  },
+  "onyx.source_rc_files": {
+    "sys_rc_load": "系统级 RC 文件加载成功：{path}",
+    "user_rc_load": "用户级 RC 文件加载成功：{path}",
+    "sys_rc_fail": "系统级 RC 文件加载失败：{err}",
+    "user_rc_fail": "用户级 RC 文件加载失败：{err}",
+    "rc_exec_start": "正在执行 RC 初始化脚本...",
+    "rc_exec_complete": "RC 脚本执行完成",
+    "rc_disabled": "RC 文件执行已禁用"
+  },
+  "onyx.initialize_environment": {
+    "fatal_user_home_fail": "致命错误：用户主目录初始化失败，程序无法启动",
+    "fatal_config_load_fail": "致命错误：核心配置加载失败，程序无法启动",
+    "fatal_admin_pwd_fail": "致命错误：管理员密码初始化失败，程序无法启动",
+    "fatal_tool_dir_fail": "致命错误：工具目录初始化失败，程序无法启动",
+    "oneshot_admin_pwd_missing": "非交互模式下需要预先设置管理员密码，请先交互式运行一次",
+    "oneshot_sado_config_missing": "非交互模式下需要预先配置 sado 规则，请先交互式运行一次",
+    "init_success": "Onyx 环境初始化成功",
+    "init_failed": "Onyx 环境初始化失败",
+    "cache_mode_detected": "持久化缓存检测到模式: {mode}，自动切换中...",
+    "cache_mode_adv_flow": "缓存指定 adv 模式，正在执行安全切换流程...",
+    "cache_mode_adv_low_first": "已切换到 low 模式，准备通过 activite 进入 adv...",
+    "cache_mode_adv_success": "✅ 已通过持久化缓存成功进入 adv 模式",
+    "cache_mode_adv_failed": "❌ 通过持久化缓存进入 adv 模式失败: {err}",
+    "cache_mode_invalid": "⚠️ 持久化缓存模式值无效: {val}，忽略并使用默认配置"
+  },
+  "onyx.run_command_once": {
+    "exec_error": "命令执行错误：{err}",
+    "init_failed": "环境初始化失败"
+  },
+  "onyx.main_loop": {
+    "boot_time_info": "启动耗时：{time}",
+    "system_ready": "\n[Shell 就绪] 输入命令开始操作（输入 exit 退出）...",
+    "main_loop_crash": "主循环异常崩溃：{err}",
+    "keyboard_interrupt": "\n^C",
+    "cmd_exec_interrupt": "命令执行中断：用户触发Ctrl+C",
+    "cmd_exec_error": "命令执行异常：{err}",
+    "debug_time_cost": "（耗时：{time}s）",
+    "rc_executing": "正在执行 RC 初始化脚本...",
+    "rc_executed": "RC 脚本执行完成",
+    "stage_module_load": "阶段1-模块加载完成",
+    "stage_init_env_start": "阶段2-开始环境初始化",
+    "stage_init_env_complete": "阶段2-环境初始化完成 (耗时: {time}ms)",
+    "stage_import_banner": "阶段3-导入Banner模块 (耗时: {time}ms)",
+    "stage_show_banner": "阶段4-显示启动横幅 (耗时: {time}ms)",
+    "stage_rc_files": "阶段5-执行RC文件 (耗时: {time}ms)",
+    "stage_show_ready": "阶段6-显示就绪提示 (耗时: {time}ms)",
+    "stage_wait_input": "阶段7-等待用户输入",
+    "total_startup": "✅ Onyx 启动完成！总耗时: {time}ms"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "history": {
+      "Chinese": "用法：history [条数] | history clear\n功能：查看或清理命令历史\n示例：\n  history - 查看最近10条命令\n  history 20 - 查看最近20条命令\n  history clear - 清空所有命令历史\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: history [count] | history clear\nFunction: View or clear command history\nExamples:\n  history - View last 10 commands\n  history 20 - View last 20 commands\n  history clear - Clear all command history\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

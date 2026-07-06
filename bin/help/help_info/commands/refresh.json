@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "refresh": {
+      "Chinese": "用法：refresh\n功能：重新构建工具索引缓存，更新命令映射表\n场景：新增/删除工具后执行，确保工具可被识别\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: refresh\nFunction: Rebuild tool index cache and update command mapping\nScenario: Run after adding/deleting tools to ensure recognition\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

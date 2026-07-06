@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "activite": {
+      "Chinese": "用法：activite -m <模式> | activite -t <工具名> <权限>\n功能：系统模式切换与工具权限管理\n模式说明：low（低权限）、mid（中权限）、adv（高权限，需密码）\n权限说明：1-5级（5级最高，仅adv模式可设置）\n示例：\n  activite -m adv - 切换到高级模式\n  activite -t nmap 5 - 设置nmap工具为5级权限\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: activite -m <mode> | activite -t <tool name> <permission>\nFunction: System mode switching and tool permission management\nMode description: low (low perm), mid (medium perm), adv (high perm, password required)\nPermission description: Level 1-5 (Level 5 highest, adv mode only)\nExamples:\n  activite -m adv - Switch to advanced mode\n  activite -t nmap 5 - Set nmap tool to Level 5 permission\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

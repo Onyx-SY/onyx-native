@@ -1,0 +1,133 @@
+{
+  "compiler": "gcc",
+  "lib_suffix": "_lib",
+  "output_dir": "c",
+  "compile_flags": [
+    "-shared",
+    "-fPIC",
+    "-O2",
+    "-Wall",
+    "-Wextra"
+  ],
+  "c_flags": [
+    "-std=c99"
+  ],
+  "cpp_flags": [
+    "-std=c++11"
+  ],
+  "extra_libs": [],
+  "extra_includes": [],
+  "cross_compile": {
+    "enabled": false,
+    "target_system": "",
+    "target_arch": "",
+    "toolchain_prefix": "",
+    "sysroot": "",
+    "c_flags": [],
+    "cpp_flags": [],
+    "link_flags": []
+  },
+  "multi_target": {
+    "enabled": true,
+    "targets": [
+      {
+        "system": "windows",
+        "arch": "x86",
+        "c_flags": [
+          "-m32"
+        ],
+        "cpp_flags": [
+          "-m32"
+        ],
+        "link_flags": [],
+        "sysroot": "",
+        "enabled": true,
+        "toolchain_prefix": "i686-w64-mingw32-"
+      },
+      {
+        "system": "windows",
+        "arch": "x64",
+        "c_flags": [
+          "-m64"
+        ],
+        "cpp_flags": [
+          "-m64"
+        ],
+        "link_flags": [],
+        "sysroot": "",
+        "enabled": true,
+        "toolchain_prefix": "x86_64-w64-mingw32-"
+      },
+      {
+        "system": "windows",
+        "arch": "arm64",
+        "c_flags": [],
+        "cpp_flags": [],
+        "link_flags": [],
+        "sysroot": "",
+        "enabled": true,
+        "toolchain_prefix": "aarch64-w64-mingw32-"
+      },
+      {
+        "system": "linux",
+        "arch": "x86",
+        "c_flags": [
+          "-m32"
+        ],
+        "cpp_flags": [
+          "-m32"
+        ],
+        "link_flags": [],
+        "sysroot": "",
+        "enabled": true,
+        "toolchain_prefix": "i686-linux-gnu-"
+      },
+      {
+        "system": "linux",
+        "arch": "x64",
+        "c_flags": [
+          "-m64"
+        ],
+        "cpp_flags": [
+          "-m64"
+        ],
+        "link_flags": [],
+        "sysroot": "",
+        "enabled": true,
+        "toolchain_prefix": "x86_64-linux-gnu-"
+      },
+      {
+        "system": "linux",
+        "arch": "arm",
+        "c_flags": [
+          "-march=armv7-a",
+          "-mfpu=neon",
+          "-mfloat-abi=hard"
+        ],
+        "cpp_flags": [
+          "-march=armv7-a",
+          "-mfpu=neon",
+          "-mfloat-abi=hard"
+        ],
+        "link_flags": [],
+        "sysroot": "",
+        "enabled": true,
+        "toolchain_prefix": "arm-linux-gnueabihf-"
+      },
+      {
+        "system": "linux",
+        "arch": "arm64",
+        "c_flags": [
+          "-march=armv8-a"
+        ],
+        "cpp_flags": [
+          "-march=armv8-a"
+        ],
+        "link_flags": [],
+        "sysroot": "",
+        "enabled": true,
+        "toolchain_prefix": "aarch64-linux-gnu-"
+      }
+    ]
+  }
+}

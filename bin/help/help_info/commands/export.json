@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "export": {
+      "Chinese": "用法：export [选项] [变量名[=值]]\n功能：定义环境变量并导出至当前会话，使后续子进程可继承该变量，完全对齐BASH语法\n核心选项：\n  -p  静默返回，仅执行变量导出逻辑，无任何控制台输出\n使用规则：\n  1. 支持变量展开，$VAR或${VAR}格式可引用已定义的环境/会话变量\n  2. 单引号包裹值时原样保留，双引号包裹值时自动展开内部变量\n  3. 支持${VAR:-默认值}格式，变量未定义时使用指定默认值\n  4. 仅输入export 变量名时，导出已存在的变量至环境\n示例：\n  export PATH=/usr/local/bin:$PATH 追加路径到环境变量\n  export NAME='test' 定义字符串变量（单引号不展开）\n  export DESC=\"name: $NAME\" 定义变量并展开内部引用\n  export TMP=${TMP:-/tmp} 变量未定义时使用默认值/tmp\n  export -p PATH 静默导出PATH变量",
+      "English": "Usage: export [options] [VARNAME[=VALUE]]\nFunction: Define environment variables and export them to the current session, making them inheritable by subsequent child processes, fully aligned with BASH syntax\nCore options:\n  -p  Silent return, only execute variable export logic with no console output\nUsage rules:\n  1. Support variable expansion, $VAR or ${VAR} format can reference defined environment/session variables\n  2. Values wrapped in single quotes are retained as-is, values wrapped in double quotes expand internal variables automatically\n  3. Support ${VAR:-default} format, use the specified default value when the variable is undefined\n  4. Entering export VARNAME only exports the existing variable to the environment\nExamples:\n  export PATH=/usr/local/bin:$PATH Append path to environment variable\n  export NAME='test' Define string variable (no expansion in single quotes)\n  export DESC=\"name: $NAME\" Define variable and expand internal references\n  export TMP=${TMP:-/tmp} Use default value /tmp when the variable is undefined\n  export -p PATH Export PATH variable silently"
+    }
+  }
+}

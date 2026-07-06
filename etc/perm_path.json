@@ -1,0 +1,254 @@
+{
+  "_config": {
+    "allow_advanced_syntax": true
+  },
+
+  "/dev/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "rm", "dd", "dcfldd",
+      "mkfs", "mkfs.ext4", "mkfs.vfat", "mkfs.ntfs", "mkfs.xfs",
+      "fdisk", "parted", "gdisk", "sgdisk", "cfdisk", "cgdisk", "sfdisk",
+      "wipefs", "shred", "blkdiscard",
+      "nvme", "hdparm", "sg_format", "badblocks",
+      "mkswap", "cryptsetup",
+      "pvremove", "pvcreate", "vgremove", "vgcreate", "lvremove", "lvcreate",
+      "mdadm", "dmsetup", "blockdev",
+      "tune2fs", "xfs_repair", "debugfs", "btrfs",
+      "chmod", "chown", "mv"
+    ]
+  },
+
+  "/boot/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd", "cat", "grep", "less", "stat", "file"]
+  },
+
+  "/etc/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd", "cat", "grep", "less", "more", "head", "tail", "diff", "stat", "file"]
+  },
+  "/root/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd", "cat", "grep", "less", "head", "tail", "stat"]
+  },
+  "/home/<other>/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd", "cat", "grep", "less", "head", "tail", "stat", "file"]
+  },
+  "/home/<username>/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "gdisk", "sgdisk",
+      "dd", "dcfldd",
+      "wipefs", "shred", "blkdiscard",
+      "mkswap", "cryptsetup",
+      "pvremove", "pvcreate", "vgremove", "vgcreate", "lvremove", "lvcreate",
+      "mdadm", "dmsetup"
+    ]
+  },
+
+  "/sys/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd", "cat", "grep", "find", "stat"]
+  },
+  "/proc/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd", "cat", "grep", "head", "tail", "stat"]
+  },
+
+  "/lib/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd", "cat", "file", "stat"]
+  },
+  "/lib64/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd", "cat", "file", "stat"]
+  },
+
+  "/bin/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd"]
+  },
+  "/sbin/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd"]
+  },
+  "/usr/bin/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd"]
+  },
+  "/usr/sbin/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd"]
+  },
+
+  "/usr/local/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup"
+    ]
+  },
+  "/opt/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup"
+    ]
+  },
+
+  "/tmp/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "gdisk", "sgdisk",
+      "dd", "dcfldd",
+      "wipefs", "shred",
+      "mkswap", "cryptsetup",
+      "pvremove", "pvcreate", "vgremove", "vgcreate", "lvremove", "lvcreate",
+      "mdadm", "dmsetup"
+    ]
+  },
+
+  "/var/log/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup"
+    ]
+  },
+  "/var/www/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup"
+    ]
+  },
+  "/var/lib/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup"
+    ]
+  },
+  "/var/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup",
+      "pvremove", "pvcreate", "vgremove", "vgcreate", "lvremove", "lvcreate"
+    ]
+  },
+
+  "/mnt/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "gdisk", "sgdisk",
+      "dd", "dcfldd",
+      "wipefs", "shred", "blkdiscard",
+      "mkswap", "cryptsetup",
+      "pvremove", "pvcreate", "vgremove", "vgcreate", "lvremove", "lvcreate",
+      "mdadm", "dmsetup"
+    ]
+  },
+  "/media/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "gdisk", "sgdisk",
+      "dd", "dcfldd",
+      "wipefs", "shred",
+      "mkswap", "cryptsetup"
+    ]
+  },
+
+  "/data/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup",
+      "pvremove", "pvcreate", "vgremove", "vgcreate", "lvremove", "lvcreate"
+    ]
+  },
+  "/backup/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup"
+    ]
+  },
+  "/app/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup"
+    ]
+  },
+  "/srv/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup"
+    ]
+  },
+
+  "/run/<*:10>": {
+    "mode": "blacklist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "dd",
+      "wipefs", "shred", "mkswap", "cryptsetup",
+      "pvremove", "pvcreate", "vgremove", "vgcreate", "lvremove", "lvcreate"
+    ]
+  },
+
+  "/onyx/<*:10>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["ls", "cd"]
+  },
+  "<onyx>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": false,
+    "commands": ["cd", "ls"]
+  },
+
+  "/<*:1>": {
+    "mode": "whitelist",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "ls", "cd", "pwd", "df", "du", "free", "top", "htop", "ps", "whoami", "id",
+      "uname", "date", "hostname", "ping", "netstat", "ss", "ip", "systemctl",
+      "journalctl", "which", "whereis", "find", "locate", "grep", "cat", "echo",
+      "file", "stat", "wc", "sort", "uniq", "curl", "wget", "git", "docker", "kubectl",
+      "python3", "bash", "sh", "less", "more", "head", "tail", "zcat", "tar",
+      "activite"
+    ]
+  }
+}

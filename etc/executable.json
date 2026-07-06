@@ -1,0 +1,55 @@
+{
+  "sys_suffix": {
+    "Windows": [
+      ".exe",
+      ".bat",
+      ".cmd",
+      ".ps1",
+      ".py",
+      ".pyc",
+      ".dll"
+    ],
+    "Linux/macOS": [
+      ".sh",
+      ".bin",
+      ".run",
+      "",
+      ".py",
+      ".pyc",
+      ".so"
+    ],
+    "Termux": [
+      ".sh",
+      ".bin",
+      "",
+      ".py",
+      ".pyc",
+      ".so"
+    ],
+    "SpecialLinux": [
+      ".sh",
+      ".bin",
+      ".run",
+      "",
+      ".py",
+      ".pyc",
+      ".pl",
+      ".rb",
+      ".jar",
+      ".so"
+    ]
+  },
+  "launch_cmd": {
+    "Windows": "start \"\"",
+    "Linux/macOS": "./",
+    "Termux": "./",
+    "SpecialLinux": "./"
+  },
+  "search_depth": "deep",
+  "tool_search_rule": {
+    "normal_sys": "tools/*/*",
+    "normal_sys_depth_limit": 2,
+    "special_sys": "tools/*",
+    "special_sys_depth_limit": 1
+  }
+}

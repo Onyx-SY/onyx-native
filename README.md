@@ -1,5 +1,7 @@
 # Onyx-native — Terminal Emulator + Shell + Security Sandbox
 
+**[onyxsy.com](https://onyxsy.com)**
+
 Onyx is a **terminal emulator frontend** written in Python. It merges the terminal input layer, shell
 command parsing, mandatory security policies, and AI builtins — all running in a single process,
 with the underlying PTY connected to real bash/zsh.

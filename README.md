@@ -53,7 +53,6 @@ ai "kill process on port 8080"
   → SSE API (OS, shell, CWD, tools, memory, mode)
   → [{ commands: ["lsof -i :8080", "kill <PID>"], class: "3" }]
   → Each command: parse_and_execute() → security check → PTY execution
-  → Output saved to ~/.onyx/library/{id}.txt
 ```
 
 The AI actually **uses the computer** — not just calls tools:
@@ -61,13 +60,13 @@ The AI actually **uses the computer** — not just calls tools:
 - `apt install nmap && nmap localhost` — no preset wrappers needed
 - Controls memory retention via `class` field (1-5)
 
-### 🧠 Memory System
+### 🧠 Memory & Sessions
 
-| Tier | Storage | Retention |
+| Type | Path | Description |
 |---|---|---|
-| Working | In-memory | Current session |
-| Episodic | `~/.onyx/chats/{name}.json` | Multi-turn dialogs |
-| Autobiographical | `~/.onyx/library/{id}.txt` | class 1-5 controls forgetting curve |
+| Chat history | `.ai_s/chat/{name}.json` | Multi-turn dialog grouped by chat |
+| Session records | `.ai_s/library/{id}.txt` | Per-session output & context |
+| Current chat | `.ai_s/chat.txt` | Active chat name pointer |
 
 ### 🚀 Quick Start
 
@@ -143,7 +142,6 @@ ai "干掉占用 8080 端口的进程"
   → SSE API（携带 OS、shell、CWD、工具列表、当前模式、记忆）
   → [{ commands: ["lsof -i :8080", "kill <PID>"], class: "3" }]
   → 每条命令：parse_and_execute() → 安全检查 → PTY 执行
-  → 输出记录到 ~/.onyx/library/{id}.txt
 ```
 
 AI 不是「调用工具」，而是**真正使用电脑**：
@@ -151,13 +149,13 @@ AI 不是「调用工具」，而是**真正使用电脑**：
 - `apt install nmap && nmap localhost` — 不需要预设工具封装
 - 通过 `class` 字段控制记忆保留级别（1-5）
 
-### 🧠 三级记忆
+### 🧠 记忆与 Session
 
-| 层级 | 存储 | 保留策略 |
+| 类型 | 路径 | 说明 |
 |---|---|---|
-| 工作记忆 | 内存 | 当前 session |
-| 情景记忆 | `~/.onyx/chats/{name}.json` | 多轮对话分组 |
-| 自传体记忆 | `~/.onyx/library/{id}.txt` | class 1-5 控制遗忘曲线 |
+| 对话历史 | `.ai_s/chat/{name}.json` | 按 chat 分组的多轮对话 |
+| Session 记录 | `.ai_s/library/{id}.txt` | 每次 session 的输出与上下文 |
+| 当前 Chat | `.ai_s/chat.txt` | 当前活跃的 chat 名称 |
 
 ### 🚀 快速开始
 

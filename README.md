@@ -5,7 +5,7 @@
 </p>
 
 <h1 align="center">Onyx-native</h1>
-<h3 align="center">Terminal Emulator · Shell · Security Sandbox · AI Agent</h3>
+<h3 align="center">Terminal Emulator · Shell · 命令安全层 · AI Agent</h3>
 
 <p align="center"><a href="https://onyxsy.com"><b>onyxsy.com</b></a></p>
 
@@ -196,7 +196,7 @@ MIT — see [LICENSE](LICENSE)
 
 # Onyx-native
 
-### 终端模拟器 · Shell · 安全沙箱 · AI Agent
+### 终端模拟器 · Shell · 命令安全层 · AI Agent
 
 <p align="center"><a href="https://onyxsy.com"><b>onyxsy.com</b></a></p>
 

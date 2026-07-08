@@ -1713,7 +1713,17 @@ def call_ai_api_sse(question: str, type: Optional[str] = None, new_key: Optional
         return {"error": prompts.get("license_invalid_or_quota", "未配置 API 密钥，请重新运行 ai 命令"), "answer": "no", "ask": "", "txt": "", "analysis": ""}
     plat_key = conf.get("platform", "deepseek")
     api_key = conf["api_key"]
-    plat_info = _SUPPORTED_PLATFORMS.get(plat_key, _SUPPORTED_PLATFORMS["deepseek"])
+    if plat_key == "custom":
+        plat_info = {
+            "name": "Custom",
+            "api_url": conf.get("api_url", "https://api.openai.com/v1/chat/completions"),
+            "stream_format": "openai",
+            "models": [conf.get("model", "gpt-4")],
+            "default_model": conf.get("model", "gpt-4"),
+            "params": {"temperature": 0.1, "max_tokens": 4096},
+        }
+    else:
+        plat_info = _SUPPORTED_PLATFORMS.get(plat_key, _SUPPORTED_PLATFORMS["deepseek"])
     model = conf.get("model", "") or plat_info.get("default_model", "")
     user_params = conf.get("params", {})
     

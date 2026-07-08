@@ -208,6 +208,8 @@ ULTRA_FAST_FLAG_FILE = os.path.join(PERMANENT_CACHE_DIR, "ultra_fast.flag")
 TERMUX_C_COPIED_FLAG = os.path.join(PERMANENT_CACHE_DIR, "termux_c_copied.flag")
 # 性能日志文件
 PERFORMANCE_LOG_FILE = os.path.join(PERMANENT_CACHE_DIR, "performance_stats.json")
+# First-run forced check flag filename (path resolved dynamically after HOME is set)
+_FIRST_RUN_FLAG_FILENAME = "first_run_check_done.flag"
 
 
 def save_performance_stats():
@@ -363,7 +365,31 @@ LANGUAGE_TEXT = {
             "sandbox_config_missing": "未找到沙箱配置文件，默认启用",
             "sandbox_disabled": "沙箱已禁用",
             "sandbox_enabled": "沙箱已启用",
-            "login_mode_force_home": "🔐 登录模式强制切换到虚拟 HOME"
+            "login_mode_force_home": "🔐 登录模式强制切换到虚拟 HOME",
+            "first_run_title": "🔧 首次运行 — 强制环境检测 / First-Run Forced Environment Check",
+            "first_run_subtitle": "正在逐阶段彻底检查运行环境，请稍候…",
+            "first_run_stage_prefix": "阶段",
+            "first_run_pass": "✓ 通过",
+            "first_run_fail": "✗ 失败",
+            "first_run_warn": "⚠ 警告",
+            "first_run_skip": "⊙ 跳过",
+            "first_run_py_version": "Python 版本",
+            "first_run_pip_path": "pip 路径",
+            "first_run_summary_pass": "✅ 所有阶段通过！环境就绪。",
+            "first_run_summary_fail": "⚠️ 部分阶段未通过，但仍将尝试启动。",
+            "first_run_flag_saved": "💾 首次检测标记已保存，后续启动将跳过此检查。",
+            "first_run_proceeding": "🚀 正在进入 Onyx 主程序…",
+            "setup_welcome": "🔧 欢迎！检测到这是首次启动，请完成初始配置。",
+            "setup_step_lang": "第 1 步：选择语言",
+            "setup_step_ai": "第 2 步：配置 AI",
+            "ai_select_platform": "🤖 选择 AI 平台",
+            "ai_custom_platform": "自定义 (Custom)",
+            "ai_enter_key": "🔑 输入 {} API Key",
+            "ai_enter_url": "🌐 输入 API 地址",
+            "ai_enter_model": "📋 输入模型名称",
+            "ai_select_model": "📋 选择模型",
+            "ai_skip_config": "⊙ 已跳过 AI 配置（之后可在 Onyx 中用 ai 命令设置）",
+            "ai_config_saved": "✅ AI 配置已保存"
         }
     },
     "english": {
@@ -452,7 +478,31 @@ LANGUAGE_TEXT = {
             "sandbox_config_missing": "Sandbox config not found, default enabled",
             "sandbox_disabled": "Sandbox disabled",
             "sandbox_enabled": "Sandbox enabled",
-            "login_mode_force_home": "🔐 Login mode force switch to virtual HOME"
+            "login_mode_force_home": "🔐 Login mode force switch to virtual HOME",
+            "first_run_title": "🔧 First-Run Forced Environment Check / 首次运行 — 强制环境检测",
+            "first_run_subtitle": "Running thorough stage-by-stage environment verification, please wait…",
+            "first_run_stage_prefix": "Stage",
+            "first_run_pass": "✓ PASS",
+            "first_run_fail": "✗ FAIL",
+            "first_run_warn": "⚠ WARN",
+            "first_run_skip": "⊙ SKIP",
+            "first_run_py_version": "Python version",
+            "first_run_pip_path": "pip path",
+            "first_run_summary_pass": "✅ All stages passed! Environment ready.",
+            "first_run_summary_fail": "⚠️ Some stages failed, but will attempt to start anyway.",
+            "first_run_flag_saved": "💾 First-run flag saved — subsequent launches will skip this check.",
+            "first_run_proceeding": "🚀 Proceeding to Onyx main program…",
+            "setup_welcome": "🔧 Welcome! First launch detected — please complete initial setup.",
+            "setup_step_lang": "Step 1: Select language",
+            "setup_step_ai": "Step 2: Configure AI",
+            "ai_select_platform": "🤖 Select AI platform",
+            "ai_custom_platform": "Custom",
+            "ai_enter_key": "🔑 Enter {} API Key",
+            "ai_enter_url": "🌐 Enter API URL",
+            "ai_enter_model": "📋 Enter model name",
+            "ai_select_model": "📋 Select model",
+            "ai_skip_config": "⊙ AI config skipped (you can set it later with the ai command in Onyx)",
+            "ai_config_saved": "✅ AI config saved"
         }
     }
 }
@@ -1310,6 +1360,14 @@ class UltraFastEnvironmentChecker:
             except:
                 pass
         
+        # Also clear the first-run flag so the thorough check runs again
+        flag_path = self._first_run_flag_path()
+        if os.path.exists(flag_path):
+            try:
+                os.remove(flag_path)
+            except:
+                pass
+        
         self.disable_ultra_fast_mode()
         log_print("✅ 永久缓存和极致启动标记已清除")
     
@@ -1399,6 +1457,453 @@ class UltraFastEnvironmentChecker:
         except:
             return 1
     
+    # ── First-time setup wizard ───────────────────────────────────────────────
+    # Runs ONCE when the first-run flag file is missing.
+    #   Step 1 — language selection (InquirerPy or numbered menu)
+    #   Step 2 — AI platform / key / model / custom-URL / params (all with defaults)
+
+    def _try_import_inquirerpy(self):
+        """Try to import InquirerPy; returns the module or None."""
+        try:
+            from InquirerPy import inquirer as iq
+            if sys.stdin.isatty() and sys.stdout.isatty():
+                return iq
+        except ImportError:
+            pass
+        return None
+
+    def _select_one(self, iq, message: str, options: list, default: str = "") -> str:
+        """Select one option from a list. Uses InquirerPy when available."""
+        default = default or (options[0] if options else "")
+        if iq and options:
+            try:
+                return iq.select(message=message, choices=options, default=default).execute()
+            except Exception:
+                pass  # fall through to numbered menu
+        # ── Numbered fallback ──
+        print(f"\n  {message}")
+        for i, opt in enumerate(options, 1):
+            marker = "  ← default" if opt == default else ""
+            print(f"    [{i}] {opt}{marker}")
+        try:
+            default_idx = options.index(default) + 1 if default in options else 1
+        except ValueError:
+            default_idx = 1
+        choice = input(f"  Enter (1-{len(options)}) [{default_idx}]: ").strip()
+        try:
+            idx = int(choice) - 1 if choice else default_idx - 1
+            return options[idx] if 0 <= idx < len(options) else default
+        except (ValueError, IndexError):
+            return default
+
+    def _text_input(self, iq, message: str, default: str = "") -> str:
+        """Text input with optional default. Uses InquirerPy when available."""
+        if iq:
+            try:
+                return iq.text(message=message, default=default).execute()
+            except Exception:
+                pass
+        prompt = f"{message} [{default}]: " if default else f"{message}: "
+        val = input(f"  {prompt}").strip()
+        return val if val else default
+
+    def _secret_input(self, iq, message: str) -> str:
+        """Password-style masked input. Uses InquirerPy secret or getpass."""
+        if iq:
+            try:
+                return iq.secret(message=message).execute()
+            except Exception:
+                pass
+        import getpass
+        try:
+            return getpass.getpass(f"  {message}: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            return ""
+
+    def _save_language_setting(self, lang: str):
+        """Persist language choice to ~/.config/onyx/language."""
+        try:
+            config_dir = os.path.join(os.path.expanduser("~"), ".config", "onyx")
+            os.makedirs(config_dir, exist_ok=True)
+            with open(os.path.join(config_dir, "language"), "w", encoding="utf-8") as f:
+                f.write(lang)
+            log_print(f"[FirstRun] Language set: {lang}")
+        except Exception as e:
+            log_print(f"[FirstRun] Failed to save language: {e}", is_error=True)
+
+    def _save_ai_config(self, platform: str, api_key: str, model: str,
+                        api_url: str, params: dict):
+        """Persist AI config to key.conf (compatible with bin/ai_cmd.py)."""
+        home = os.environ.get("HOME", os.path.expanduser("~"))
+        key_conf_dir = os.path.join(home, ".config", "onyx", "ai")
+        key_conf_path = os.path.join(key_conf_dir, "key.conf")
+        try:
+            os.makedirs(key_conf_dir, exist_ok=True)
+            data = {
+                "platform": platform,
+                "api_key": api_key,
+                "model": model,
+                "api_url": api_url,
+                "params": params,
+            }
+            with open(key_conf_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.chmod(key_conf_path, 0o600)
+            log_print(f"[FirstRun] AI config saved: {key_conf_path}")
+        except Exception as e:
+            log_print(f"[FirstRun] Failed to save AI config: {e}", is_error=True)
+
+    _AI_PLATFORMS = {
+        "deepseek": {
+            "name": "DeepSeek",
+            "api_url": "https://api.deepseek.com/v1/chat/completions",
+            "default_model": "deepseek-v4-flash",
+            "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
+        },
+        "openai": {
+            "name": "OpenAI",
+            "api_url": "https://api.openai.com/v1/chat/completions",
+            "default_model": "gpt-5.5-instant",
+            "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro"],
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
+        },
+        "anthropic": {
+            "name": "Anthropic",
+            "api_url": "https://api.anthropic.com/v1/messages",
+            "default_model": "claude-sonnet-4-6",
+            "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
+            "params": {"max_tokens": 4096},
+        },
+    }
+
+    def _first_time_setup_wizard(self):
+        """First-time interactive setup: language → AI config.
+
+        Uses InquirerPy when available; falls back to numbered menus with
+        plain input().  All prompts are bilingual and switch to the
+        user's chosen language immediately after Step 1.
+        """
+        iq = self._try_import_inquirerpy()
+
+        # ── Header ────────────────────────────────────────────────────
+        welcome = ("\n" + "=" * 64 + "\n"
+                   "  🔧 欢迎！检测到首次启动 / Welcome! First launch detected\n"
+                   "  请完成初始配置 / Please complete initial setup\n"
+                   + "=" * 64)
+        print(welcome)
+        log_print("[FirstRun] Setup wizard started")
+
+        # ── Step 1: Language ──────────────────────────────────────────
+        print(f"\n  📌 {self.t('setup_step_lang')}")
+        lang_title = "🌐 请选择语言 / Please select language"
+        lang_options = ["中文 (Chinese)", "English"]
+        lang_choice = self._select_one(iq, lang_title, lang_options, default=lang_options[0])
+        lang = "chinese" if "中文" in lang_choice else "english"
+
+        # Switch language immediately
+        self.lang.current_language = lang
+        self.lang.text = LANGUAGE_TEXT[lang]
+        self._save_language_setting(lang)
+        print(f"  ✅ {lang_choice}")
+
+        # ── Step 2: AI Configuration ──────────────────────────────────
+        t = self.t  # shorthand
+        print(f"\n  📌 {t('setup_step_ai')}")
+
+        # Build platform list (built-in + custom)
+        plat_keys = list(self._AI_PLATFORMS.keys()) + ["custom"]
+        plat_names = [self._AI_PLATFORMS[p]["name"] for p in self._AI_PLATFORMS]
+        plat_names.append(t("ai_custom_platform"))
+
+        plat_choice = self._select_one(iq, t("ai_select_platform"), plat_names)
+        if not plat_choice:
+            print(f"  {t('ai_skip_config')}")
+            return
+        plat_idx = plat_names.index(plat_choice)
+        platform = plat_keys[plat_idx]
+
+        # ── API Key (masked input) ──
+        key_prompt = t("ai_enter_key").format(
+            self._AI_PLATFORMS[platform]["name"] if platform != "custom" else t("ai_custom_platform")
+        )
+        api_key = self._secret_input(iq, key_prompt)
+        if not api_key:
+            print(f"  {t('ai_skip_config')}")
+            return
+
+        # ── URL & Model ──
+        if platform == "custom":
+            api_url = self._text_input(iq, t("ai_enter_url"),
+                                       "https://api.openai.com/v1/chat/completions")
+            model = self._text_input(iq, t("ai_enter_model"), "gpt-4")
+            params = {"temperature": 0.1, "max_tokens": 4096}
+        else:
+            info = self._AI_PLATFORMS[platform]
+            api_url = info["api_url"]
+            model = self._select_one(iq, t("ai_select_model"), info["models"],
+                                     default=info["default_model"])
+            params = dict(info["params"])
+
+        # ── Save ──
+        self._save_ai_config(platform, api_key, model, api_url, params)
+        info_name = self._AI_PLATFORMS[platform]["name"] if platform != "custom" else t("ai_custom_platform")
+        print(f"  {t('ai_config_saved')}: {info_name} — {model}")
+
+    # ── First-run forced check helpers ─────────────────────────────────────────
+    # These are used only by first_run_forced_check() to print bilingual
+    # stage-by-stage output to the console on the very first launch.
+
+    def _print_stage_header(self, n: int, total: int, name: str):
+        """Print a bilingual stage header to console and log."""
+        prefix = self.t('first_run_stage_prefix')
+        line = f"\n  [{prefix} {n}/{total}] {name}"
+        print(line)
+        log_print(f"[FirstRun] Stage {n}/{total}: {name}")
+
+    def _print_stage_result(self, n: int, total: int, name: str,
+                            passed: bool, detail: str = "", skipped: bool = False):
+        """Print a bilingual PASS / FAIL / SKIP line for a completed stage."""
+        if skipped:
+            tag = self.t('first_run_skip')
+        elif passed:
+            tag = self.t('first_run_pass')
+        else:
+            tag = self.t('first_run_fail')
+        msg = f"  └─ {tag}"
+        if detail:
+            msg += f"  ({detail})"
+        print(msg)
+        log_print(f"[FirstRun] Stage {n}/{total} result: {tag} {detail}")
+
+    def _first_run_flag_path(self) -> str:
+        """Return the first-run flag path under the CURRENT HOME.
+        
+        This is resolved dynamically because init_user_home_for_onyx()
+        may have switched HOME to a virtual directory after module import.
+        """
+        home = os.environ.get("HOME", os.path.expanduser("~"))
+        return os.path.join(home, ".cache", "onyx", _FIRST_RUN_FLAG_FILENAME)
+
+    def _mark_first_run_done(self):
+        """Create the first-run flag file so subsequent launches skip this check."""
+        flag_path = self._first_run_flag_path()
+        try:
+            os.makedirs(os.path.dirname(flag_path), exist_ok=True)
+            with open(flag_path, 'w', encoding='utf-8') as f:
+                f.write(f"{time.time()}\n")
+                f.write(f"system={self.system_type}\n")
+                f.write(f"python={sys.version_info.major}.{sys.version_info.minor}\n")
+            log_print(f"[FirstRun] Flag saved: {flag_path}")
+        except Exception as e:
+            log_print(f"[FirstRun] Failed to save flag: {e}", is_error=True)
+
+    # ── First-run forced environment check ────────────────────────────────────
+
+    def first_run_forced_check(self):
+        """First-run forced environment check — thorough, sequential, bilingual.
+
+        Runs every stage one-by-one with clear console output so the user can
+        see exactly what is being verified.  This is intentionally exhaustive;
+        startup speed is not a concern here.  The goal is to establish a
+        verified baseline cache (Main_init_env.json) so that ALL subsequent
+        launches can use the fast path.
+        """
+        steps = self.lang.get_steps()
+        total = len(steps)
+
+        # ── Bilingual header ──
+        title = self.t('first_run_title')
+        subtitle = self.t('first_run_subtitle')
+        print(f"\n{'=' * 64}")
+        print(f"  {title}")
+        print(f"  {subtitle}")
+        print(f"{'=' * 64}")
+        log_print(f"[FirstRun] {title}")
+
+        all_pass = True
+        results: Dict[str, Any] = {}
+
+        # ── Stage 1: System Detection ─────────────────────────────────────
+        self._print_stage_header(1, total, steps[0])
+        try:
+            system_type = self.system_type
+            py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+            arch = platform.machine()
+            print(f"  🖥  OS     : {system_type}")
+            print(f"  🐍 Python : {py_ver}")
+            print(f"  🔧 Arch   : {arch}")
+            results['system_type'] = system_type
+            self._print_stage_result(1, total, steps[0], True)
+        except Exception as e:
+            self._print_stage_result(1, total, steps[0], False, str(e))
+            all_pass = False
+
+        # ── Stage 2: Python/pip Version Adaptation ────────────────────────
+        self._print_stage_header(2, total, steps[1])
+        try:
+            result = subprocess.run(
+                [self.python_exe, "-c",
+                 "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"],
+                capture_output=True, text=True, timeout=5
+            )
+            py_full = (result.stdout.strip() if result.returncode == 0
+                       else f"{sys.version_info.major}.{sys.version_info.minor}")
+            print(f"  {self.t('first_run_py_version')}: {py_full}")
+            print(f"  {self.t('first_run_pip_path')}: {self.pip_exe}")
+            results['python_exe'] = self.python_exe
+            results['pip_exe'] = self.pip_exe
+            self._print_stage_result(2, total, steps[1], True)
+        except Exception as e:
+            self._print_stage_result(2, total, steps[1], False, str(e))
+            all_pass = False
+
+        # ── Stage 3: Python Dependency Library Check & Installation ───────
+        self._print_stage_header(3, total, steps[2])
+        try:
+            missing_libs = self.parallel_check_libs_fast(
+                REQUIRED_DEPENDENCIES["python_libs"]
+            )
+            if missing_libs:
+                print(f"  {self.t('missing_libs')}: {', '.join(missing_libs)}")
+                ok = self.parallel_install_libs(missing_libs)
+                if ok:
+                    print(f"  {self.t('parallel_success')}")
+                    self._print_stage_result(3, total, steps[2], True)
+                else:
+                    print(f"  {self.t('parallel_failed')}")
+                    self._print_stage_result(3, total, steps[2], False)
+                    all_pass = False
+            else:
+                print(f"  {self.t('libs_ready')}")
+                self._print_stage_result(3, total, steps[2], True)
+            results['libs_installed'] = not bool(missing_libs)
+        except Exception as e:
+            self._print_stage_result(3, total, steps[2], False, str(e))
+            all_pass = False
+
+        # ── Stage 4: Windows PTY Support Check ────────────────────────────
+        self._print_stage_header(4, total, steps[3])
+        try:
+            if self.system_type == "Windows":
+                pty_ok = self.check_and_install_windows_pty()
+                if pty_ok:
+                    print(f"  {self.t('pty_ready')}")
+                    self._print_stage_result(4, total, steps[3], True)
+                else:
+                    print(f"  {self.t('pty_install_failed')}")
+                    self._print_stage_result(4, total, steps[3], False)
+                    all_pass = False
+            else:
+                print(f"  {self.t('first_run_skip')}  (non-Windows platform)")
+                self._print_stage_result(4, total, steps[3], True, skipped=True)
+        except Exception as e:
+            self._print_stage_result(4, total, steps[3], False, str(e))
+            all_pass = False
+
+        # ── Stage 5: PYC File Validation ──────────────────────────────────
+        self._print_stage_header(5, total, steps[4])
+        try:
+            pyc_missing = False
+            for pyc_rel in REQUIRED_DEPENDENCIES.get("optional_pyc_files", []):
+                pyc_path = os.path.join(ROOT_DIR, "onyx", pyc_rel)
+                exists = os.path.exists(pyc_path)
+                mark = "✓" if exists else "✗"
+                print(f"  {mark}  {pyc_rel}")
+                if not exists:
+                    pyc_missing = True
+            if pyc_missing:
+                print(f"  {self.t('first_run_warn')}: "
+                      f"some .pyc files missing — .py fallback will be used")
+                self._print_stage_result(5, total, steps[4], True, skipped=True)
+            else:
+                self._print_stage_result(5, total, steps[4], True)
+        except Exception as e:
+            self._print_stage_result(5, total, steps[4], False, str(e))
+            all_pass = False
+
+        # ── Stage 6: Core PY Files Check ──────────────────────────────────
+        self._print_stage_header(6, total, steps[5])
+        try:
+            missing_files = self.quick_file_check(
+                [os.path.join(ROOT_DIR, "onyx", f)
+                 for f in REQUIRED_DEPENDENCIES["required_py_files"]]
+            )
+            if missing_files:
+                print(f"  {self.t('missing_py_files')}: "
+                      f"{', '.join(os.path.basename(m) for m in missing_files)}")
+                self._print_stage_result(6, total, steps[5], False)
+                all_pass = False
+            else:
+                print(f"  {self.t('py_files_ready')}")
+                self._print_stage_result(6, total, steps[5], True)
+        except Exception as e:
+            self._print_stage_result(6, total, steps[5], False, str(e))
+            all_pass = False
+
+        # ── Stage 7: config.json Verification ─────────────────────────────
+        self._print_stage_header(7, total, steps[6])
+        try:
+            config_ok = self.load_config()
+            results['config_valid'] = config_ok
+            if config_ok:
+                print(f"  {self.t('config_valid')}")
+                self._print_stage_result(7, total, steps[6], True)
+            else:
+                print(f"  {self.t('config_invalid')}")
+                self._print_stage_result(7, total, steps[6], False)
+                all_pass = False
+        except Exception as e:
+            self._print_stage_result(7, total, steps[6], False, str(e))
+            all_pass = False
+
+        # ── Stage 8: Main Startup File Confirmation ───────────────────────
+        self._print_stage_header(8, total, steps[7])
+        try:
+            onyx_py = os.path.join(ROOT_DIR, "onyx", "Onyx.py")
+            onyx_pyc = os.path.join(ROOT_DIR, "onyx", "Onyx.pyc")
+            if os.path.exists(onyx_pyc):
+                print(f"  {self.t('determine_start_file')}: Onyx.pyc  "
+                      f"{self.t('using_pyc')}")
+                results['start_file'] = 'Onyx.pyc'
+            elif os.path.exists(onyx_py):
+                print(f"  {self.t('determine_start_file')}: Onyx.py  "
+                      f"{self.t('using_py')}")
+                results['start_file'] = 'Onyx.py'
+            else:
+                print(f"  ✗  Onyx.py / Onyx.pyc NOT FOUND!")
+                self._print_stage_result(8, total, steps[7], False)
+                all_pass = False
+                print(f"\n  ❌ CRITICAL: Onyx.py is missing — cannot start.\n")
+                sys.exit(1)
+            self._print_stage_result(8, total, steps[7], True)
+        except SystemExit:
+            raise
+        except Exception as e:
+            self._print_stage_result(8, total, steps[7], False, str(e))
+            all_pass = False
+
+        # ── Persist cache + flag ──────────────────────────────────────────
+        results['status'] = 'success'
+        results['timestamp'] = time.time()
+        self.save_permanent_cache(results)
+        self._mark_first_run_done()
+
+        # ── Summary ───────────────────────────────────────────────────────
+        print(f"\n{'─' * 64}")
+        if all_pass:
+            print(f"  {self.t('first_run_summary_pass')}")
+        else:
+            print(f"  {self.t('first_run_summary_fail')}")
+        print(f"  {self.t('first_run_flag_saved')}")
+        print(f"  {self.t('first_run_proceeding')}")
+        print(f"{'─' * 64}\n")
+
+        # Jump to main program
+        self.jump_to_main_immediately(results)
+
+    # ── Original minimal / ultra-fast checks ──────────────────────────────────
+
     def minimal_env_check(self) -> bool:
         """最小化环境检查"""
         try:
@@ -1615,6 +2120,22 @@ def main() -> None:
                     log_print(f"❌ {checker.t('home_init_failed')}", is_error=True)
                     sys.exit(1)
             # ==================================================
+
+            # ── First-run gate ────────────────────────────────────────────
+            #    If the flag file is missing this is a first launch (or the
+            #    user cleared the cache).  Run the interactive setup wizard
+            #    (language + AI config) followed by a thorough 8-stage
+            #    environment check.  Both jump directly to the main program
+            #    when finished; execution never reaches the routing below.
+            if not os.path.exists(checker._first_run_flag_path()):
+                with TimeIt("首次运行-交互配置"):
+                    checker._first_time_setup_wizard()
+                with TimeIt("首次运行-强制环境检测"):
+                    checker.first_run_forced_check()
+                # first_run_forced_check() calls jump_to_main_immediately()
+                # internally and never returns; this line is unreachable.
+                return
+            # ────────────────────────────────────────────────────────────
             
             if args.clear_cache:
                 with TimeIt("清除缓存"):

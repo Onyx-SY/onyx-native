@@ -89,7 +89,7 @@ class AsyncManScanner:
     
     def _load_progress(self) -> Dict:
         """加载扫描进度"""
-        if os.path.exists(SCAN_PROGRESS_PATH):
+        if os.path.exists(SCAN_PROGRESS_PATH) and os.path.getsize(SCAN_PROGRESS_PATH) > 0:
             try:
                 with open(SCAN_PROGRESS_PATH, 'r', encoding='utf-8') as f:
                     return json.load(f)

@@ -5451,14 +5451,10 @@ def handle_ai(
             plan_text.strip()
         )
 
-        if has_pending and interaction_count < 5 and not was_interrupted:
-            # 有待执行项 → 自动继续下一轮（最多连续 5 轮防止死循环）
+        if has_pending and not was_interrupted:
+            # 有待执行项 → 自动继续下一轮
             # 但如果被 ESC 中断过，不自动循环，把控制权交还给用户
             continue_asking = True
-        elif has_pending:
-            # 超过 5 轮仍在循环 → 强制停止
-            console.print(_mcp_t("⚠️ 已达到最大交互轮数，自动停止", "⚠️ Max interaction rounds reached, stopping"), style="bold yellow")
-            continue_asking = False
         elif _in_repl:
             # REPL 模式 → 直接退出，由外层 REPL 接管
             continue_asking = False

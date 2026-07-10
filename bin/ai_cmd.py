@@ -80,10 +80,11 @@ def _load_ai_models() -> dict:
             "name": "深度求索DeepSeek",
             "api_url": "https://api.deepseek.com/v1/chat/completions",
             "stream_format": "openai",
-            "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+            "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
             "default_model": "deepseek-v4-flash",
             "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
-            "model_params": {"deepseek-reasoner": {"max_tokens": 8192}},
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
         },
         "openai": {
             "name": "OpenAI",
@@ -1912,6 +1913,12 @@ Onyx Mode: {onyx_mode}
             payload["temperature"] = p["temperature"]
         if p.get("top_p") is not None:
             payload["top_p"] = p["top_p"]
+
+    # DeepSeek thinking mode (2026 API): controlled by "thinking" + "reasoning_effort"
+    if plat_info.get("thinking"):
+        payload["thinking"] = plat_info["thinking"]
+    if plat_info.get("reasoning_effort"):
+        payload["reasoning_effort"] = plat_info["reasoning_effort"]
 
     api_url = plat_info["api_url"]
     stream_fmt = plat_info["stream_format"]

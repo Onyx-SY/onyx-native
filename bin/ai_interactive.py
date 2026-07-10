@@ -32,6 +32,7 @@ _SLASH_COMMANDS_CN: Dict[str, str] = {
     "/exit":   "退出 AI 对话，返回 shell",
     "/quit":   "同 /exit",
     "/clear":  "清屏",
+    "/model":  "查看/切换 AI 模型",
     "/key":    "查看/更换 API 密钥",
     "/chat":   "管理聊天记忆 (list / switch <name> / new <name>)",
     "/mcp":    "MCP 服务器管理 (list / install <name> / remove <name>)",
@@ -42,6 +43,7 @@ _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/exit":   "Exit AI mode, return to shell",
     "/quit":   "Same as /exit",
     "/clear":  "Clear screen",
+    "/model":  "View/switch AI model",
     "/key":    "View/change API key",
     "/chat":   "Manage chat memory (list / switch <name> / new <name>)",
     "/mcp":    "MCP server management (list / install <name> / remove <name>)",
@@ -70,6 +72,12 @@ _TEXTS = {
         "key_read_fail": "[red]读取密钥失败[/]",
         "mcp_usage": "用法: /mcp list | install <name> | remove <name>",
         "chat_usage": "用法: /chat list | switch <name> | new <name>",
+        "model_usage": "用法: /model — 列出可用模型并切换",
+        "current_model": "当前: [bold]{platform}[/] — {model}",
+        "model_list_title": "可用模型（当前平台 {platform}）：",
+        "model_select_prompt": "输入序号切换模型 (直接回车取消): ",
+        "model_switched": "[green]✅ 已切换到 {model}[/]",
+        "model_cancelled": "已取消",
         "press_esc": "[dim]按 /exit 退出 AI 模式[/]",
         "interrupted": "[dim]已中断[/]",
         "esc_marked": "已标记，AI 本轮完成后会询问你",
@@ -97,6 +105,12 @@ _TEXTS = {
         "key_read_fail": "[red]Failed to read key[/]",
         "mcp_usage": "Usage: /mcp list | install <name> | remove <name>",
         "chat_usage": "Usage: /chat list | switch <name> | new <name>",
+        "model_usage": "Usage: /model — list available models and switch",
+        "current_model": "Current: [bold]{platform}[/] — {model}",
+        "model_list_title": "Available models (platform: {platform}):",
+        "model_select_prompt": "Enter number to switch (Enter to cancel): ",
+        "model_switched": "[green]✅ Switched to {model}[/]",
+        "model_cancelled": "Cancelled",
         "press_esc": "[dim]Type /exit to leave AI mode[/]",
         "interrupted": "[dim]Interrupted[/]",
     },
@@ -213,6 +227,53 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         choice = input(_t("change_key", lang)).strip().lower()
         if choice == "y":
             _setup_key_conf_interactive(lang)
+        return True
+
+    elif cmd == "/model":
+        from bin.ai_cmd import load_key_conf, save_key_conf, _SUPPORTED_PLATFORMS
+        import json as _json
+        conf = load_key_conf()
+        if not conf:
+            console.print(f"[yellow]{_t('no_key', lang)}[/]")
+            return True
+        platform = conf.get("platform", "deepseek")
+        current_model = conf.get("model", "")
+        api_url = conf.get("api_url", "")
+        is_custom = (platform == "custom")
+        plat_name = "Custom" if is_custom else _SUPPORTED_PLATFORMS.get(platform, {}).get("name", platform)
+        console.print(_t("current_model", lang, platform=plat_name, model=current_model or "?"))
+        # Build model list
+        if is_custom:
+            models = [current_model] if current_model else ["gpt-4"]
+        else:
+            models = _SUPPORTED_PLATFORMS.get(platform, {}).get("models", [])
+        if not models:
+            console.print("[yellow]No models available[/]")
+            return True
+        console.print(_t("model_list_title", lang, platform=plat_name))
+        for i, m in enumerate(models, 1):
+            marker = " ←" if m == current_model else ""
+            console.print(f"  [{i}] {m}{marker}")
+        try:
+            choice = input(_t("model_select_prompt", lang)).strip()
+            if not choice:
+                console.print(f"[dim]{_t('model_cancelled', lang)}[/]")
+                return True
+            idx = int(choice) - 1
+            if 0 <= idx < len(models):
+                new_model = models[idx]
+                conf["model"] = new_model
+                # Preserve existing fields: api_key, api_url, params, platform
+                key_conf_path = os.path.join(ctx["user_home_dir"], ".config", "onyx", "ai", "key.conf")
+                os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
+                with open(key_conf_path, "w", encoding="utf-8") as f:
+                    _json.dump(conf, f, ensure_ascii=False, indent=2)
+                os.chmod(key_conf_path, 0o600)
+                console.print(_t("model_switched", lang, model=new_model))
+            else:
+                console.print(f"[yellow]Invalid selection[/]")
+        except (ValueError, KeyboardInterrupt, EOFError):
+            console.print(f"[dim]{_t('model_cancelled', lang)}[/]")
         return True
 
     elif cmd == "/chat":

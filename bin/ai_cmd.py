@@ -77,12 +77,13 @@ def _load_ai_models() -> dict:
     # ── Hardcoded fallback (kept in sync with models.json) ──
     return {
         "deepseek": {
-            "name": "DeepSeek",
+            "name": "深度求索DeepSeek",
             "api_url": "https://api.deepseek.com/v1/chat/completions",
             "stream_format": "openai",
             "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
             "default_model": "deepseek-v4-flash",
-            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
+            "model_params": {"deepseek-reasoner": {"max_tokens": 8192}},
         },
         "openai": {
             "name": "OpenAI",
@@ -1878,9 +1879,10 @@ Onyx Mode: {onyx_mode}
     else:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    # ── 合并参数（配置覆盖默认值）──
-    default_params = plat_info.get("params", {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096})
-    p = {**default_params, **user_params}
+    # ── 合并参数（默认 → 模型覆盖 → 用户覆盖）──
+    default_params = dict(plat_info.get("params", {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096}))
+    model_overrides = plat_info.get("model_params", {}).get(model, {})
+    p = {**default_params, **model_overrides, **user_params}
 
     payload: dict
     if plat_key == "anthropic":
@@ -1902,11 +1904,14 @@ Onyx Mode: {onyx_mode}
         payload = {
             "model": model,
             "messages": messages,
-            "temperature": p.get("temperature", 0.1),
-            "top_p": p.get("top_p", 0.2),
             "stream": True,
             "max_tokens": p.get("max_tokens", 4096),
         }
+        # Some models (e.g. deepseek-reasoner) reject temperature/top_p
+        if p.get("temperature") is not None:
+            payload["temperature"] = p["temperature"]
+        if p.get("top_p") is not None:
+            payload["top_p"] = p["top_p"]
 
     api_url = plat_info["api_url"]
     stream_fmt = plat_info["stream_format"]
@@ -1958,6 +1963,12 @@ Onyx Mode: {onyx_mode}
                         delta = choices[0].get("delta", {})
                         if not isinstance(delta, dict):
                             continue
+                        # DeepSeek reasoner: capture thinking tokens
+                        reasoning = delta.get("reasoning_content")
+                        if reasoning:
+                            full_content += reasoning
+                            if on_content:
+                                on_content(reasoning)
                         content = delta.get("content")
                         if content:
                             full_content += content

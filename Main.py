@@ -540,6 +540,47 @@ class BilingualManager:
         return self.text["check_steps"]
 
 
+def _load_ai_models() -> dict:
+    """Load AI platform configs from etc/ai/models.json.
+
+    Returns a dict keyed by platform id.  When the JSON file is missing or
+    unparseable a hardcoded fallback is used so the app never breaks.
+    """
+    models_path = os.path.join(ROOT_DIR, "onyx", "etc", "ai", "models.json")
+    try:
+        with open(models_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Strip meta keys (anything without an api_url)
+        return {k: v for k, v in data.items() if isinstance(v, dict) and "api_url" in v}
+    except Exception:
+        pass
+    # ── Hardcoded fallback (kept in sync with models.json) ──
+    return {
+        "deepseek": {
+            "name": "深度求索DeepSeek",
+            "api_url": "https://api.deepseek.com/v1/chat/completions",
+            "default_model": "deepseek-v4-flash",
+            "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
+            "model_params": {"deepseek-reasoner": {"max_tokens": 8192}},
+        },
+        "openai": {
+            "name": "OpenAI",
+            "api_url": "https://api.openai.com/v1/chat/completions",
+            "default_model": "gpt-5.5-instant",
+            "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro"],
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
+        },
+        "anthropic": {
+            "name": "Anthropic",
+            "api_url": "https://api.anthropic.com/v1/messages",
+            "default_model": "claude-sonnet-4-6",
+            "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
+            "params": {"max_tokens": 4096},
+        },
+    }
+
+
 class UltraFastEnvironmentChecker:
     """极致极速环境检查器 - 支持永久缓存、秒开启动和登录模式"""
     
@@ -1553,29 +1594,7 @@ class UltraFastEnvironmentChecker:
         except Exception as e:
             log_print(f"[FirstRun] Failed to save AI config: {e}", is_error=True)
 
-    _AI_PLATFORMS = {
-        "deepseek": {
-            "name": "DeepSeek",
-            "api_url": "https://api.deepseek.com/v1/chat/completions",
-            "default_model": "deepseek-v4-flash",
-            "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
-            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
-        },
-        "openai": {
-            "name": "OpenAI",
-            "api_url": "https://api.openai.com/v1/chat/completions",
-            "default_model": "gpt-5.5-instant",
-            "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro"],
-            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
-        },
-        "anthropic": {
-            "name": "Anthropic",
-            "api_url": "https://api.anthropic.com/v1/messages",
-            "default_model": "claude-sonnet-4-6",
-            "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
-            "params": {"max_tokens": 4096},
-        },
-    }
+    _AI_PLATFORMS = _load_ai_models()
 
     def _first_time_setup_wizard(self):
         """First-time interactive setup: language → AI config.

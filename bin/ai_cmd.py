@@ -60,33 +60,49 @@ SERVER_URL_FILE = os.path.join(ROOT_DIR, "onyx", "etc", ".url")
 AI_KEY = None
 SERVER_URL = None
 
-# ──────────────────── key.conf 配置（AI 直连平台）────────────────────
-_SUPPORTED_PLATFORMS = {
-    "deepseek": {
-        "name": "DeepSeek",
-        "api_url": "https://api.deepseek.com/v1/chat/completions",
-        "stream_format": "openai",
-        "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
-        "default_model": "deepseek-v4-flash",
-        "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
-    },
-    "openai": {
-        "name": "OpenAI",
-        "api_url": "https://api.openai.com/v1/chat/completions",
-        "stream_format": "openai",
-        "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro"],
-        "default_model": "gpt-5.5-instant",
-        "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
-    },
-    "anthropic": {
-        "name": "Anthropic",
-        "api_url": "https://api.anthropic.com/v1/messages",
-        "stream_format": "anthropic",
-        "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
-        "default_model": "claude-sonnet-4-6",
-        "params": {"max_tokens": 4096},
-    },
-}
+# ──────────────────── AI 模型列表（从 etc/ai/models.json 加载）───────
+def _load_ai_models() -> dict:
+    """Load AI platform configs from etc/ai/models.json.
+    
+    Returns a dict keyed by platform id.  Falls back to a hardcoded
+    copy when the JSON file is missing or unparseable.
+    """
+    models_path = os.path.join(ROOT_DIR, "onyx", "etc", "ai", "models.json")
+    try:
+        with open(models_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if isinstance(v, dict) and "api_url" in v}
+    except Exception:
+        pass
+    # ── Hardcoded fallback (kept in sync with models.json) ──
+    return {
+        "deepseek": {
+            "name": "DeepSeek",
+            "api_url": "https://api.deepseek.com/v1/chat/completions",
+            "stream_format": "openai",
+            "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+            "default_model": "deepseek-v4-flash",
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
+        },
+        "openai": {
+            "name": "OpenAI",
+            "api_url": "https://api.openai.com/v1/chat/completions",
+            "stream_format": "openai",
+            "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro"],
+            "default_model": "gpt-5.5-instant",
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
+        },
+        "anthropic": {
+            "name": "Anthropic",
+            "api_url": "https://api.anthropic.com/v1/messages",
+            "stream_format": "anthropic",
+            "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
+            "default_model": "claude-sonnet-4-6",
+            "params": {"max_tokens": 4096},
+        },
+    }
+
+_SUPPORTED_PLATFORMS = _load_ai_models()
 
 def load_key_conf() -> dict:
     """读取 key.conf，返回 {platform, api_key, model, params} 或空 dict"""
@@ -4978,9 +4994,9 @@ def handle_ai(
         if _prompt_from_result.strip():
             _write_onyx_ai_prompt(_prompt_from_result, user_home_dir)
 
-        if ai_result.get("_interrupted"):
-            continue_asking = False
-            continue
+        was_interrupted = ai_result.get("_interrupted", False)
+        if was_interrupted:
+            continue_asking = False  # don't auto-loop, but still process any commands below
         
         has_error = "error" in ai_result and ai_result["error"]
         has_txt = ai_result.get("txt", "").strip() if ai_result.get("txt") else False
@@ -5435,8 +5451,9 @@ def handle_ai(
             plan_text.strip()
         )
 
-        if has_pending and interaction_count < 5:
+        if has_pending and interaction_count < 5 and not was_interrupted:
             # 有待执行项 → 自动继续下一轮（最多连续 5 轮防止死循环）
+            # 但如果被 ESC 中断过，不自动循环，把控制权交还给用户
             continue_asking = True
         elif has_pending:
             # 超过 5 轮仍在循环 → 强制停止

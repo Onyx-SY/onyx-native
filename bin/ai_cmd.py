@@ -2554,8 +2554,16 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
     i = 0
     while i < len(ai_args):
         arg = ai_args[i]
+        # ── -model 子命令 ──
+        if arg == "-model":
+            model_name = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else None
+            if model_name:
+                i += 2
+            else:
+                i += 1
+            return ("model_command", model_name or "", [], auto_exec, new_key, None, None, mode, times, use_tui)
         # ── -mcp 子命令 ──
-        if arg in ("-mcp", "mcp"):
+        elif arg in ("-mcp", "mcp"):
             if i + 1 >= len(ai_args):
                 return ("mcp_command", "list", [], auto_exec, new_key, None, None, mode, times, use_tui)
             mcp_sub = ai_args[i + 1].lower()
@@ -4414,6 +4422,39 @@ def handle_ai(
     if content_type == "mcp_command":
         # ai -mcp <install|list|remove> [args]
         handle_mcp_command(content, extra_info if isinstance(extra_info, list) else [])
+        return
+
+    if content_type == "model_command":
+        # ai -model [name] — view or switch model
+        import json as _json
+        conf = load_key_conf()
+        if not conf:
+            console.print("[yellow]No API key configured. Run 'ai -key <key>' first.[/]")
+            return
+        platform = conf.get("platform", "deepseek")
+        current_model = conf.get("model", "")
+        is_custom = (platform == "custom")
+        plat_name = "Custom" if is_custom else _SUPPORTED_PLATFORMS.get(platform, {}).get("name", platform)
+        if not content:
+            # List current model
+            console.print(f"[dim]Current: {plat_name} — {current_model or '?'}[/]")
+            if not is_custom:
+                models = _SUPPORTED_PLATFORMS.get(platform, {}).get("models", [])
+                console.print("Available models:")
+                for m in models:
+                    marker = "  ←" if m == current_model else ""
+                    console.print(f"  {m}{marker}")
+                console.print("\nUsage: ai -model <name>")
+            return
+        # Switch model
+        new_model = content.strip()
+        conf["model"] = new_model
+        key_conf_path = os.path.join(user_home_dir, ".config", "onyx", "ai", "key.conf")
+        os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
+        with open(key_conf_path, "w", encoding="utf-8") as f:
+            _json.dump(conf, f, ensure_ascii=False, indent=2)
+        os.chmod(key_conf_path, 0o600)
+        console.print(f"[green]✅ Switched to model: {new_model}[/]")
         return
 
     if content_type == "chat_only":

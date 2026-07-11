@@ -4,8 +4,8 @@
         "options": ["-m", "-t"]
     },
     "ai": {
-        "subcommands": ["mcp", "tui", "plan", "normal", "switch", "list", "new", "install", "remove"],
-        "options": ["-m", "-cmd", "-t", "-f", "-c", "-key", "--debug", "-tui", "-mcp"]
+        "subcommands": ["mcp", "tui", "plan", "normal", "switch", "list", "new", "install", "remove", "model"],
+        "options": ["-m", "-cmd", "-t", "-f", "-c", "-key", "--debug", "-tui", "-mcp", "-model"]
     },
     "autocmd": {
         "subcommands": ["add", "remove", "list", "enable", "disable", "clear"],

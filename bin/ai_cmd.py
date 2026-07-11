@@ -1972,6 +1972,7 @@ Onyx Mode: {onyx_mode}
             debug_lines = []
             _usage = {}
             _tool_calls_acc: Dict[int, Dict] = {}
+            _reasoning_display: List[str] = []
 
             if stream_fmt == "openai":
                 # DeepSeek / OpenAI SSE: data: {"choices":[{"delta":{"content":"..."}}]}
@@ -2000,12 +2001,13 @@ Onyx Mode: {onyx_mode}
                         delta = choices[0].get("delta", {})
                         if not isinstance(delta, dict):
                             continue
-                        # DeepSeek reasoner: capture thinking tokens
+                        # DeepSeek reasoner: separate thinking tokens from content
                         reasoning = delta.get("reasoning_content")
                         if reasoning:
-                            full_content += reasoning
-                            if on_content:
-                                on_content(reasoning)
+                            # Collect separately — do NOT mix into full_content or on_content,
+                            # since the structured parser (parse_sse_structured_response) and
+                            # the live display panel expect clean content with [TXT] markers.
+                            _reasoning_display.append(reasoning)
                         content = delta.get("content")
                         if content:
                             full_content += content
@@ -2117,6 +2119,9 @@ Onyx Mode: {onyx_mode}
             # Attach token usage stats (from stream_options include_usage)
             if _usage:
                 result["_usage"] = _usage
+            # Attach reasoning/thinking content (separate from structured response)
+            if _reasoning_display:
+                result["_reasoning"] = "".join(_reasoning_display)
             result["_debug"] = "\n".join(debug_lines) if debug_lines else ""
             return result
 

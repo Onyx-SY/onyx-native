@@ -1721,7 +1721,8 @@ def _parse_legacy_shell(lines: List[str], start_i: int) -> Dict[str, Any]:
 def call_ai_api_sse(question: str, type: Optional[str] = None, new_key: Optional[str] = None, 
                     debug_mode: bool = False, onyx_module=None, mode: str = "normal", times: int = 1,
                     ai_tools_prompt: str = "", on_content: Optional[Callable[[str], None]] = None,
-                    user_home_dir: str = None) -> Dict[str, Any]:
+                    user_home_dir: str = None,
+                    tools: Optional[List[Dict]] = None) -> Dict[str, Any]:
     lang = get_current_lang()
     prompts = get_prompt_text(lang)
 
@@ -1923,6 +1924,10 @@ Onyx Mode: {onyx_mode}
     if plat_info.get("reasoning_effort"):
         payload["reasoning_effort"] = plat_info["reasoning_effort"]
 
+    # Native function calling (OpenAI-compatible tools array)
+    if tools:
+        payload["tools"] = tools
+
     # Request token usage stats in the final SSE chunk
     payload["stream_options"] = {"include_usage": True}
 
@@ -1966,6 +1971,7 @@ Onyx Mode: {onyx_mode}
             full_content = ""
             debug_lines = []
             _usage = {}
+            _tool_calls_acc: Dict[int, Dict] = {}
 
             if stream_fmt == "openai":
                 # DeepSeek / OpenAI SSE: data: {"choices":[{"delta":{"content":"..."}}]}
@@ -2005,6 +2011,25 @@ Onyx Mode: {onyx_mode}
                             full_content += content
                             if on_content:
                                 on_content(content)
+                        # Native tool_calls from function calling
+                        tc_delta = delta.get("tool_calls")
+                        if tc_delta and isinstance(tc_delta, list):
+                            for tc_chunk in tc_delta:
+                                if not isinstance(tc_chunk, dict):
+                                    continue
+                                tc_idx = tc_chunk.get("index", 0)
+                                if tc_idx not in _tool_calls_acc:
+                                    _tool_calls_acc[tc_idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                                tcc = _tool_calls_acc[tc_idx]
+                                if tc_chunk.get("id"):
+                                    tcc["id"] = tc_chunk["id"]
+                                if tc_chunk.get("type"):
+                                    tcc["type"] = tc_chunk["type"]
+                                func_delta = tc_chunk.get("function", {})
+                                if func_delta.get("name"):
+                                    tcc["function"]["name"] = func_delta["name"]
+                                if func_delta.get("arguments"):
+                                    tcc["function"]["arguments"] += func_delta["arguments"]
                     except json.JSONDecodeError:
                         continue
             else:
@@ -2044,6 +2069,25 @@ Onyx Mode: {onyx_mode}
                 )
 
             result = parse_sse_structured_response(full_content)
+
+            # Merge native tool_calls from function calling with text-parsed ones
+            if _tool_calls_acc:
+                native_tools = []
+                for idx in sorted(_tool_calls_acc.keys()):
+                    tc = _tool_calls_acc[idx]
+                    try:
+                        args = json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {}
+                    except (json.JSONDecodeError, ValueError):
+                        args = tc["function"]["arguments"]
+                    native_tools.append({
+                        "name": f"mcp__{plat_key}__{tc['function']['name']}",
+                        "params_str": json.dumps(args) if isinstance(args, dict) else str(args),
+                        "_native": True,
+                    })
+                existing = result.get("tool_calls", [])
+                if not isinstance(existing, list):
+                    existing = []
+                result["tool_calls"] = existing + native_tools
 
             # ── --debug：原始响应写入 .ai_s/deb/ ──
             if debug_mode:
@@ -3739,6 +3783,41 @@ def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> 
     return result
 
 
+def build_native_tools(user_home_dir: str = None) -> List[Dict]:
+    """Build OpenAI-compatible tools array from MCP tool registry.
+
+    Returns a list of dicts in the format expected by the OpenAI/DeepSeek
+    API 'tools' parameter, or an empty list when no MCP tools are available.
+    """
+    _mcp_debug_enter("build_native_tools")
+    mcp_tools = get_mcp_tools(user_home_dir=user_home_dir)
+    if not mcp_tools:
+        _mcp_debug_exit("build_native_tools", ok=False, detail="no tools")
+        return []
+
+    native = []
+    for tool in mcp_tools:
+        raw_name = tool.get("name", "")
+        if not raw_name:
+            continue
+        # Skip shell/bash tools that shouldn't be called natively
+        if raw_name in ("shell", "bash", "sh", "zsh", "pwsh"):
+            continue
+        schema = tool.get("inputSchema", {})
+        native.append({
+            "type": "function",
+            "function": {
+                "name": raw_name,
+                "description": tool.get("description", ""),
+                "parameters": schema,
+            },
+        })
+
+    _mcp_debug_exit("build_native_tools", ok=len(native) > 0,
+                    detail=f"{len(native)} native tools")
+    return native
+
+
 def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
                      user_mode: str = "low", user_home_dir: str = None,
                      path_validator: Callable = None) -> Tuple[bool, str]:
@@ -4176,6 +4255,7 @@ def handle_ai(
         if registry.tool_count() > 0 and registry.has_server("filesystem"):
             _mcp_debug("路径1: Registry 命中 → 直接使用")
             ai_tools_prompt = build_mcp_tools_prompt(current_lang, user_home_dir)
+            native_tools = build_native_tools(user_home_dir)
 
         # 2. 次优：Schema 缓存命中 → 直接注册占位符，跳过握手（冷启动加速）
         elif not MCP_TOOLS_CACHE.get("filesystem"):
@@ -4209,11 +4289,15 @@ def handle_ai(
             _mcp_debug("路径4: 旧 MCP_TOOLS_CACHE 命中")
             ai_tools_prompt = build_mcp_tools_prompt(current_lang, user_home_dir)
 
+        # Build native tools array for function-calling API (from whatever path populated the registry)
+        native_tools = build_native_tools(user_home_dir)
+
         # 后台健康检查（非阻塞）
         _schedule_mcp_health_check(user_home_dir)
     else:
         _mcp_debug("MCP disabled, skipping")
-        ai_tools_prompt = ""  # MCP 已禁用，不给 AI 暴露工具
+        ai_tools_prompt = ""
+        native_tools = []
     _mcp_debug(f"── MCP 初始化完成, tools_prompt 长度={len(ai_tools_prompt)} ──")
     
     # ANSI 转义序列正则（颜色码、光标控制等）
@@ -4988,6 +5072,7 @@ def handle_ai(
                     ai_tools_prompt=ai_tools_prompt,
                     on_content=on_stream_content,
                     user_home_dir=user_home_dir,
+                    tools=native_tools,
                     )
                     _mcp_debug(f"call_ai_api_sse 返回: {'interrupted' if (api_raw_result or {}).get('_interrupted') else 'OK' if api_raw_result else 'None'}")
                 except Exception as _api_exc:

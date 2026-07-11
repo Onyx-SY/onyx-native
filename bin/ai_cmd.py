@@ -1921,8 +1921,10 @@ Onyx Mode: {onyx_mode}
     # DeepSeek thinking mode (2026 API): controlled by "thinking" + "reasoning_effort"
     if plat_info.get("thinking"):
         payload["thinking"] = plat_info["thinking"]
-    if plat_info.get("reasoning_effort"):
-        payload["reasoning_effort"] = plat_info["reasoning_effort"]
+    # reasoning_effort: prefer user override from key.conf params, fall back to platform default
+    _effort = user_params.get("reasoning_effort") or plat_info.get("reasoning_effort")
+    if _effort:
+        payload["reasoning_effort"] = _effort
 
     # Native function calling (OpenAI-compatible tools array)
     if tools:
@@ -2562,6 +2564,14 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
             else:
                 i += 1
             return ("model_command", model_name or "", [], auto_exec, new_key, None, None, mode, times, use_tui)
+        # ── -effort 推理强度 ──
+        elif arg == "-effort":
+            effort_val = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else None
+            if effort_val:
+                i += 2
+            else:
+                i += 1
+            return ("effort_command", effort_val or "", [], auto_exec, new_key, None, None, mode, times, use_tui)
         # ── -mcp 子命令 ──
         elif arg in ("-mcp", "mcp"):
             if i + 1 >= len(ai_args):
@@ -4436,15 +4446,16 @@ def handle_ai(
         is_custom = (platform == "custom")
         plat_name = "Custom" if is_custom else _SUPPORTED_PLATFORMS.get(platform, {}).get("name", platform)
         if not content:
-            # List current model
-            console.print(f"[dim]Current: {plat_name} — {current_model or '?'}[/]")
+            # List current model + effort
+            effort = conf.get("params", {}).get("reasoning_effort", "") or _SUPPORTED_PLATFORMS.get(platform, {}).get("reasoning_effort", "")
+            console.print(f"[dim]Platform: {plat_name}  Model: {current_model or '?'}  Effort: {effort or '—'}[/]")
             if not is_custom:
                 models = _SUPPORTED_PLATFORMS.get(platform, {}).get("models", [])
                 console.print("Available models:")
                 for m in models:
                     marker = "  ←" if m == current_model else ""
                     console.print(f"  {m}{marker}")
-                console.print("\nUsage: ai -model <name>")
+                console.print("\nUsage: ai -model <name>\n       ai -effort high|max")
             return
         # Switch model
         new_model = content.strip()
@@ -4455,6 +4466,36 @@ def handle_ai(
             _json.dump(conf, f, ensure_ascii=False, indent=2)
         os.chmod(key_conf_path, 0o600)
         console.print(f"[green]✅ Switched to model: {new_model}[/]")
+        return
+
+    if content_type == "effort_command":
+        # ai -effort [high|max] — view or set reasoning effort
+        import json as _json
+        conf = load_key_conf()
+        if not conf:
+            console.print("[yellow]No API key configured.[/]")
+            return
+        if not content:
+            current_effort = conf.get("params", {}).get("reasoning_effort", "") or _SUPPORTED_PLATFORMS.get(conf.get("platform", ""), {}).get("reasoning_effort", "high")
+            console.print(f"[dim]Current reasoning effort: {current_effort}[/]")
+            console.print("Available: high, max")
+            console.print("Usage: ai -effort high  |  ai -effort max")
+            return
+        effort_val = content.strip().lower()
+        if effort_val not in ("high", "max"):
+            console.print("[yellow]Invalid effort. Use: high or max[/]")
+            return
+        params = conf.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+        params["reasoning_effort"] = effort_val
+        conf["params"] = params
+        key_conf_path = os.path.join(user_home_dir, ".config", "onyx", "ai", "key.conf")
+        os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
+        with open(key_conf_path, "w", encoding="utf-8") as f:
+            _json.dump(conf, f, ensure_ascii=False, indent=2)
+        os.chmod(key_conf_path, 0o600)
+        console.print(f"[green]✅ Reasoning effort set to: {effort_val}[/]")
         return
 
     if content_type == "chat_only":

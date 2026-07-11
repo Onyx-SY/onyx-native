@@ -14,23 +14,23 @@
     "name": "OpenAI",
     "api_url": "https://api.openai.com/v1/chat/completions",
     "stream_format": "openai",
-    "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro"],
+    "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
     "default_model": "gpt-5.5-instant",
-    "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096}
+    "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 131072}
   },
   "anthropic": {
     "name": "Anthropic",
     "api_url": "https://api.anthropic.com/v1/messages",
     "stream_format": "anthropic",
-    "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
+    "models": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"],
     "default_model": "claude-sonnet-4-6",
-    "params": {"max_tokens": 4096}
+    "params": {"max_tokens": 65536}
   },
   "kimi": {
     "name": "月之暗面Kimi",
     "api_url": "https://api.moonshot.cn/v1/chat/completions",
     "stream_format": "openai",
-    "models": ["moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k", "kimi-k2.6"],
+    "models": ["moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k", "kimi-k2.6", "kimi-k2.7"],
     "default_model": "moonshot-v1-128k",
     "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192}
   },
@@ -38,7 +38,7 @@
     "name": "智谱GLM",
     "api_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     "stream_format": "openai",
-    "models": ["glm-5", "glm-4-plus", "glm-4-air", "glm-4-flash", "glm-4-long"],
+    "models": ["glm-4-long", "glm-4-flash", "glm-4-air", "glm-4-plus", "glm-5", "glm-5.3"],
     "default_model": "glm-4-air",
     "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192}
   },
@@ -46,7 +46,7 @@
     "name": "通义千问qwen",
     "api_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
     "stream_format": "openai",
-    "models": ["qwen3-max", "qwen3.6-plus", "qwen3.5-plus", "qwen-turbo", "qwen-long"],
+    "models": ["qwen-long", "qwen-turbo", "qwen3.5-plus", "qwen3.6-plus", "qwen3-max", "qwen3.7-max"],
     "default_model": "qwen3.5-plus",
     "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192}
   }

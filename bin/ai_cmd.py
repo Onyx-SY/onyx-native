@@ -1874,6 +1874,9 @@ Onyx Mode: {onyx_mode}
     headers = {
         "Content-Type": "application/json",
     }
+    # Common SSE header — signals to the server that we expect event-stream
+    headers["Accept"] = "text/event-stream"
+
     if plat_key == "anthropic":
         headers["x-api-key"] = api_key
         headers["anthropic-version"] = "2023-06-01"
@@ -1920,6 +1923,9 @@ Onyx Mode: {onyx_mode}
     if plat_info.get("reasoning_effort"):
         payload["reasoning_effort"] = plat_info["reasoning_effort"]
 
+    # Request token usage stats in the final SSE chunk
+    payload["stream_options"] = {"include_usage": True}
+
     api_url = plat_info["api_url"]
     stream_fmt = plat_info["stream_format"]
 
@@ -1941,13 +1947,25 @@ Onyx Mode: {onyx_mode}
 
             if response.status_code == 401:
                 return {"error": "API key 无效 (401)", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            if response.status_code == 402:
+                return {"error": "⚠️ API 余额不足 (402)，请充值后重试 | Insufficient balance, please top up", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            if response.status_code == 422:
+                detail = ""
+                try:
+                    detail = f": {response.json().get('message', response.text[:200])}"
+                except Exception:
+                    detail = f": {response.text[:200]}"
+                return {"error": f"请求参数错误 (422){detail}", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code == 429:
-                return {"error": "请求过于频繁 (429)", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+                return {"error": "请求过于频繁 (429)，请稍后再试 | Rate limit reached, please retry later", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            if response.status_code in (500, 502, 503):
+                return {"error": f"AI 服务暂时不可用 ({response.status_code})，正在重试…", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             response.raise_for_status()
 
             response.encoding = 'utf-8'
             full_content = ""
             debug_lines = []
+            _usage = {}
 
             if stream_fmt == "openai":
                 # DeepSeek / OpenAI SSE: data: {"choices":[{"delta":{"content":"..."}}]}
@@ -1963,6 +1981,12 @@ Onyx Mode: {onyx_mode}
                     try:
                         chunk = json.loads(data_str)
                         if not isinstance(chunk, dict):
+                            continue
+                        # Final chunk with usage stats (empty choices + usage field)
+                        if not chunk.get("choices"):
+                            usage_info = chunk.get("usage")
+                            if usage_info:
+                                _usage = usage_info
                             continue
                         choices = chunk.get("choices", [])
                         if not choices or not isinstance(choices[0], dict):
@@ -2046,6 +2070,9 @@ Onyx Mode: {onyx_mode}
                 debug_lines.append("── Parsed ──")
                 debug_lines.append(json.dumps(result, ensure_ascii=False, indent=2)[:2000])
 
+            # Attach token usage stats (from stream_options include_usage)
+            if _usage:
+                result["_usage"] = _usage
             result["_debug"] = "\n".join(debug_lines) if debug_lines else ""
             return result
 
@@ -5153,6 +5180,20 @@ def handle_ai(
         
         if analysis_content:
             console.print(render_analysis_panel(analysis_content))
+        
+        # ── Token usage stats (from stream_options.include_usage) ──
+        _usage_info = ai_result.get("_usage")
+        if _usage_info:
+            _total = _usage_info.get("total_tokens", 0)
+            _prompt = _usage_info.get("prompt_tokens", 0)
+            _completion = _usage_info.get("completion_tokens", 0)
+            _cache_hit = _usage_info.get("prompt_cache_hit_tokens", 0)
+            _cache_miss = _usage_info.get("prompt_cache_miss_tokens", 0)
+            parts = [f"⚡ {_total} tokens"]
+            if _cache_hit:
+                saved_pct = _cache_hit / (_cache_hit + _cache_miss) * 100 if (_cache_hit + _cache_miss) else 0
+                parts.append(f"💰 cache {saved_pct:.0f}% hit")
+            console.print(f"  [dim]{' · '.join(parts)}[/]")
         
         # ---- Plan 确认流程 ----
         if plan_text and plan_text.strip():

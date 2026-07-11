@@ -4,8 +4,7 @@ __pycache__/
 .DS_Store
 *.bak
 
-# AI Plugin system — keep *.key for safety but force-add key.key
+# AI Plugin system — ai_plugin/ is local-only (C sources + private key)
 *.key
 ai_plugin/
-private.key
 *.lic

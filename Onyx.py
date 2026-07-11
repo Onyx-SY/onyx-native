@@ -2499,7 +2499,6 @@ BUILTIN_COMMANDS: Dict[str, Callable[[List[str], str], None]] = {
     "exit": handle_exit,
     "run": handle_run,
     "refresh": lambda cmd_parts, req_id: executor.submit(build_tool_index, req_id) if executor else None,
-    "export": handle_export,
     
     "activite": handle_activite,
     "manage": _lazy_manage,

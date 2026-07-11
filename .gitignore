@@ -3,4 +3,9 @@ __pycache__/
 *.pyo
 .DS_Store
 *.bak
+
+# AI Plugin system — keep *.key for safety but force-add key.key
 *.key
+ai_plugin/
+private.key
+*.lic

@@ -2572,6 +2572,16 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
             else:
                 i += 1
             return ("effort_command", effort_val or "", [], auto_exec, new_key, None, None, mode, times, use_tui)
+        # ── -plugin 子命令 ──
+        elif arg in ("-plugin", "plugin"):
+            sub = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else "list"
+            extra = []
+            if sub in ("load", "sign", "verify", "compile"):
+                extra = ai_args[i + 2:] if i + 2 < len(ai_args) else []
+                i += len(extra) + 2
+            else:
+                i += 2 if sub != "list" else 1
+            return ("plugin_command", sub, extra, auto_exec, new_key, None, None, mode, times, use_tui)
         # ── -mcp 子命令 ──
         elif arg in ("-mcp", "mcp"):
             if i + 1 >= len(ai_args):
@@ -4496,6 +4506,31 @@ def handle_ai(
             _json.dump(conf, f, ensure_ascii=False, indent=2)
         os.chmod(key_conf_path, 0o600)
         console.print(f"[green]✅ Reasoning effort set to: {effort_val}[/]")
+        return
+
+    if content_type == "plugin_command":
+        # ai -plugin <list|load|sign|verify|compile> [args]
+        sub = content  # "list", "load", "sign", "verify", "compile"
+        args = extra_info if isinstance(extra_info, list) else []
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if sub == "list":
+            import subprocess as _sp
+            _sp.run([sys.executable, os.path.join(root, "plugin_loader.py"), "list"])
+        elif sub == "load" and args:
+            import subprocess as _sp
+            _sp.run([sys.executable, os.path.join(root, "plugin_loader.py"), "load", args[0]])
+        elif sub == "verify" and args:
+            import subprocess as _sp
+            _sp.run([sys.executable, os.path.join(root, "plugin_loader.py"), "verify", args[0]])
+        elif sub == "sign" and args:
+            import subprocess as _sp
+            cmd = [sys.executable, os.path.join(root, "plugin_loader.py"), "sign"] + args
+            _sp.run(cmd)
+        elif sub == "compile" and args:
+            import subprocess as _sp
+            _sp.run([sys.executable, os.path.join(root, "plugin_compile.py"), args[0]])
+        else:
+            console.print("Usage: ai -plugin list | load <name> | verify <name> | sign <name> [ver] | compile <file.c>")
         return
 
     if content_type == "chat_only":

@@ -2572,6 +2572,9 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
             else:
                 i += 1
             return ("effort_command", effort_val or "", [], auto_exec, new_key, None, None, mode, times, use_tui)
+        # ── -mid / -machine-id ──
+        elif arg in ("-mid", "-machine-id"):
+            return ("machine_id_command", "", [], auto_exec, new_key, None, None, mode, times, use_tui)
         # ── -plugin 子命令 ──
         elif arg in ("-plugin", "plugin"):
             sub = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else "list"
@@ -4506,6 +4509,16 @@ def handle_ai(
             _json.dump(conf, f, ensure_ascii=False, indent=2)
         os.chmod(key_conf_path, 0o600)
         console.print(f"[green]✅ Reasoning effort set to: {effort_val}[/]")
+        return
+
+    if content_type == "machine_id_command":
+        # ai -mid / ai -machine-id — show current device fingerprint
+        try:
+            from bin.plugin_loader import get_machine_id
+            mid = get_machine_id()
+            console.print(f"Machine ID: [bold]{mid}[/]")
+        except Exception as e:
+            console.print(f"[red]Failed to get machine ID: {e}[/]")
         return
 
     if content_type == "plugin_command":

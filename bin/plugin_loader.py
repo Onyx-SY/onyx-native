@@ -28,7 +28,21 @@ Usage:
 import os, sys, json, ctypes, hashlib, base64, datetime, subprocess, re
 from typing import Optional, Dict, Any, List, Tuple
 
+# ── Termux 检测 ────────────────────────────────────────────────
+def _is_termux() -> bool:
+    return "termux" in sys.prefix.lower() or os.path.exists("/data/data/com.termux")
+
+
+def _real_user_home() -> str:
+    """获取真实的用户主目录（Termux 下绕过虚拟 HOME）。"""
+    if _is_termux():
+        # Termux 真实家目录是固定的
+        return "/data/data/com.termux/files/home"
+    return os.path.expanduser("~")
+
+
 PLUGIN_DIR = os.path.join(os.path.expanduser("~"), ".ai_onyx_plugin")
+REAL_PLUGIN_DIR = os.path.join(_real_user_home(), ".ai_onyx_plugin")
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PUBLIC_KEY_PATH = os.path.join(PROJECT_DIR, "key.key")
 PRIVATE_KEY_PATH = os.path.join(PROJECT_DIR, "ai_plugin", "private.key")
@@ -172,10 +186,50 @@ def _modname(fp: str) -> str:
     return os.path.splitext(os.path.basename(fp))[0].replace("_lib", "")
 
 
+# ── Termux 同步 ──────────────────────────────────────────────────
+
+def sync_to_termux() -> bool:
+    """在 Termux 环境下，把插件从虚拟 HOME 复制到真实 Termux 家目录。
+
+    Onyx 开了 sandbox 后 HOME 指向虚拟目录，但 Termux 的 C 扩展
+    需要在真实家目录才能被加载。这个函数把整个插件目录同步过去。
+    """
+    if not _is_termux():
+        return False
+    if not os.path.exists(PLUGIN_DIR):
+        return False
+    if os.path.abspath(PLUGIN_DIR) == os.path.abspath(REAL_PLUGIN_DIR):
+        return True  # 已经在真实目录了
+
+    os.makedirs(REAL_PLUGIN_DIR, exist_ok=True)
+    import shutil
+    count = 0
+    for f in os.listdir(PLUGIN_DIR):
+        src = os.path.join(PLUGIN_DIR, f)
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(REAL_PLUGIN_DIR, f)
+        try:
+            shutil.copy2(src, dst)
+            count += 1
+        except Exception:
+            pass
+    if count:
+        print(f"📱 Termux: 已同步 {count} 个文件到 {REAL_PLUGIN_DIR}")
+    return True
+
+
 # ── Public API ─────────────────────────────────────────────────────
 
 def verify(name: str) -> Tuple[bool, str, dict]:
-    """Verify .lic RSA signature + payload + binary hash + expiry."""
+    """Verify .lic RSA signature + payload + binary hash + expiry.
+
+    在 Termux 下自动同步到真实家目录（sandbox 虚拟 HOME 兜底）。
+    """
+    # Termux：确保插件同步到真实目录
+    if _is_termux():
+        sync_to_termux()
+
     fp = _find(name)
     if not fp:
         return False, f"not found: {name}", {}
@@ -286,12 +340,16 @@ def sign(name: str, version: str = "1.0.0", expires: str = "",
 
 
 def list_plugins() -> List[Dict]:
-    if not os.path.isdir(PLUGIN_DIR):
+    # Termux：先同步再列出
+    if _is_termux():
+        sync_to_termux()
+    scan_dir = REAL_PLUGIN_DIR if _is_termux() else PLUGIN_DIR
+    if not os.path.isdir(scan_dir):
         return []
     res = []
-    for f in sorted(os.listdir(PLUGIN_DIR)):
+    for f in sorted(os.listdir(scan_dir)):
         if f.endswith((".so", ".dll", ".dylib")):
-            fp = os.path.join(PLUGIN_DIR, f)
+            fp = os.path.join(scan_dir, f)
             nm = _modname(fp)
             ok, reason, payload = verify(nm)
             res.append({"name": nm, "path": fp, "size": os.path.getsize(fp),

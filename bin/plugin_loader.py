@@ -131,12 +131,14 @@ def _privkey():
 
 
 def _sign(data: bytes, key) -> str:
-    from cryptography.hazmat.primitives import hashes, padding
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
     return base64.b64encode(key.sign(data, padding.PKCS1v15(), hashes.SHA256())).decode()
 
 
 def _verify(data: bytes, sig_b64: str, key) -> bool:
-    from cryptography.hazmat.primitives import hashes, padding
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
     from cryptography.exceptions import InvalidSignature
     try:
         key.verify(base64.b64decode(sig_b64), data, padding.PKCS1v15(), hashes.SHA256())

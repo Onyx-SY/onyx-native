@@ -9,6 +9,7 @@ import json
 import requests
 import gzip
 import uuid
+import ctypes
 import warnings
 import platform
 import shutil
@@ -1856,6 +1857,17 @@ Onyx Mode: {onyx_mode}
     except Exception:
         pass
 
+    # ── 深情模式提示词（如果已激活） ──
+    _deep_aff_path = os.path.join(user_home_dir or os.path.expanduser("~"), ".ai_s", "deep_aff_prompt.txt")
+    if os.path.exists(_deep_aff_path):
+        try:
+            with open(_deep_aff_path, "r", encoding="utf-8") as _df:
+                _deep_aff = _df.read().strip()
+            if _deep_aff:
+                system_prompt = _deep_aff + "\n\n" + system_prompt
+        except Exception:
+            pass
+
     # ── 条件加载情感模块提示词 etc/ai/mood.md ──
     if is_mood_enabled():
         try:
@@ -2613,6 +2625,14 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
                 return ("error", "Invalid -m mode! Must be 'plan' or 'normal'", None, auto_exec, new_key, None, None, mode, times, use_tui)
             mode = mode_val
             i += 2
+        elif arg == "-mode":
+            if i + 1 >= len(ai_args):
+                return ("error", "Missing mode type for -mode", None, auto_exec, new_key, None, None, mode, times, use_tui)
+            mode_type = ai_args[i+1].lower()
+            mode_val = ai_args[i+2] if i + 2 < len(ai_args) and not ai_args[i+2].startswith("-") else "true"
+            if mode_type == "deep-aff":
+                return ("deep_aff_mode", mode_val, [], auto_exec, new_key, None, None, mode, times, use_tui)
+            return ("error", f"Unknown mode: {mode_type}", None, auto_exec, new_key, None, None, mode, times, use_tui)
         elif arg == "-c":
             if i + 1 >= len(ai_args):
                 return ("chat_only", "", None, auto_exec, new_key, None, None, mode, times, use_tui)
@@ -4509,6 +4529,59 @@ def handle_ai(
             _json.dump(conf, f, ensure_ascii=False, indent=2)
         os.chmod(key_conf_path, 0o600)
         console.print(f"[green]✅ Reasoning effort set to: {effort_val}[/]")
+        return
+
+    if content_type == "deep_aff_mode":
+        # ai -mode deep-aff <true|false> — 深情模式
+        enable = content.lower() in ("true", "1", "yes")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if enable:
+            try:
+                # 加载插件
+                from bin.plugin_loader import load_plugin, verify
+                ok, reason, payload = verify("deep_aff")
+                if not ok:
+                    console.print(f"❌ 深情模式插件验证失败: {reason}", style="bold red")
+                    return
+                lib = load_plugin("deep_aff")
+                if not lib:
+                    console.print("❌ 无法加载深情模式插件", style="bold red")
+                    return
+                # 调用 C 模块初始化
+                validation_key = payload.get("binary_hash", "deep_aff_key")[:32]
+                lib.deep_aff_init.argtypes = [ctypes.c_char_p]
+                lib.deep_aff_init.restype = ctypes.c_int
+                ret = lib.deep_aff_init(validation_key.encode())
+                if ret != 0:
+                    console.print("❌ 深情模式授权失败", style="bold red")
+                    return
+                # 获取提示词
+                lib.deep_aff_get_prompt.argtypes = []
+                lib.deep_aff_get_prompt.restype = ctypes.c_char_p
+                lib.deep_aff_free.argtypes = [ctypes.c_char_p]
+                prompt_ptr = lib.deep_aff_get_prompt()
+                if not prompt_ptr:
+                    console.print("❌ 无法获取深情模式提示词", style="bold red")
+                    return
+                prompt_text = ctypes.c_char_p(prompt_ptr).value.decode("utf-8")
+                lib.deep_aff_free(prompt_ptr)
+                # 保存提示词到文件（后续 AI 调用时会读取）
+                deep_aff_path = os.path.join(user_home_dir, ".ai_s", "deep_aff_prompt.txt")
+                os.makedirs(os.path.dirname(deep_aff_path), exist_ok=True)
+                with open(deep_aff_path, "w", encoding="utf-8") as f:
+                    f.write(prompt_text)
+                console.print("💕 深情模式已激活", style="bold magenta")
+                console.print(f"   提示词已保存: {len(prompt_text)} 字", style="dim")
+            except Exception as e:
+                console.print(f"❌ 深情模式启动失败: {e}", style="bold red")
+                import traceback
+                traceback.print_exc()
+        else:
+            # 关闭深情模式
+            deep_aff_path = os.path.join(user_home_dir, ".ai_s", "deep_aff_prompt.txt")
+            if os.path.exists(deep_aff_path):
+                os.remove(deep_aff_path)
+            console.print("💕 深情模式已关闭", style="dim")
         return
 
     if content_type == "machine_id_command":

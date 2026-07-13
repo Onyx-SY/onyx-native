@@ -3873,35 +3873,6 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         {
             "type": "function",
             "function": {
-                "name": "analyze_symbol",
-                "description": "跨文件追踪符号定义和引用",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "符号名称（函数/类/变量名）"},
-                        "root_dir": {"type": "string", "description": "搜索根目录, 默认 '.'"},
-                    },
-                    "required": ["name"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "file_outline",
-                "description": "获取文件的符号大纲",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string", "description": "文件路径"},
-                    },
-                    "required": ["file_path"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
                 "name": "validate_edit",
                 "description": "校验 SEARCH/REPLACE 编辑是否安全（检查 search 文本存在且唯一）",
                 "parameters": {
@@ -3931,31 +3902,6 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
                 },
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "estimate_tokens",
-                "description": "估算文本的 token 数量",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "description": "要估算的文本"},
-                    },
-                    "required": ["text"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "context_summary",
-                "description": "查看当前对话上下文的 token 使用量。注意：每轮对话结束时会自动显示，仅在需要中途查看时调用，不要重复调用",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                },
-            },
-        },
     ]
 
     native.extend(BUILTIN_ANALYSIS_TOOLS)
@@ -3965,44 +3911,6 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
 
 
 # ──────────────────── 内置分析工具执行器 ────────────────────
-
-def _exec_analyze_symbol(name: str, root_dir: str = ".") -> str:
-    """跨文件追踪符号。"""
-    try:
-        from lib.analysis import analyze_symbol
-        result = analyze_symbol(name, root_dir)
-        lines = [f"📌 Symbol: {result['name']}"]
-        if result["definitions"]:
-            lines.append(f"\n📄 Definitions ({len(result['definitions'])}):")
-            for d in result["definitions"]:
-                lines.append(f"  {d['file']}:{d['line']} ({d['kind']})")
-        else:
-            lines.append("\n📄 No definition found")
-        if result["references"]:
-            lines.append(f"\n🔗 References ({len(result['references'])}):")
-            # 按文件分组显示
-            by_file = {}
-            for r in result["references"]:
-                by_file.setdefault(r["file"], []).append(r["line"])
-            for f, lines_list in sorted(by_file.items()):
-                lines.append(f"  {f}: {', '.join(f'L{l}' for l in lines_list[:10])}")
-                if len(lines_list) > 10:
-                    lines[-1] += f" ... (+{len(lines_list)-10})"
-        if result["files_affected"]:
-            lines.append(f"\n📁 Files affected: {len(result['files_affected'])}")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"❌ analyze_symbol failed: {e}"
-
-
-def _exec_file_outline(file_path: str) -> str:
-    """返回文件符号大纲。"""
-    try:
-        from lib.analysis import file_outline
-        return file_outline(file_path)
-    except Exception as e:
-        return f"❌ file_outline failed: {e}"
-
 
 def _exec_validate_edit(file_path: str, search: str, replace: str) -> str:
     """校验 SEARCH/REPLACE 编辑。"""
@@ -4027,26 +3935,6 @@ def _exec_preview_edit(file_path: str, search: str, replace: str) -> str:
         return f"```diff\n{diff}\n```"
     except Exception as e:
         return f"❌ preview_edit failed: {e}"
-
-
-def _exec_estimate_tokens(text: str) -> str:
-    """估算 token 数。"""
-    try:
-        from lib.token_budget import estimate_tokens
-        count = estimate_tokens(text)
-        return f"📊 Estimated tokens: {count}\n(字符数: {len(text)}, 估算基于 char/4 启发式)"
-    except Exception as e:
-        return f"❌ estimate_tokens failed: {e}"
-
-
-def _exec_context_summary() -> str:
-    """当前上下文 Token 使用摘要（基于 API 精确值）。"""
-    _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
-    if _pt:
-        return (f"[AUTO] 当前上下文 ~{_pt} tokens（API 精确值）\n"
-                "（每轮结束时会自动显示，无需重复调用）")
-    return ("[AUTO] Token 用量会在每轮对话结束时自动显示，无需额外调用。\n"
-            "请直接回答用户的问题，不要重复查询。")
 
 
 # 线程局部存储
@@ -4078,12 +3966,8 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
     # ── 内置分析工具（不经过 MCP，直接 Python 执行）──
     # 用剥离后的 raw_tool 匹配
     _BUILTIN_HANDLERS = {
-        "analyze_symbol": lambda p: _exec_analyze_symbol(p.get("name", ""), p.get("root_dir", ".")),
-        "file_outline": lambda p: _exec_file_outline(p.get("file_path", "")),
         "validate_edit": lambda p: _exec_validate_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
         "preview_edit": lambda p: _exec_preview_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
-        "estimate_tokens": lambda p: _exec_estimate_tokens(p.get("text", "")),
-        "context_summary": lambda p: _exec_context_summary(),
     }
     if raw_tool in _BUILTIN_HANDLERS:
         try:
@@ -6049,10 +5933,15 @@ def handle_ai(
             continue_asking = False
         else:
             # 非 REPL 模式，无待执行 → 显示 ESC 门控
-            # ── 显示 API 返回的精确 prompt_tokens（全磁盘架构，含系统提示词+环境+记忆+问题+JSON结构） ──
+            # ── 显示 token 量 ──
             _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
             if _pt:
                 console.print(f"  [dim]📊 上下文 ~{_pt} tokens（API 精确值）[/]")
+            elif current_question:
+                # 回退估算：current_question + 系统提示词 baseline
+                _q_tokens = len(current_question) // 4 + 2  # 简单 char/4 估算
+                _total = _q_tokens + 1500  # 1500 = agreement.md + env_info 约值
+                console.print(f"  [dim]📊 上下文 ~{_total} tokens（估算）[/]")
             continue_asking = False
             esc_pressed = [False]
             kb_esc = KeyBindings()

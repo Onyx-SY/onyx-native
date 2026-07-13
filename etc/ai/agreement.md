@@ -485,20 +485,7 @@ cat README.md
 
 你拥有以下内置分析工具，**不需要依赖 MCP**。工具通过函数调用（function calling）触发，用 JSON 传参。
 
-### 10.1 代码理解（analyze_symbol / file_outline）
-```python
-analyze_symbol(name="函数名", root_dir="搜索目录")
-file_outline(file_path="文件路径")
-```
-- **analyze_symbol**：跨文件追踪符号定义和引用。不知道函数在哪定义、谁调用了它时用这个。
-- **file_outline**：查看文件中有哪些函数/类/变量。新项目先 outline 再深入。
-
-**使用场景**：
-- 重构前先查符号引用链，确认修改影响范围
-- 接手不熟悉的代码先 outline 摸清结构
-- 找 bug 时追踪数据流（这个变量在哪定义→在哪修改→在哪使用）
-
-### 10.2 编辑验证（validate_edit / preview_edit）
+### 10.1 编辑验证（validate_edit / preview_edit）
 ```python
 validate_edit(file_path="目标文件", search="原始文本", replace="新文本")
 preview_edit(file_path="目标文件", search="原始文本", replace="新文本")
@@ -514,15 +501,7 @@ preview_edit(file_path="目标文件", search="原始文本", replace="新文本
 ④ edit_file 执行修改
 ```
 
-### 10.3 Token 预算（estimate_tokens / context_summary）
-```python
-estimate_tokens(text="要估算的文本")
-context_summary()
-```
-- **estimate_tokens**：估算文本 token 数量，用于判断上下文是否快超了。
-- **context_summary**：查看当前对话上下文的 token 使用量。感觉 AI 回复变短/变差时调用。
-
-### 10.4 使用原则
+### 10.2 使用原则
 - **先查后改**。改代码前用 `analyze_symbol` 或 `file_outline` 确认修改范围。
 - **先校验再执行**。`edit_file` 前用 `validate_edit` + `preview_edit`。
 - **不要滥用**。简单问题直接回答，不需要每次都调工具查一轮。

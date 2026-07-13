@@ -5568,11 +5568,12 @@ def handle_ai(
         if sleep_seconds > 0 and answer == "no":
             interrupted, waited_seconds = handle_sleep_wait(sleep_seconds, current_session_id, lang_text, log_info)
             
-            sleep_record = f"\n\n{lang_text.get('sleep_operation', '--- Sleep Operation ---')}\n"
+            _md = current_lang == "english"
+            sleep_record = f"\n\n### {'Sleep' if _md else '休眠'} ({time.strftime('%H:%M:%S')})\n\n"
             if interrupted:
-                sleep_record += lang_text["sleep_wait_msg"].format(sleep_seconds, waited_seconds)
+                sleep_record += f"- {'Interrupted after' if _md else '中断于'} {waited_seconds}/{sleep_seconds}s\n"
             else:
-                sleep_record += lang_text["sleep_complete_msg"].format(sleep_seconds)
+                sleep_record += f"- {'Completed' if _md else '完成'} {sleep_seconds}s\n"
             
             existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
             if record_path:
@@ -5646,12 +5647,11 @@ def handle_ai(
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
-                        new_content = f"\n\n{lang_text['interaction_prefix'].format(interaction_count, time.strftime('%Y-%m-%d %H:%M:%S'))}\n"
-                        ask_label = lang_text.get("ai_ask_label", "🤔 AI Question" if current_lang == "english" else "🤔 AI询问")
-                        answer_label = lang_text.get("user_answer_label", "💬 User answer" if current_lang == "english" else "💬 用户回答")
-                        
-                        new_content += f"{ask_label}:\n{ai_ask.strip()}\n"
-                        new_content += f"{answer_label}:\n{user_answer}\n"
+                        _ts = time.strftime('%Y-%m-%d %H:%M:%S')
+                        _md = current_lang == "english"
+                        new_content = f"\n\n### {'Interaction' if _md else '交互'} #{interaction_count} ({_ts})\n\n"
+                        new_content += f"- **{'AI Ask' if _md else 'AI询问'}**:\n  {ai_ask.strip()}\n"
+                        new_content += f"- **{'User Answer' if _md else '用户回答'}**:\n  {user_answer}\n"
                         try:
                             with open(record_path, "a", encoding="utf-8") as f:
                                 f.write(new_content)
@@ -5966,19 +5966,18 @@ def handle_ai(
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
-                        new_content = f"\n\n{lang_text['interaction_prefix'].format(interaction_count, time.strftime('%Y-%m-%d %H:%M:%S'))}\n"
-                        ai_response_label = lang_text.get("ai_response_label", "AI response" if current_lang == "english" else "AI回答")
-                        cmd_label = lang_text.get("executed_cmds_label", "Executed commands" if current_lang == "english" else "执行命令")
-                        output_label = lang_text.get("realtime_output_label", "real-time output" if current_lang == "english" else "实时输出")
-                        
-                        new_content += f"{ai_response_label}:\n{(final_ai_result.get('txt', '') or '').strip()}\n"
+                        _ts = time.strftime('%Y-%m-%d %H:%M:%S')
+                        _md = current_lang == "english"
+                        new_content = f"\n\n### {'Interaction' if _md else '交互'} #{interaction_count} ({_ts})\n\n"
+                        _resp = (final_ai_result.get('txt', '') or '').strip()
+                        if _resp:
+                            new_content += f"- **{'AI Response' if _md else 'AI回答'}**:\n  {_resp}\n"
                         if ai_commands:
-                            new_content += f"{cmd_label}:\n"
+                            new_content += f"- **{'Commands' if _md else '命令'}**:\n"
                             for idx_cmd, cmd in enumerate(ai_commands, 1):
-                                cmd_result_val = cmd_results.get(cmd, "Not executed or execution failed" if current_lang == "english" else "未执行或执行失败")
-                                new_content += f"cmd{idx_cmd}: {cmd}\n"
-                                new_content += f"cmd{idx_cmd}_{output_label}:\n{cmd_result_val or ''}\n"
-                        
+                                cmd_result_val = cmd_results.get(cmd, "Not executed or execution failed" if _md else "未执行或执行失败")
+                                new_content += f"  {idx_cmd}. `{cmd}`\n"
+                                new_content += f"  - {'Output' if _md else '输出'}: {cmd_result_val[:200]}{'...' if len(cmd_result_val) > 200 else ''}\n"
                         try:
                             with open(record_path, "a", encoding="utf-8") as f:
                                 f.write(new_content)
@@ -5999,10 +5998,12 @@ def handle_ai(
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
-                        new_content = f"\n\n{lang_text['interaction_prefix'].format(interaction_count, time.strftime('%Y-%m-%d %H:%M:%S'))}\n"
-                        ai_response_label = lang_text.get("ai_response_label", "AI response" if current_lang == "english" else "AI回答")
-                        
-                        new_content += f"{ai_response_label}:\n{(final_ai_result.get('txt', '') or '').strip()}\n"
+                        _ts = time.strftime('%Y-%m-%d %H:%M:%S')
+                        _md = current_lang == "english"
+                        new_content = f"\n\n### {'Interaction' if _md else '交互'} #{interaction_count} ({_ts})\n\n"
+                        _resp = (final_ai_result.get('txt', '') or '').strip()
+                        if _resp:
+                            new_content += f"- **{'AI Response' if _md else 'AI回答'}**:\n  {_resp}\n"
                         try:
                             with open(record_path, "a", encoding="utf-8") as f:
                                 f.write(new_content)

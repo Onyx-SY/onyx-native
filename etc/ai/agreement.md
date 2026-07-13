@@ -526,6 +526,7 @@ context_summary()
 - **先查后改**。改代码前用 `analyze_symbol` 或 `file_outline` 确认修改范围。
 - **先校验再执行**。`edit_file` 前用 `validate_edit` + `preview_edit`。
 - **不要滥用**。简单问题直接回答，不需要每次都调工具查一轮。
+- **Token 自动显示**。`context_summary` 和 `estimate_tokens` 只在需要中间查看时手动调。每轮对话结束时系统**自动**显示 token 用量，无需主动查询。
 
 
 最后一点，重中之重，你的回答一定要简洁明了。 还有，你可以通过系统内的包管理器来进行自我扩展。

@@ -189,11 +189,6 @@ class ContextTracker:
         return list(self._messages)
 
     def summary(self) -> str:
-        """返回使用摘要文本。"""
+        """返回纯 token 用量文本（不含百分比，因为模型上下文窗口差异大）。"""
         total = self.total_tokens
-        pct = self.usage_pct
-        bar_len = 20
-        filled = int(bar_len * pct / 100)
-        bar = "█" * filled + "░" * (bar_len - filled)
-        status = "⚠️ OVER" if self.is_over_limit else ("⚡ WARN" if self.is_warning else "✅ OK")
-        return f"[{bar}] {total}/{self.max_tokens} tokens ({pct:.0f}%) {status}"
+        return f"~{total} tokens（{len(self._messages)} 条消息）"

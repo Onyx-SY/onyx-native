@@ -1575,23 +1575,13 @@ class UltraFastEnvironmentChecker:
 
     def _save_ai_config(self, platform: str, api_key: str, model: str,
                         api_url: str, params: dict):
-        """Persist AI config to key.conf (compatible with bin/ai_cmd.py)."""
-        home = os.environ.get("HOME", os.path.expanduser("~"))
-        key_conf_dir = os.path.join(home, ".config", "onyx", "ai")
-        key_conf_path = os.path.join(key_conf_dir, "key.conf")
+        """Persist AI config to key.conf (delegate to bin.ai_cmd)."""
         try:
-            os.makedirs(key_conf_dir, exist_ok=True)
-            data = {
-                "platform": platform,
-                "api_key": api_key,
-                "model": model,
-                "api_url": api_url,
-                "params": params,
-            }
-            with open(key_conf_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.chmod(key_conf_path, 0o600)
-            log_print(f"[FirstRun] AI config saved: {key_conf_path}")
+            # 使用 ai_cmd 的 save_key_conf（自动混淆 api_key）
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "bin"))
+            from bin.ai_cmd import save_key_conf
+            save_key_conf(platform, api_key, model, params)
+            log_print(f"[FirstRun] AI config saved")
         except Exception as e:
             log_print(f"[FirstRun] Failed to save AI config: {e}", is_error=True)
 

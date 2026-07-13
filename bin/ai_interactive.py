@@ -32,7 +32,9 @@ _SLASH_COMMANDS_CN: Dict[str, str] = {
     "/exit":   "退出 AI 对话，返回 shell",
     "/quit":   "同 /exit",
     "/clear":  "清屏",
-    "/model":  "查看/切换 AI 模型",
+    "/config": "⚙️ 统一配置 AI 模型/密钥/参数",
+    "/model":  "查看/切换 AI 模型与参数",
+    "/param":  "查看/设置模型参数 (temperature/top_p/max_tokens/effort)",
     "/key":    "查看/更换 API 密钥",
     "/chat":   "管理聊天记忆 (list / switch <name> / new <name>)",
     "/mcp":    "MCP 服务器管理 (list / install <name> / remove <name>)",
@@ -43,77 +45,12 @@ _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/exit":   "Exit AI mode, return to shell",
     "/quit":   "Same as /exit",
     "/clear":  "Clear screen",
-    "/model":  "View/switch AI model",
+    "/config": "⚙️ Unified AI config (model/key/params)",
+    "/model":  "View/switch AI model and params",
+    "/param":  "View/set model params (temperature/top_p/max_tokens/effort)",
     "/key":    "View/change API key",
     "/chat":   "Manage chat memory (list / switch <name> / new <name>)",
     "/mcp":    "MCP server management (list / install <name> / remove <name>)",
-}
-
-_TEXTS = {
-    "chinese": {
-        "title": "AI 对话模式",
-        "welcome": "直接输入问题开始对话。\n输入 [bold]/help[/] 查看所有指令，[bold]/exit[/] 返回 shell。",
-        "no_key": "[bold yellow]未检测到 API 密钥[/]\n\n请输入 32 位密钥以使用 AI 功能。\n输入 `/exit` 或留空回车可返回 shell。",
-        "enter_key": "🔑 请输入密钥: ",
-        "key_bad_len": "[bold red]密钥格式错误（需 32 位）[/]",
-        "key_saved": "[green]✅ 密钥已保存[/]",
-        "key_save_fail": "[red]保存失败: {}[/]",
-        "key_bad_format": "[yellow]密钥格式异常，请重新设置[/]",
-        "bye": "👋 退出 AI 模式",
-        "unknown_cmd": "未知指令: {}。输入 /help 查看可用指令。",
-        "ai_error": "AI 请求失败: {}",
-        "ai_exception": "AI 会话异常: {}",
-        "ai_exited": "已退出 AI 模式",
-        "help_title": "## AI 交互模式",
-        "help_intro": "直接输入问题即可与 AI 对话。AI 会记住本次会话的上下文。",
-        "help_tips": "- 按 `Esc` 两次可中断当前 AI 请求\n- 按 `Ctrl+C` 可中断等待中的命令\n- 输入 `/exit` 返回正常 shell",
-        "current_key": "当前密钥: [dim]{}[/]",
-        "change_key": "更换密钥？(y/n): ",
-        "key_read_fail": "[red]读取密钥失败[/]",
-        "mcp_usage": "用法: /mcp list | install <name> | remove <name>",
-        "chat_usage": "用法: /chat list | switch <name> | new <name>",
-        "model_usage": "用法: /model — 列出可用模型并切换",
-        "current_model": "当前: [bold]{platform}[/] — {model}",
-        "model_list_title": "可用模型（当前平台 {platform}）：",
-        "model_select_prompt": "输入序号切换模型 (直接回车取消): ",
-        "model_switched": "[green]✅ 已切换到 {model}[/]",
-        "model_cancelled": "已取消",
-        "press_esc": "[dim]按 /exit 退出 AI 模式[/]",
-        "interrupted": "[dim]已中断[/]",
-        "esc_marked": "已标记，AI 本轮完成后会询问你",
-        "ask_after_esc": "有什么要补充或修改的吗？直接输入或按 Enter 跳过",
-    },
-    "english": {
-        "title": "AI Chat Mode",
-        "welcome": "Type your question to start chatting.\nType [bold]/help[/] for commands, [bold]/exit[/] to return to shell.",
-        "no_key": "[bold yellow]No API key detected[/]\n\nEnter your 32-char key to use AI features.\nType `/exit` or press Enter to return to shell.",
-        "enter_key": "🔑 Enter key: ",
-        "key_bad_len": "[bold red]Invalid key format (32 chars required)[/]",
-        "key_saved": "[green]✅ Key saved[/]",
-        "key_save_fail": "[red]Save failed: {}[/]",
-        "key_bad_format": "[yellow]Key format invalid, please re-enter[/]",
-        "bye": "👋 Exiting AI mode",
-        "unknown_cmd": "Unknown command: {}. Type /help for available commands.",
-        "ai_error": "AI request failed: {}",
-        "ai_exception": "AI session error: {}",
-        "ai_exited": "Exited AI mode",
-        "help_title": "## AI Interactive Mode",
-        "help_intro": "Type your question directly to chat with AI. Context is maintained within the session.",
-        "help_tips": "- Press `Esc` twice to interrupt AI request\n- Press `Ctrl+C` to interrupt running commands\n- Type `/exit` to return to shell",
-        "current_key": "Current key: [dim]{}[/]",
-        "change_key": "Change key? (y/n): ",
-        "key_read_fail": "[red]Failed to read key[/]",
-        "mcp_usage": "Usage: /mcp list | install <name> | remove <name>",
-        "chat_usage": "Usage: /chat list | switch <name> | new <name>",
-        "model_usage": "Usage: /model — list available models and switch",
-        "current_model": "Current: [bold]{platform}[/] — {model}",
-        "model_list_title": "Available models (platform: {platform}):",
-        "model_select_prompt": "Enter number to switch (Enter to cancel): ",
-        "model_switched": "[green]✅ Switched to {model}[/]",
-        "model_cancelled": "Cancelled",
-        "press_esc": "[dim]Type /exit to leave AI mode[/]",
-        "interrupted": "[dim]Interrupted[/]",
-    },
 }
 
 _HELP_TEXT_CN = """\
@@ -146,15 +83,9 @@ Type your question directly to chat with AI. Context is maintained within the se
 
 
 def _t(key: str, lang: str = "chinese", **fmt) -> str:
-    """获取双语文本，fmt 中的值会用于 .format()"""
-    texts = _TEXTS.get(lang, _TEXTS["chinese"])
-    s = texts.get(key, key)
-    if fmt:
-        try:
-            s = s.format(**fmt)
-        except (KeyError, IndexError):
-            pass
-    return s
+    """获取双语文本 — 委托 I18n 单例"""
+    from bin.ai_lib.i18n import I18n
+    return I18n.get_instance().t(key, lang, **fmt)
 
 
 def _build_help(lang: str = "chinese") -> str:
@@ -188,6 +119,55 @@ _AI_PROMPT_STYLE = PromptStyle.from_dict({
 def _make_ai_prompt() -> str:
     """生成 AI 模式提示符"""
     return "🤖 > "
+
+
+# ─────────────────────────────── 配置写入辅助 ───────────────────────────────
+
+def _save_conf(conf: dict, ctx: Dict[str, Any]) -> None:
+    """将配置 dict 完整写入 key.conf（api_key 混淆存储）"""
+    import json as _json
+    key_conf_path = os.path.join(ctx["user_home_dir"], ".config", "onyx", "ai", "key.conf")
+    os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
+    # 混淆 api_key 后再写入
+    write_conf = dict(conf)
+    if "api_key" in write_conf and isinstance(write_conf["api_key"], str):
+        from bin.ai_cmd import _obfuscate as _obs
+        write_conf["api_key"] = _obs(write_conf["api_key"])
+    with open(key_conf_path, "w", encoding="utf-8") as f:
+        _json.dump(write_conf, f, ensure_ascii=False, indent=2)
+    os.chmod(key_conf_path, 0o600)
+
+
+# ─────────────────────────────── 参数编辑辅助 ───────────────────────────────
+
+def _edit_params_interactive(conf: dict, lang: str) -> dict:
+    """交互式编辑模型参数，返回更新后的 params dict"""
+    from bin.ai_lib.ui import text_input
+    from bin.ai_cmd import _SUPPORTED_PLATFORMS
+
+    params = conf.get("params", {})
+    if not isinstance(params, dict):
+        params = {}
+    platform = conf.get("platform", "deepseek")
+    info = _SUPPORTED_PLATFORMS.get(platform, {}) if platform != "custom" else {}
+    default_params = info.get("params", {})
+
+    def _input(label: str, key: str, default_val, converter=None):
+        current = params.get(key, default_val)
+        raw = text_input(f"{label} [{current}]:", str(current), lang=lang)
+        if raw:
+            try:
+                params[key] = converter(raw) if converter else raw
+            except (ValueError, TypeError):
+                pass
+
+    _input("temperature (0-2)", "temperature", default_params.get("temperature", 0.1), float)
+    _input("top_p (0-1)", "top_p", default_params.get("top_p", 0.2), float)
+    _input("max_tokens", "max_tokens", default_params.get("max_tokens", 4096), int)
+    _input("reasoning_effort (high/max)", "reasoning_effort",
+           params.get("reasoning_effort", ""), str)
+
+    return params
 
 
 # ─────────────────────────────── Slash 指令分发 ───────────────────────────────
@@ -230,8 +210,8 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         return True
 
     elif cmd == "/model":
-        from bin.ai_cmd import load_key_conf, save_key_conf, _SUPPORTED_PLATFORMS
-        import json as _json
+        from bin.ai_cmd import load_key_conf, _SUPPORTED_PLATFORMS
+        from bin.ai_lib.ui import text_input
         conf = load_key_conf()
         if not conf:
             console.print(f"[yellow]{_t('no_key', lang)}[/]")
@@ -239,10 +219,23 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         platform = conf.get("platform", "deepseek")
         current_model = conf.get("model", "")
         api_url = conf.get("api_url", "")
+        params = conf.get("params", {})
         is_custom = (platform == "custom")
         plat_name = "Custom" if is_custom else _SUPPORTED_PLATFORMS.get(platform, {}).get("name", platform)
-        console.print(_t("current_model", lang, platform=plat_name, model=current_model or "?"))
-        # Build model list
+
+        # ── 展示当前配置概览 ──
+        unset_label = _t("unset", lang)
+        default_label = _t("default", lang)
+        param_items = ", ".join(f"{k}={v}" for k, v in sorted(params.items())) or default_label
+        console.print(Panel(
+            f"{_t('label_platform', lang)}{plat_name} ({platform})\n"
+            f"{_t('label_model', lang)}{current_model or unset_label}\n"
+            f"{_t('label_params', lang)}{param_items}\n"
+            f"{_t('label_url', lang)}{api_url or default_label}",
+            title=_t("config_title", lang), border_style="cyan"
+        ))
+
+        # ── 列出可用模型 ──
         if is_custom:
             models = [current_model] if current_model else ["gpt-4"]
         else:
@@ -250,10 +243,13 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         if not models:
             console.print("[yellow]No models available[/]")
             return True
+
         console.print(_t("model_list_title", lang, platform=plat_name))
         for i, m in enumerate(models, 1):
             marker = " ←" if m == current_model else ""
             console.print(f"  [{i}] {m}{marker}")
+
+        # ── 选择新模型 ──
         try:
             choice = input(_t("model_select_prompt", lang)).strip()
             if not choice:
@@ -263,13 +259,17 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             if 0 <= idx < len(models):
                 new_model = models[idx]
                 conf["model"] = new_model
-                # Preserve existing fields: api_key, api_url, params, platform
-                key_conf_path = os.path.join(ctx["user_home_dir"], ".config", "onyx", "ai", "key.conf")
-                os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
-                with open(key_conf_path, "w", encoding="utf-8") as f:
-                    _json.dump(conf, f, ensure_ascii=False, indent=2)
-                os.chmod(key_conf_path, 0o600)
+                _save_conf(conf, ctx)
                 console.print(_t("model_switched", lang, model=new_model))
+
+                # ── 询问是否编辑参数 ──
+                try:
+                    if input(_t("edit_params_prompt", lang)).strip().lower() == "y":
+                        conf["params"] = _edit_params_interactive(conf, lang)
+                        _save_conf(conf, ctx)
+                        console.print(_t("config_ok_params", lang))
+                except (KeyboardInterrupt, EOFError):
+                    pass
             else:
                 console.print(f"[yellow]Invalid selection[/]")
         except (ValueError, KeyboardInterrupt, EOFError):
@@ -299,6 +299,214 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         from bin.ai_cmd import handle_mcp_command
         sub = args[0] if args else "list"
         handle_mcp_command(sub, args[1:])
+        return True
+
+    elif cmd == "/config":
+        """⚙️ 统一配置菜单 — 平台/模型/密钥/参数/URL"""
+        from bin.ai_cmd import load_key_conf, _SUPPORTED_PLATFORMS, _setup_key_conf_interactive
+        from bin.ai_lib.ui import select_option, text_input
+
+        while True:
+            conf = load_key_conf()
+            if not conf:
+                console.print(f"[yellow]{_t('no_key', lang)}[/]")
+                new_conf = _setup_key_conf_interactive(lang)
+                if not new_conf:
+                    return True
+                conf = load_key_conf()
+                if not conf:
+                    return True
+
+            platform = conf.get("platform", "deepseek")
+            current_model = conf.get("model", "")
+            api_key = conf.get("api_key", "")
+            params = conf.get("params", {})
+            api_url = conf.get("api_url", "")
+
+            masked_key = api_key[:4] + "*" * 24 + api_key[-4:] if len(api_key) > 28 else "***"
+            unset_label = _t("unset", lang)
+            default_label = _t("default", lang)
+            param_items = ", ".join(f"{k}={v}" for k, v in sorted(params.items())) or default_label
+            plat_name = "Custom" if platform == "custom" else _SUPPORTED_PLATFORMS.get(platform, {}).get("name", platform)
+
+            # ── 展示当前配置 ──
+            console.print(Panel(
+                f"{_t('label_platform', lang)}{plat_name} ({platform})\n"
+                f"{_t('label_model', lang)}{current_model or unset_label}\n"
+                f"{_t('label_key', lang)}{masked_key}\n"
+                f"{_t('label_params', lang)}{param_items}\n"
+                f"{_t('label_url', lang)}{api_url or default_label}",
+                title=_t("config_title", lang), border_style="cyan"
+            ))
+
+            # ── 菜单 ──
+            if lang == "chinese":
+                opts = ["🔄 切换平台", "🤖 切换模型", "🔑 更换密钥",
+                        "⚙️ 编辑参数", "🌐 自定义 URL", "❌ 关闭"]
+            else:
+                opts = ["🔄 Change platform", "🤖 Change model", "🔑 Change key",
+                        "⚙️ Edit params", "🌐 Custom URL", "❌ Close"]
+            choice = select_option(
+                "选择操作:" if lang == "chinese" else "Action:",
+                opts, default=opts[0], lang=lang
+            )
+            if not choice or choice == opts[-1]:
+                break
+
+            idx = opts.index(choice)
+
+            # ── 切换平台 ──
+            if idx == 0:
+                platforms = list(_SUPPORTED_PLATFORMS.keys())
+                plat_labels = [_SUPPORTED_PLATFORMS[p]["name"] for p in platforms]
+                p_choice = select_option(
+                    "选择 AI 平台" if lang == "chinese" else "Select AI platform",
+                    plat_labels + ["Custom"], default=plat_labels[0], lang=lang
+                )
+                if not p_choice:
+                    continue
+                if p_choice == "Custom":
+                    conf["platform"] = "custom"
+                    url = text_input(
+                        "API 地址:" if lang == "chinese" else "API URL:",
+                        "https://api.openai.com/v1/chat/completions", lang=lang
+                    )
+                    if url:
+                        conf["api_url"] = url
+                    model_name = text_input(
+                        "模型名称:" if lang == "chinese" else "Model name:",
+                        "gpt-4", lang=lang
+                    )
+                    if model_name:
+                        conf["model"] = model_name
+                else:
+                    p_idx = plat_labels.index(p_choice)
+                    new_plat = platforms[p_idx]
+                    conf["platform"] = new_plat
+                    info = _SUPPORTED_PLATFORMS[new_plat]
+                    conf["model"] = info.get("default_model", info["models"][0])
+                    conf["params"] = dict(info.get("params", {}))
+                    if platform == "custom":
+                        conf.pop("api_url", None)
+                _save_conf(conf, ctx)
+                _ok = "✅ Platform switched" if lang == "english" else "✅ 平台已切换"
+                console.print(f"[green]{_ok}[/]")
+
+            # ── 切换模型 ──
+            elif idx == 1:
+                is_custom = (conf["platform"] == "custom")
+                if is_custom:
+                    new_model = text_input(
+                        "输入模型名称:" if lang == "chinese" else "Enter model name:",
+                        current_model, lang=lang
+                    )
+                    if new_model:
+                        conf["model"] = new_model
+                        _save_conf(conf, ctx)
+                        _ok = f"✅ Model switched: {new_model}" if lang == "english" else f"✅ 模型已切换: {new_model}"
+                        console.print(f"[green]{_ok}[/]")
+                    continue
+                info = _SUPPORTED_PLATFORMS.get(platform)
+                if not info:
+                    continue
+                models = info.get("models", [])
+                m_labels = [f"{m} {'← 当前' if m == current_model else ''}" for m in models]
+                m_choice = select_option(
+                    f"选择模型 ({info['name']}):" if lang == "chinese" else f"Select model ({info['name']}):",
+                    m_labels, default=m_labels[0], lang=lang
+                )
+                if m_choice:
+                    new_model = m_choice.split(" ←")[0].strip()
+                    conf["model"] = new_model
+                    _save_conf(conf, ctx)
+                    _ok = f"✅ Model switched: {new_model}" if lang == "english" else f"✅ 模型已切换: {new_model}"
+                    console.print(f"[green]{_ok}[/]")
+
+            # ── 更换密钥 ──
+            elif idx == 2:
+                new_key = text_input(
+                    "请输入新的 API Key:" if lang == "chinese" else "Enter new API Key:",
+                    "", lang=lang
+                )
+                if new_key:
+                    conf["api_key"] = new_key
+                    _save_conf(conf, ctx)
+                    _ok = "✅ Key updated" if lang == "english" else "✅ 密钥已更新"
+                    console.print(f"[green]{_ok}[/]")
+
+            # ── 编辑参数 ──
+            elif idx == 3:
+                conf["params"] = _edit_params_interactive(conf, lang)
+                _save_conf(conf, ctx)
+                console.print(_t("config_ok_params", lang))
+
+            # ── 自定义 URL ──
+            elif idx == 4:
+                url = text_input(
+                    "API 地址:" if lang == "chinese" else "API URL:",
+                    api_url or "https://", lang=lang
+                )
+                if url:
+                    conf["api_url"] = url
+                    _save_conf(conf, ctx)
+                    _ok = "✅ API URL updated" if lang == "english" else "✅ API 地址已更新"
+                    console.print(f"[green]{_ok}[/]")
+
+        return True
+
+    elif cmd == "/param":
+        """快速查看/设置模型参数"""
+        from bin.ai_cmd import load_key_conf
+        conf = load_key_conf()
+        if not conf:
+            console.print(f"[yellow]{_t('no_key', lang)}[/]")
+            return True
+
+        params = conf.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+
+        if not args:
+            console.print(f"\n{_t('param_title', lang)}")
+            if params:
+                for k, v in sorted(params.items()):
+                    console.print(f"  {k} = {v}")
+            else:
+                console.print(f"  {_t('param_no_custom', lang)}")
+            console.print(f"\n{_t('param_usage', lang)}")
+            console.print(_t("param_valid_names", lang))
+            return True
+
+        if len(args) == 2:
+            name, value = args[0].lower(), args[1]
+            valid_params = {
+                "temperature": float, "top_p": float,
+                "max_tokens": int, "reasoning_effort": str
+            }
+            if name not in valid_params:
+                console.print(_t("param_invalid_name", lang, name=name))
+                console.print(_t("param_valid_names", lang))
+                return True
+            try:
+                if name == "reasoning_effort":
+                    if value.lower() not in ("high", "max"):
+                        console.print(_t("param_effort_invalid", lang))
+                        return True
+                    params[name] = value.lower()
+                elif name == "max_tokens":
+                    params[name] = int(value)
+                else:
+                    params[name] = float(value)
+            except ValueError:
+                console.print(_t("param_invalid_value", lang, value=value))
+                return True
+
+            conf["params"] = params
+            _save_conf(conf, ctx)
+            console.print(_t("param_set_ok", lang, name=name, value=value))
+            return True
+
+        console.print(_t("param_usage_full", lang))
         return True
 
     else:

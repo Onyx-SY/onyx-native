@@ -373,6 +373,90 @@ class StdioTransport(Transport):
         )
 
 
+# ─────────────────────────── HTTP 实现 ───────────────────────────
+
+class HttpTransport(Transport):
+    """
+    通过 HTTP POST 的 JSON-RPC 2.0 传输。
+
+    用于连接远程 MCP 服务器（如 SSE / Streamable HTTP 端点）。
+    每次 call() 发起一个独立的 HTTP POST 请求，无状态。
+    """
+
+    def __init__(self, url: str, timeout: float = 30.0, headers: dict = None):
+        """
+        Args:
+            url:      MCP 服务器 HTTP 端点
+            timeout:  请求超时秒数（默认 30s）
+            headers:  附加 HTTP 头（如 Authorization）
+        """
+        self._url = url.rstrip("/")
+        self._timeout = timeout
+        self._headers = headers or {}
+        self._closed = False
+        self._msg_id = 0
+        self._lock = threading.Lock()
+
+    def call(self, method: str, params: dict, msg_id: int = None, timeout: float = None) -> Optional[dict]:
+        """发送 JSON-RPC 请求，返回响应结果部分。"""
+        import requests as _requests
+        if self._closed:
+            return None
+        with self._lock:
+            self._msg_id += 1
+            rid = msg_id if msg_id is not None else self._msg_id
+        payload = {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": method,
+            "params": params,
+        }
+        try:
+            resp = _requests.post(
+                self._url,
+                json=payload,
+                headers={**self._headers, "Content-Type": "application/json"},
+                timeout=timeout or self._timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "error" in data:
+                raise RuntimeError(f"JSON-RPC error: {data['error']}")
+            return data.get("result")
+        except Exception:
+            return None
+
+    def notify(self, method: str, params: dict) -> None:
+        """发送 JSON-RPC 通知（无响应）。"""
+        import requests as _requests
+        if self._closed:
+            return
+        with self._lock:
+            self._msg_id += 1
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }
+        try:
+            _requests.post(
+                self._url,
+                json=payload,
+                headers={**self._headers, "Content-Type": "application/json"},
+                timeout=self._timeout,
+            )
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        """关闭传输。"""
+        self._closed = True
+
+    def is_alive(self) -> bool:
+        """检查传输是否活跃（简单检查未关闭）。"""
+        return not self._closed
+
+
 # ─────────────────────────── 工厂函数 ───────────────────────────
 
 def create_transport(server_config: dict, startup_timeout: float = 10.0) -> Transport:
@@ -391,8 +475,18 @@ def create_transport(server_config: dict, startup_timeout: float = 10.0) -> Tran
     transport_type = server_config.get("type", "stdio")
 
     if transport_type == "http" or "url" in server_config:
-        # HTTP 模式（预留）
-        raise NotImplementedError("HTTP transport not yet implemented")
+        # HTTP 模式
+        url = server_config.get("url", "")
+        if not url:
+            raise ValueError("HTTP transport requires a 'url' in server_config")
+        timeout = server_config.get("timeout", 30.0)
+        headers = {}
+        # 从 server_config 提取 Authorization 等头
+        for h in ("Authorization", "X-API-Key", "User-Agent"):
+            if h.lower() in {k.lower() for k in server_config}:
+                val = next(server_config[k] for k in server_config if k.lower() == h.lower())
+                headers[h] = str(val)
+        return HttpTransport(url=url, timeout=timeout, headers=headers)
 
     # stdio 模式
     command = server_config.get("command", "npx")

@@ -107,6 +107,27 @@ def _load_ai_models() -> dict:
 
 _SUPPORTED_PLATFORMS = _load_ai_models()
 
+# ── API Key 简单混淆（防意外明文泄露，非加密）──
+# 前缀 ~ 标记混淆版本，向后兼容未混淆的旧 key.conf
+_KEY_OBFUSCATE_PREFIX = "~"
+
+def _obfuscate(plain: str) -> str:
+    """简单 XOR + base64 混淆，返回带前缀的编码字符串"""
+    import base64
+    key = 0xA7
+    data = plain.encode("utf-8")
+    xored = bytes(b ^ key for b in data)
+    return _KEY_OBFUSCATE_PREFIX + base64.b64encode(xored).decode()
+
+def _deobfuscate(encoded: str) -> str:
+    """解码混淆字符串，若无前缀则视为明文（向后兼容）"""
+    import base64
+    if not encoded.startswith(_KEY_OBFUSCATE_PREFIX):
+        return encoded  # 旧格式明文
+    key = 0xA7
+    raw = base64.b64decode(encoded[len(_KEY_OBFUSCATE_PREFIX):])
+    return bytes(b ^ key for b in raw).decode("utf-8")
+
 def load_key_conf() -> dict:
     """读取 key.conf，返回 {platform, api_key, model, params} 或空 dict"""
     if not os.path.exists(KEY_CONF_PATH):
@@ -116,16 +137,22 @@ def load_key_conf() -> dict:
             data = json.load(f)
         if not isinstance(data, dict):
             return {}
+        # 自动解码混淆的 API Key
+        if "api_key" in data and isinstance(data["api_key"], str):
+            data["api_key"] = _deobfuscate(data["api_key"])
         return data
     except Exception:
         return {}
 
-def save_key_conf(platform: str, api_key: str, model: str = "", params: dict = None) -> None:
-    """写入 key.conf"""
+def save_key_conf(platform: str, api_key: str, model: str = "", params: dict = None,
+                  api_url: str = "") -> None:
+    """写入 key.conf（API Key 自动混淆存储）"""
     os.makedirs(os.path.dirname(KEY_CONF_PATH), exist_ok=True)
-    data = {"platform": platform, "api_key": api_key, "model": model}
+    data = {"platform": platform, "api_key": _obfuscate(api_key), "model": model}
     if params:
         data["params"] = params
+    if api_url:
+        data["api_url"] = api_url
     with open(KEY_CONF_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.chmod(KEY_CONF_PATH, 0o600)
@@ -4493,10 +4520,14 @@ def handle_ai(
         # Switch model
         new_model = content.strip()
         conf["model"] = new_model
+        # 混淆 api_key 后写入
         key_conf_path = os.path.join(user_home_dir, ".config", "onyx", "ai", "key.conf")
         os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
+        _write_conf = dict(conf)
+        if "api_key" in _write_conf and isinstance(_write_conf["api_key"], str):
+            _write_conf["api_key"] = _obfuscate(_write_conf["api_key"])
         with open(key_conf_path, "w", encoding="utf-8") as f:
-            _json.dump(conf, f, ensure_ascii=False, indent=2)
+            _json.dump(_write_conf, f, ensure_ascii=False, indent=2)
         os.chmod(key_conf_path, 0o600)
         console.print(f"[green]✅ Switched to model: {new_model}[/]")
         return
@@ -4523,10 +4554,14 @@ def handle_ai(
             params = {}
         params["reasoning_effort"] = effort_val
         conf["params"] = params
+        # 混淆 api_key 后写入
         key_conf_path = os.path.join(user_home_dir, ".config", "onyx", "ai", "key.conf")
         os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
+        _write_conf = dict(conf)
+        if "api_key" in _write_conf and isinstance(_write_conf["api_key"], str):
+            _write_conf["api_key"] = _obfuscate(_write_conf["api_key"])
         with open(key_conf_path, "w", encoding="utf-8") as f:
-            _json.dump(conf, f, ensure_ascii=False, indent=2)
+            _json.dump(_write_conf, f, ensure_ascii=False, indent=2)
         os.chmod(key_conf_path, 0o600)
         console.print(f"[green]✅ Reasoning effort set to: {effort_val}[/]")
         return
@@ -5795,8 +5830,11 @@ def handle_ai(
             ))
         
         # ── 自动判断是否继续循环（不再依赖 AI 的 [ANSWER] 标记）──
-        # 规则：有待执行的命令/工具/提问/计划 → 继续；只有文字/分析 → 停止
+        # 规则：仅当响应中只有 txt/analysis 纯文本字段时才停止循环；
+        #       但凡存在其他字段（memory/plan/ask/commands/tool_calls），
+        #       都需要回问 AI 以传递上下文反馈。
         has_pending = bool(
+            memory_uuid or          # AI 引用了记忆 → 需回问让 AI 感知记忆已载入
             ai_commands or
             ai_result.get("tool_calls") or
             ai_ask.strip() or

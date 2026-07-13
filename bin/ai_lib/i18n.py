@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-I18n 国际化模块 — 免费/开源
+I18n 国际化模块
 
 为 Onyx AI 系统提供双语（中/英）文本加载与查询。
 

@@ -795,124 +795,96 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
     current_time = datetime.now()
     time_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
     
-    session_label = "Session ID" if lang == "english" else "会话ID"
-    record_label = "Record time" if lang == "english" else "记录时间"
-    separator = "=" * 60
-    question_label = "User question" if lang == "english" else "用户提问"
-    ai_ask_label = "🤔 AI Question" if lang == "english" else "🤔 AI询问"
-    user_answer_label = "💬 User answer" if lang == "english" else "💬 用户回答"
-    ai_analysis_label = "AI Analysis" if lang == "english" else "AI策略分析"
-    ai_plan_label = "AI Plan" if lang == "english" else "AI计划"
-    ai_text_label = "AI text response" if lang == "english" else "AI文本回答"
-    ai_tag_label = "Tag" if lang == "english" else "标签"
-    ai_memory_label = "AI Memory UUID" if lang == "english" else "AI记忆UUID"
-    ai_ref_memory_label = "AI referenced memory" if lang == "english" else "ai引用记忆"
-    ai_tool_label = "Tool call" if lang == "english" else "工具调用"
-    cmd_label = "Command" if lang == "english" else "第{}条命令"
-    cmd_result_label = "Command execution result" if lang == "english" else "命令执行结果"
-    no_output = "No output" if lang == "english" else "无输出"
-    stdout_label = "Standard output" if lang == "english" else "标准输出"
-    stderr_label = "Error output" if lang == "english" else "错误输出"
+    md = lang == "english"
     
     content = [
-        f"{session_label}: {session_id}",
-        f"{record_label}: {time_str}",
-        separator,
-        f"{question_label}:",
-        (user_question or "").strip() or ("No specific question" if lang == "english" else "无明确提问"),
-        ""
+        f"## {'Interaction' if md else '交互记录'} — {time_str}",
+        "",
+        f"- **{'Session ID' if md else '会话ID'}**: {session_id}",
+        f"- **{'Time' if md else '时间'}**: {time_str}",
+        "",
     ]
     
+    # 用户提问
+    content.append(f"### {'Question' if md else '用户提问'}")
+    content.append((user_question or "").strip() or (f"*No specific question*" if md else "*无明确提问*"))
+    content.append("")
+    
+    # AI 追问 + 用户回答
     if ai_ask.strip():
-        content.extend([
-            f"{ai_ask_label}:",
-            ai_ask.strip(),
-            ""
-        ])
+        content.append(f"### {'AI Ask' if md else 'AI追问'}")
+        content.append(ai_ask.strip())
+        content.append("")
         if user_answer.strip():
-            content.extend([
-                f"{user_answer_label}:",
-                user_answer.strip(),
-                ""
-            ])
+            content.append(f"**{'User Answer' if md else '用户回答'}**:")
+            content.append(user_answer.strip())
+            content.append("")
     
+    # 标签
     if tag.strip():
-        content.extend([
-            f"{ai_tag_label}: {tag.strip()}",
-            ""
-        ])
+        content.append(f"- **{'Tag' if md else '标签'}**: `{tag.strip()}`")
+        content.append("")
     
+    # 记忆 UUID
     if memory_uuid.strip():
-        content.extend([
-            f"{ai_memory_label}: {memory_uuid.strip()}",
-            ""
-        ])
+        content.append(f"- **{'Memory UUID' if md else '记忆UUID'}**: `{memory_uuid.strip()}`")
+        content.append("")
     
+    # 策略分析
     if strategy.strip():
-        content.extend([
-            f"{ai_analysis_label}:",
-            strategy.strip(),
-            ""
-        ])
+        content.append(f"### {'Analysis' if md else '策略分析'}")
+        content.append(strategy.strip())
+        content.append("")
     
+    # 计划
     if plan.strip():
-        content.extend([
-            f"{ai_plan_label}:",
-            plan.strip(),
-            ""
-        ])
+        content.append(f"### {'Plan' if md else '计划'}")
+        content.append(plan.strip())
+        content.append("")
     
-    content.extend([
-        "",
-        f"{ai_text_label}:",
-        first_return.strip() if first_return else ("No text response" if lang == "english" else "无文本回答"),
-        ""
-    ])
+    # AI 文本回答
+    content.append(f"### {'AI Response' if md else 'AI回答'}")
+    content.append(first_return.strip() if first_return else (f"*No text response*" if md else "*无文本回答*"))
+    content.append("")
     
+    # 引用记忆
     if referenced_memory:
-        content.extend([
-            f"{ai_ref_memory_label}:{referenced_memory}",
-            ""
-        ])
+        content.append(f"- **{'Referenced Memory' if md else '引用记忆'}**: `{referenced_memory}`")
+        content.append("")
     
+    # 命令执行
     for idx, cmd in enumerate(commands, 1):
-        cmd_result = cmd_results.get(cmd, "Not executed or execution failed" if lang == "english" else "未执行或执行失败")
+        cmd_result = cmd_results.get(cmd, "Not executed or execution failed" if md else "未执行或执行失败")
         if cmd_result and "STDERR:" in cmd_result and "STDOUT:" in cmd_result:
             stdout_part = cmd_result.split("STDERR:")[0].replace("STDOUT:", "").strip()
             stderr_part = cmd_result.split("STDERR:")[1].strip()
             filtered_result = []
             if stdout_part:
-                filtered_result.append(f"{stdout_label}:\n{stdout_part}")
+                filtered_result.append(f"**{'Output' if md else '输出'}**:\n```\n{stdout_part}\n```")
             if stderr_part:
-                filtered_result.append(f"{stderr_label}:\n{stderr_part}")
-            cmd_result = "\n".join(filtered_result) if filtered_result else no_output
-        content.extend([
-            f"{cmd_label.format(idx)}: {cmd}",
-            f"{cmd_result_label}:",
-            cmd_result or "",
-            "-" * 40,
-            ""
-        ])
+                filtered_result.append(f"**{'Error' if md else '错误'}**:\n```\n{stderr_part}\n```")
+            cmd_result = "\n".join(filtered_result) if filtered_result else (f"*{('No output' if md else '无输出')}*")
+        content.append(f"#### {'Command' if md else '命令'} #{idx}: `{cmd}`")
+        content.append(cmd_result or f"*{('No output' if md else '无输出')}*")
+        content.append("")
     
+    # 工具调用
     if tool_calls:
-        content.append(f"{ai_tool_label}:")
+        content.append(f"### {'Tool Calls' if md else '工具调用'}")
         for tc in tool_calls:
             if isinstance(tc, dict):
                 tc_name = tc.get("name", "?")
-                tc_params = tc.get("params_str", "") or tc.get("params", "") or ""
-                content.append(f"  - {tc_name}: {str(tc_params)[:120]}")
+                content.append(f"- `{tc_name}`")
             else:
-                content.append(f"  - {str(tc)[:120]}")
+                content.append(f"- `{str(tc)[:80]}`")
         content.append("")
     
-    # 统一用追加模式，文件不存在时自动创建
-    # 若文件已有内容（同一会话的先前交互），先写入分隔符
+    # 写入文件（Markdown 格式）
     file_exists = os.path.exists(record_path)
     file_has_content = file_exists and os.path.getsize(record_path) > 0
     with open(record_path, "a", encoding="utf-8") as f:
         if file_has_content:
-            interaction_label = f"\n\n{'─' * 60}\n{'Interaction' if lang == 'english' else '交互记录'} — {time_str}\n{'─' * 60}\n\n"
-            f.write(interaction_label)
+            f.write(f"\n\n---\n\n")
         f.write("\n".join(content).rstrip("\n"))
 
 # -------------------------- 6. 解析SSE结构化响应（新版：支持[TXT]...[TXT:DONE] / [plan]...[plan:done] / [tool:...]...[tool:...:done]）--------------------------
@@ -5811,35 +5783,32 @@ def handle_ai(
             # 工具结果：写磁盘 + 追加结构化日志到 current_question
             if tool_results:
                 _now_str = datetime.now().strftime('%H:%M:%S')
-                _log_lines = [f"\n--- 第 {interaction_count} 轮工具调用 ({_now_str}) ---"]
+                _log_lines = [f"### 第 {interaction_count} 轮工具调用 ({_now_str})", ""]
                 _res_idx = 0
                 for tc in tool_calls:
                     _tn = tc.get("name", "?")
-                    _tp = tc.get("params_str", tc.get("body", ""))[:120]
                     # 跳过已在流式阶段执行过的（不在 tool_results 中）
                     _exec_key = f"{_tn}:{tc.get('params_str', '')}"
                     if _exec_key in executed_tools:
                         continue
                     _res = tool_results[_res_idx] if _res_idx < len(tool_results) else "(无结果)"
                     _res_idx += 1
-                    _log_lines.append(f"  工具: {_tn}")
-                    _log_lines.append(f"  参数: {_tp}")
-                    if len(_res) > 300:
-                        _log_lines.append(f"  结果: {_res[:300]}... ({len(_res)} bytes)")
-                    else:
-                        _log_lines.append(f"  结果: {_res}")
+                    _log_lines.append(f"- **工具**: `{_tn}`")
+                    _log_lines.append(f"  ```")
+                    _log_lines.append(f"  {_res}")
+                    _log_lines.append(f"  ```")
                 _log_text = "\n".join(_log_lines)
 
-                # 写入 library 磁盘
+                # 写入 library 磁盘（Markdown格式）
                 _, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                 if record_path:
                     try:
                         with open(record_path, "a", encoding="utf-8") as f:
-                            f.write(f"\n{_log_text}\n")
+                            f.write(f"\n\n{_log_text}\n")
                     except Exception:
                         pass
-                # 追加到 current_question（AI 下一轮直接看到，含轮次标记防止混淆）
-                current_question += _log_text
+                # 追加到 current_question
+                current_question += f"\n\n{_log_text}"
         
         cmd_results = {}
         

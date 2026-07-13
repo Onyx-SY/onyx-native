@@ -4068,22 +4068,13 @@ def _exec_estimate_tokens(text: str) -> str:
 
 
 def _exec_context_summary() -> str:
-    """当前上下文 Token 使用摘要（纯数量，不含百分比）。"""
-    try:
-        from lib.token_budget import estimate_message_tokens
-        tracker = getattr(_thread_locals, "context_tracker", None)
-        if tracker is None or not tracker.get_messages():
-            # 追踪器未就绪 → 告诉 AI 不要反复调，末尾会自动显示
-            return ("[AUTO] Token 用量会在每轮对话结束时自动显示，无需额外调用。\n"
-                    "请直接回答用户的问题，不要重复查询。")
-        msgs = tracker.get_messages()
-        total_est = sum(estimate_message_tokens(m) for m in msgs)
-        rounds = len(msgs) // 2
-        return (f"[AUTO] 当前上下文约 ~{total_est} tokens\n"
-                f"对话轮次: {rounds} 轮 | 消息数: {len(msgs)} 条\n"
+    """当前上下文 Token 使用摘要（基于 API 精确值）。"""
+    _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
+    if _pt:
+        return (f"[AUTO] 当前上下文 ~{_pt} tokens（API 精确值）\n"
                 "（每轮结束时会自动显示，无需重复调用）")
-    except Exception as e:
-        return f"❌ context_summary failed: {e}"
+    return ("[AUTO] Token 用量会在每轮对话结束时自动显示，无需额外调用。\n"
+            "请直接回答用户的问题，不要重复查询。")
 
 
 # 线程局部存储
@@ -4986,13 +4977,8 @@ def handle_ai(
                         f"Record time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                         f"{'=' * 60}\n")
     
-    # ── 初始化 Token 预算追踪器 ──
-    try:
-        from lib.token_budget import ContextTracker
-        _context_tracker = ContextTracker(max_tokens=8192)
-        _thread_locals.context_tracker = _context_tracker
-    except Exception:
-        _context_tracker = None
+    # ── last_prompt_tokens 清零（每场对话独立） ──
+    _thread_locals.last_prompt_tokens = 0
 
     current_times = 1
     while continue_asking:
@@ -5002,6 +4988,9 @@ def handle_ai(
         interaction_count += 1
         user_answer = ""
         user_refuse_reasons = []
+        
+        # ── 确保 library 磁盘记录存在（工具结果依赖它持久化）──
+        _ensure_library_record()
         
         existing_memory, memory_file = get_latest_ai_session(user_home_dir, current_session_id)
         if memory_file:
@@ -5732,22 +5721,14 @@ def handle_ai(
             _completion = _usage_info.get("completion_tokens", 0)
             _cache_hit = _usage_info.get("prompt_cache_hit_tokens", 0)
             _cache_miss = _usage_info.get("prompt_cache_miss_tokens", 0)
-            # 存下精确 prompt_tokens（供末尾显示用，比 tracker 估算准）
-            _thread_locals.last_prompt_tokens = _prompt
+            # 存下精确 prompt_tokens（末尾显示用，纯磁盘架构不依赖内存 tracker）
+            if _prompt:
+                _thread_locals.last_prompt_tokens = _prompt
             parts = [f"⚡ {_total} tokens"]
             if _cache_hit:
                 saved_pct = _cache_hit / (_cache_hit + _cache_miss) * 100 if (_cache_hit + _cache_miss) else 0
                 parts.append(f"💰 cache {saved_pct:.0f}% hit")
             console.print(f"  [dim]{' · '.join(parts)}[/]")
-
-        # ── 更新 ContextTracker（仅在 AI 有实际文本输出时记录，排除纯工具调用轮次）──
-        try:
-            _tracker = getattr(_thread_locals, "context_tracker", None)
-            if _tracker is not None and has_txt:
-                _tracker.add_message({"role": "user", "content": current_question or ""})
-                _tracker.add_message({"role": "assistant", "content": ai_result.get("txt", "") or ""})
-        except Exception:
-            pass
         
         # ---- Plan 确认流程 ----
         if plan_text and plan_text.strip():
@@ -5827,16 +5808,9 @@ def handle_ai(
                     tool_results.append(err_msg)
                     console.print(f"   {err_msg}", style="bold red")
 
-            # 工具结果追加到 current_question（让 AI 在下一轮能看到执行结果）
+            # 工具结果写入 library 磁盘（build_memory_context 下一轮自动加载）
             if tool_results:
                 tool_result_text = "\n".join(tool_results)
-                # 追加到当前问题 → 下一轮 API 调用时 AI 能看到
-                if len(tool_result_text) > 2000:
-                    # 超长结果摘要化（如 read_file 返回大文件）
-                    current_question += f"\n\n[Tool Result: {tool_results[0][:200]}...({len(tool_result_text)} bytes total)]"
-                else:
-                    current_question += f"\n\n[Tool Result]\n{tool_result_text}"
-                # 同时写入 library 磁盘（持久化）
                 _, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                 if record_path:
                     try:
@@ -6083,21 +6057,10 @@ def handle_ai(
             continue_asking = False
         else:
             # 非 REPL 模式，无待执行 → 显示 ESC 门控
-            # ── 先显示当前上下文 token 量 ──
-            try:
-                # 优先用 API 返回的精确 prompt_tokens（含系统提示词+环境+记忆+问题+JSON结构）
-                _pt = getattr(_thread_locals, "last_prompt_tokens", None)
-                if _pt:
-                    console.print(f"  [dim]📊 上下文 ~{_pt} tokens（API 精确值）[/]")
-                else:
-                    # 降级到 tracker 估算（只含 memory+问题+回复，不含系统提示词）
-                    _ct = getattr(_thread_locals, "context_tracker", None)
-                    if _ct is not None:
-                        from lib.token_budget import estimate_message_tokens as _emt
-                        _total_tokens = sum(_emt(m) for m in _ct.get_messages())
-                        console.print(f"  [dim]📊 上下文 ~{_total_tokens} tokens（估算，不含系统提示词）[/]")
-            except Exception:
-                pass
+            # ── 显示 API 返回的精确 prompt_tokens（全磁盘架构，含系统提示词+环境+记忆+问题+JSON结构） ──
+            _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
+            if _pt:
+                console.print(f"  [dim]📊 上下文 ~{_pt} tokens（API 精确值）[/]")
             continue_asking = False
             esc_pressed = [False]
             kb_esc = KeyBindings()

@@ -3896,9 +3896,193 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
             },
         })
 
+    # ── 内置分析工具（代码理解 + 编辑验证 + Token预算）──
+    BUILTIN_ANALYSIS_TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_symbol",
+                "description": "跨文件追踪符号定义和引用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "符号名称（函数/类/变量名）"},
+                        "root_dir": {"type": "string", "description": "搜索根目录, 默认 '.'"},
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "file_outline",
+                "description": "获取文件的符号大纲",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "文件路径"},
+                    },
+                    "required": ["file_path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "validate_edit",
+                "description": "校验 SEARCH/REPLACE 编辑是否安全（检查 search 文本存在且唯一）",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "目标文件路径"},
+                        "search": {"type": "string", "description": "要查找的文本"},
+                        "replace": {"type": "string", "description": "替换文本"},
+                    },
+                    "required": ["file_path", "search", "replace"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "preview_edit",
+                "description": "预览 SEARCH/REPLACE 编辑的 unified diff",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "目标文件路径"},
+                        "search": {"type": "string", "description": "要查找的文本"},
+                        "replace": {"type": "string", "description": "替换文本"},
+                    },
+                    "required": ["file_path", "search", "replace"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "estimate_tokens",
+                "description": "估算文本的 token 数量",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "要估算的文本"},
+                    },
+                    "required": ["text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "context_summary",
+                "description": "显示当前对话上下文的 token 使用情况",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        },
+    ]
+
+    native.extend(BUILTIN_ANALYSIS_TOOLS)
     _mcp_debug_exit("build_native_tools", ok=len(native) > 0,
-                    detail=f"{len(native)} native tools")
+                    detail=f"{len(native)} native tools ({len(native)-len(BUILTIN_ANALYSIS_TOOLS)} mcp + {len(BUILTIN_ANALYSIS_TOOLS)} builtin)")
     return native
+
+
+# ──────────────────── 内置分析工具执行器 ────────────────────
+
+def _exec_analyze_symbol(name: str, root_dir: str = ".") -> str:
+    """跨文件追踪符号。"""
+    try:
+        from lib.analysis import analyze_symbol
+        result = analyze_symbol(name, root_dir)
+        lines = [f"📌 Symbol: {result['name']}"]
+        if result["definitions"]:
+            lines.append(f"\n📄 Definitions ({len(result['definitions'])}):")
+            for d in result["definitions"]:
+                lines.append(f"  {d['file']}:{d['line']} ({d['kind']})")
+        else:
+            lines.append("\n📄 No definition found")
+        if result["references"]:
+            lines.append(f"\n🔗 References ({len(result['references'])}):")
+            # 按文件分组显示
+            by_file = {}
+            for r in result["references"]:
+                by_file.setdefault(r["file"], []).append(r["line"])
+            for f, lines_list in sorted(by_file.items()):
+                lines.append(f"  {f}: {', '.join(f'L{l}' for l in lines_list[:10])}")
+                if len(lines_list) > 10:
+                    lines[-1] += f" ... (+{len(lines_list)-10})"
+        if result["files_affected"]:
+            lines.append(f"\n📁 Files affected: {len(result['files_affected'])}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ analyze_symbol failed: {e}"
+
+
+def _exec_file_outline(file_path: str) -> str:
+    """返回文件符号大纲。"""
+    try:
+        from lib.analysis import file_outline
+        return file_outline(file_path)
+    except Exception as e:
+        return f"❌ file_outline failed: {e}"
+
+
+def _exec_validate_edit(file_path: str, search: str, replace: str) -> str:
+    """校验 SEARCH/REPLACE 编辑。"""
+    try:
+        from lib.edit_engine import validate_edit, dry_run_edit
+        ok, msg = validate_edit(file_path, search, replace)
+        if ok:
+            diff = dry_run_edit(file_path, search, replace)
+            return f"✅ Edit valid\n\n{diff[:2000]}"
+        return f"❌ {msg}"
+    except Exception as e:
+        return f"❌ validate_edit failed: {e}"
+
+
+def _exec_preview_edit(file_path: str, search: str, replace: str) -> str:
+    """预览 diff。"""
+    try:
+        from lib.edit_engine import dry_run_edit
+        diff = dry_run_edit(file_path, search, replace)
+        if diff.startswith("❌"):
+            return diff
+        return f"```diff\n{diff}\n```"
+    except Exception as e:
+        return f"❌ preview_edit failed: {e}"
+
+
+def _exec_estimate_tokens(text: str) -> str:
+    """估算 token 数。"""
+    try:
+        from lib.token_budget import estimate_tokens
+        count = estimate_tokens(text)
+        return f"📊 Estimated tokens: {count}\n(字符数: {len(text)}, 估算基于 char/4 启发式)"
+    except Exception as e:
+        return f"❌ estimate_tokens failed: {e}"
+
+
+def _exec_context_summary() -> str:
+    """当前上下文 Token 使用摘要。"""
+    try:
+        from lib.token_budget import ContextTracker
+        # 从全局获取追踪器（若已初始化）
+        tracker = getattr(_thread_locals, "context_tracker", None)
+        if tracker is None:
+            return "📊 Context tracker not active (will activate on next AI call)"
+        return f"📊 Context usage:\n{tracker.summary()}"
+    except Exception as e:
+        return f"❌ context_summary failed: {e}"
+
+
+# 线程局部存储
+import threading as _threading_mod
+_thread_locals = _threading_mod.local()
 
 
 def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
@@ -3912,6 +4096,22 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
     - 写入类工具仅在 mid 及以上模式可用（low 禁止）
     - path_validator: 可选回调 (tool_name, path) -> (bool, str)，用于路径安全校验
     """
+    # ── 内置分析工具（不经过 MCP，直接 Python 执行）──
+    _BUILTIN_HANDLERS = {
+        "analyze_symbol": lambda p: _exec_analyze_symbol(p.get("name", ""), p.get("root_dir", ".")),
+        "file_outline": lambda p: _exec_file_outline(p.get("file_path", "")),
+        "validate_edit": lambda p: _exec_validate_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
+        "preview_edit": lambda p: _exec_preview_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
+        "estimate_tokens": lambda p: _exec_estimate_tokens(p.get("text", "")),
+        "context_summary": lambda p: _exec_context_summary(),
+    }
+    if tool_name in _BUILTIN_HANDLERS:
+        try:
+            result = _BUILTIN_HANDLERS[tool_name](params or {})
+            return True, result
+        except Exception as e:
+            return False, f"Builtin tool error: {e}"
+
     # 剥离 mcp__ 前缀（递归剥离，防止 AI 输出双重前缀）
     raw_tool = tool_name
     if tool_name.startswith("mcp__"):

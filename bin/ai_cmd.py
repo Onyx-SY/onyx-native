@@ -5808,16 +5808,38 @@ def handle_ai(
                     tool_results.append(err_msg)
                     console.print(f"   {err_msg}", style="bold red")
 
-            # 工具结果写入 library 磁盘（build_memory_context 下一轮自动加载）
+            # 工具结果：写磁盘 + 追加结构化日志到 current_question
             if tool_results:
-                tool_result_text = "\n".join(tool_results)
+                _now_str = datetime.now().strftime('%H:%M:%S')
+                _log_lines = [f"\n--- 第 {interaction_count} 轮工具调用 ({_now_str}) ---"]
+                _res_idx = 0
+                for tc in tool_calls:
+                    _tn = tc.get("name", "?")
+                    _tp = tc.get("params_str", tc.get("body", ""))[:120]
+                    # 跳过已在流式阶段执行过的（不在 tool_results 中）
+                    _exec_key = f"{_tn}:{tc.get('params_str', '')}"
+                    if _exec_key in executed_tools:
+                        continue
+                    _res = tool_results[_res_idx] if _res_idx < len(tool_results) else "(无结果)"
+                    _res_idx += 1
+                    _log_lines.append(f"  工具: {_tn}")
+                    _log_lines.append(f"  参数: {_tp}")
+                    if len(_res) > 300:
+                        _log_lines.append(f"  结果: {_res[:300]}... ({len(_res)} bytes)")
+                    else:
+                        _log_lines.append(f"  结果: {_res}")
+                _log_text = "\n".join(_log_lines)
+
+                # 写入 library 磁盘
                 _, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                 if record_path:
                     try:
                         with open(record_path, "a", encoding="utf-8") as f:
-                            f.write(f"\n\n--- AI Tool Results ---\n{tool_result_text}\n")
+                            f.write(f"\n{_log_text}\n")
                     except Exception:
                         pass
+                # 追加到 current_question（AI 下一轮直接看到，含轮次标记防止混淆）
+                current_question += _log_text
         
         cmd_results = {}
         

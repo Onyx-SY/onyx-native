@@ -4071,11 +4071,27 @@ def _exec_context_summary() -> str:
     """当前上下文 Token 使用摘要。"""
     try:
         from lib.token_budget import ContextTracker
-        # 从全局获取追踪器（若已初始化）
         tracker = getattr(_thread_locals, "context_tracker", None)
         if tracker is None:
-            return "📊 Context tracker not active (will activate on next AI call)"
-        return f"📊 Context usage:\n{tracker.summary()}"
+            return ("📊 Token 追踪器未激活。\n"
+                    "请先开启一次 AI 对话（直接提问），追踪器会在对话中自动初始化。")
+        msgs = tracker.get_messages()
+        if not msgs:
+            return ("📊 Token 追踪器已就绪，等待对话数据。\n"
+                    "请先发送一条消息给 AI。")
+        # 显示详情
+        lines = [f"📊 **Token 用量**"]
+        lines.append(f"```")
+        lines.append(tracker.summary())
+        lines.append(f"```")
+        lines.append(f"  对话轮次: {len(msgs) // 2} 轮")
+        # 估算各条消息
+        from lib.token_budget import estimate_message_tokens
+        total_est = sum(estimate_message_tokens(m) for m in msgs)
+        lines.append(f"  当前消息数: {len(msgs)} 条")
+        lines.append(f"  实时估算: ~{total_est} tokens")
+        lines.append(f"  上限: {tracker.max_tokens} tokens")
+        return "\n".join(lines)
     except Exception as e:
         return f"❌ context_summary failed: {e}"
 
@@ -4096,7 +4112,18 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
     - 写入类工具仅在 mid 及以上模式可用（low 禁止）
     - path_validator: 可选回调 (tool_name, path) -> (bool, str)，用于路径安全校验
     """
+    # ── 剥离 mcp__ 前缀（递归剥离，防止 AI 输出双重前缀）──
+    # 必须在内置工具检查之前剥离，因为 AI 可能误加 mcp__server__ 前缀
+    raw_tool = tool_name
+    if tool_name.startswith("mcp__"):
+        _, server, raw_tool = tool_name.split("__", 2)
+        name = server
+        while raw_tool.startswith("mcp__"):
+            _, server, raw_tool = raw_tool.split("__", 2)
+            name = server
+
     # ── 内置分析工具（不经过 MCP，直接 Python 执行）──
+    # 用剥离后的 raw_tool 匹配
     _BUILTIN_HANDLERS = {
         "analyze_symbol": lambda p: _exec_analyze_symbol(p.get("name", ""), p.get("root_dir", ".")),
         "file_outline": lambda p: _exec_file_outline(p.get("file_path", "")),
@@ -4105,22 +4132,12 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "estimate_tokens": lambda p: _exec_estimate_tokens(p.get("text", "")),
         "context_summary": lambda p: _exec_context_summary(),
     }
-    if tool_name in _BUILTIN_HANDLERS:
+    if raw_tool in _BUILTIN_HANDLERS:
         try:
-            result = _BUILTIN_HANDLERS[tool_name](params or {})
+            result = _BUILTIN_HANDLERS[raw_tool](params or {})
             return True, result
         except Exception as e:
             return False, f"Builtin tool error: {e}"
-
-    # 剥离 mcp__ 前缀（递归剥离，防止 AI 输出双重前缀）
-    raw_tool = tool_name
-    if tool_name.startswith("mcp__"):
-        _, server, raw_tool = tool_name.split("__", 2)
-        name = server
-        # 递归剥离：如果 raw_tool 仍以 mcp__ 开头，继续剥
-        while raw_tool.startswith("mcp__"):
-            _, server, raw_tool = raw_tool.split("__", 2)
-            name = server
 
     # ---- 安全限制：写入类工具仅 mid 及以上模式可用（low 禁止） ----
     write_tools = {"edit_file", "write_file", "create_file", "delete_file",
@@ -4979,6 +4996,14 @@ def handle_ai(
                         f"Record time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                         f"{'=' * 60}\n")
     
+    # ── 初始化 Token 预算追踪器 ──
+    try:
+        from lib.token_budget import ContextTracker
+        _context_tracker = ContextTracker(max_tokens=8192)
+        _thread_locals.context_tracker = _context_tracker
+    except Exception:
+        _context_tracker = None
+
     current_times = 1
     while continue_asking:
         if _AI_INTERRUPTED:
@@ -5722,6 +5747,14 @@ def handle_ai(
                 saved_pct = _cache_hit / (_cache_hit + _cache_miss) * 100 if (_cache_hit + _cache_miss) else 0
                 parts.append(f"💰 cache {saved_pct:.0f}% hit")
             console.print(f"  [dim]{' · '.join(parts)}[/]")
+            # ── 更新 ContextTracker（使用 API 返回的实际 token 数）──
+            try:
+                _tracker = getattr(_thread_locals, "context_tracker", None)
+                if _tracker is not None:
+                    _tracker.add_message({"role": "user", "content": current_question or ""})
+                    _tracker.add_message({"role": "assistant", "content": ai_result.get("txt", "") or ""})
+            except Exception:
+                pass
         
         # ---- Plan 确认流程 ----
         if plan_text and plan_text.strip():

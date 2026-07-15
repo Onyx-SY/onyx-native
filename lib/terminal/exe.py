@@ -393,8 +393,8 @@ class PersistentShell:
                         self._extra_vars[key] = str(value)
 
         self._init_shell()
-        # ECHO 已在 _init_shell_unix 的 child 进程中通过 tcsetattr 永久禁用，
-        # 无需再发 stty -echo 命令，消除 echo 泄漏和 sleep 延迟
+        # PTY slave 保留 ECHO（input() 等交互需要回显），
+        # 命令回显行由 _execute_passthrough 的 _echo_skipped 机制过滤。
         self._setup_prompt()
         # Skip _inject_extra_vars() on initial creation: env vars are already
         # passed to the child process via os.execvpe(..., env) in _init_shell.
@@ -781,15 +781,8 @@ class PersistentShell:
                 os.dup2(slave_fd, 2)
                 if slave_fd > 2:
                     os.close(slave_fd)
-                # 根治：在 exec shell 之前直接禁用 PTY slave 的 ECHO，
-                # shell 从一开始就不会回显输入，彻底消除 stty -echo 泄漏和 sleep 延迟
-                try:
-                    attrs = termios.tcgetattr(0)  # fd 0 = slave PTY
-                    attrs[3] &= ~termios.ECHO     # lflag: 关掉 ECHO
-                    termios.tcsetattr(0, termios.TCSANOW, attrs)
-                except termios.error:
-                    pass
-
+                # PTY slave 保留 ECHO 能力，使 input() 等交互式程序的输入回显能正常返回。
+                # 命令回显行由 _execute_passthrough 的 _echo_skipped 机制过滤。
                 env = os.environ.copy()
                 env['TERM'] = env.get('TERM', 'xterm-256color')
                 env['LINES'] = str(rows)
@@ -939,16 +932,17 @@ class PersistentShell:
             pass
 
     def _disable_echo(self):
-        """Send command to disable echo (safety net: PTY slave already has ECHO off from init)"""
+        """
+        抑制 shell 的 PS1/命令回显。
+        注意：不能关 PTY ECHO（stty -echo），否则 input() 输入回显会消失。
+        命令回显由 _execute_passthrough 的 _echo_skipped 机制过滤。
+        """
         if self.master_fd is None and self._winpty_handle is None:
             return
         try:
-            if self.shell_name in ('pwsh', 'powershell'):
-                pass
-            elif self.shell_name == 'cmd':
+            if self.shell_name == 'cmd':
                 self._write_to_master(b"@echo off\n")
-            else:
-                self._write_to_master(b"stty -echo 2>/dev/null\n")
+            # Unix: 不发送 stty -echo，靠 PS1='' + _echo_skipped 过滤
             self._drain_output()
         except OSError as e:
             debug_log(f"Failed to disable echo: {e}", 'error')

@@ -3885,6 +3885,106 @@ def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> 
     return result
 
 
+def build_native_tools_prompt(lang: str = "chinese") -> str:
+    """
+    构建注入给 AI 的原生标记语言操作说明（取代 MCP tools prompt）。
+    告诉 AI 使用纯文本标记操作文件，不再依赖 MCP JSON-RPC。
+    """
+    lines = []
+    if lang == "chinese":
+        lines.append("## AI 文件操作（Onyx 原生标记语言）")
+        lines.append("直接用纯文本标记操作文件，无需 JSON 转义。")
+        lines.append("**优先级**：原生标记语言（首选）> MCP 协议（兜底）")
+        lines.append("")
+        lines.append("### 查看（精确，不截断）")
+        lines.append("[VIEW:路径]                   — 完整文件，每行带行号")
+        lines.append("[VIEW:路径:10-30]             — 第 10 到 30 行")
+        lines.append("[VIEW:路径:42]                — 第 42 行")
+        lines.append("[VIEW:路径:search:关键词]     — 搜索含关键词的行")
+        lines.append("")
+        lines.append("### 编辑")
+        lines.append("[EDIT:路径]")
+        lines.append("<<<<<<< SEARCH")
+        lines.append("旧内容（逐字节匹配，必须唯一）")
+        lines.append("=======")
+        lines.append("新内容")
+        lines.append(">>>>>>> REPLACE")
+        lines.append("")
+        lines.append("[WRITE:路径]")
+        lines.append("新文件全部内容")
+        lines.append("[WRITE:DONE]")
+        lines.append("")
+        lines.append("[APPEND:路径]")
+        lines.append("追加的内容")
+        lines.append("")
+        lines.append("[INSERT:路径:行号]")
+        lines.append("插入的内容")
+        lines.append("[INSERT:DONE]")
+        lines.append("")
+        lines.append("[DELETE:路径:10-15]          — 按行号删除")
+        lines.append("[DELETE:路径:search:内容]     — 按内容删除（必须唯一）")
+        lines.append("[DELETE:路径:10-15:show]     — 删除并展示被删内容")
+        lines.append("")
+        lines.append("### 原则")
+        lines.append("1. Shell 优先：ls/cat/grep/find 能做的就别用标记")
+        lines.append("2. 读优先：改文件前先 [VIEW:] 确认行号")
+        lines.append("3. 唯一锚点：[EDIT:] 的 SEARCH 必须逐字节匹配且唯一")
+        lines.append("4. 分块：每块不超过 50 行，每次最多 5 个操作")
+        lines.append("5. 每个操作会自动显示彩色面板（绿=增/红=删/蓝=读）")
+        lines.append("")
+        lines.append("MCP 仅作为兜底（非文件操作时使用）：")
+        lines.append("[tool:mcp__<server>__<tool>]")
+        lines.append('{"param": "value"}')
+        lines.append("[tool:mcp__<server>__<tool>:done]")
+    else:
+        lines.append("## AI File Operations (Onyx Native Markup)")
+        lines.append("Use plain text markup for file operations, no JSON needed.")
+        lines.append("**Priority**: Native Markup (primary) > MCP Protocol (fallback)")
+        lines.append("")
+        lines.append("### View (exact, no truncation)")
+        lines.append("[VIEW:path]                  — Full file with line numbers")
+        lines.append("[VIEW:path:10-30]            — Lines 10 to 30")
+        lines.append("[VIEW:path:42]               — Line 42 only")
+        lines.append("[VIEW:path:search:keyword]   — Search lines containing keyword")
+        lines.append("")
+        lines.append("### Edit")
+        lines.append("[EDIT:path]")
+        lines.append("<<<<<<< SEARCH")
+        lines.append("old text (byte-exact match, must be unique)")
+        lines.append("=======")
+        lines.append("new text")
+        lines.append(">>>>>>> REPLACE")
+        lines.append("")
+        lines.append("[WRITE:path]")
+        lines.append("full content")
+        lines.append("[WRITE:DONE]")
+        lines.append("")
+        lines.append("[APPEND:path]")
+        lines.append("content to append")
+        lines.append("")
+        lines.append("[INSERT:path:line_number]")
+        lines.append("content to insert")
+        lines.append("[INSERT:DONE]")
+        lines.append("")
+        lines.append("[DELETE:path:10-15]          — Delete by line range")
+        lines.append("[DELETE:path:search:text]     — Delete by content (unique)")
+        lines.append("[DELETE:path:10-15:show]     — Delete & show removed content")
+        lines.append("")
+        lines.append("### Rules")
+        lines.append("1. Shell first: use ls/cat/grep/find when possible")
+        lines.append("2. View first: [VIEW:] before editing")
+        lines.append("3. Unique anchor: SEARCH text must be byte-exact and unique")
+        lines.append("4. Chunk: each block ≤ 50 lines, max 5 operations per response")
+        lines.append("5. Color panels auto-show: green=new, red=deleted, blue=reading")
+        lines.append("")
+        lines.append("MCP fallback (for non-file operations):")
+        lines.append("[tool:mcp__<server>__<tool>]")
+        lines.append('{"param": "value"}')
+        lines.append("[tool:mcp__<server>__<tool>:done]")
+
+    return "\n".join(lines)
+
+
 def build_native_tools(user_home_dir: str = None) -> List[Dict]:
     """Build OpenAI-compatible tools array from MCP tool registry.
 
@@ -4462,7 +4562,7 @@ def handle_ai(
         # 1. 优先：Registry 中已有工具（预加载或前次缓存命中）
         if registry.tool_count() > 0 and registry.has_server("filesystem"):
             _mcp_debug("路径1: Registry 命中 → 直接使用")
-            ai_tools_prompt = build_mcp_tools_prompt(current_lang, user_home_dir)
+            ai_tools_prompt = build_native_tools_prompt(current_lang)
             native_tools = build_native_tools(user_home_dir)
 
         # 2. 次优：Schema 缓存命中 → 直接注册占位符，跳过握手（冷启动加速）
@@ -4479,7 +4579,7 @@ def handle_ai(
                     registry.replace_server("filesystem", cached_tools)
                     # 后台异步握手（下次使用时替换为真实 schema）
                     _schedule_mcp_health_check(user_home_dir)
-                    ai_tools_prompt = build_mcp_tools_prompt(current_lang, user_home_dir)
+                    ai_tools_prompt = build_native_tools_prompt(current_lang)
                 else:
                     # 3. 兜底：同步连接 + 握手
                     _mcp_debug("路径3: 缓存未命中，同步连接 MCP server...")
@@ -4487,15 +4587,15 @@ def handle_ai(
                         _mcp_debug("install_default_mcp_server OK, calling connect_mcp_server...")
                         connect_mcp_server("filesystem", user_home_dir)
                         _mcp_debug("connect_mcp_server returned")
-                    ai_tools_prompt = build_mcp_tools_prompt(current_lang, user_home_dir)
+                    ai_tools_prompt = build_native_tools_prompt(current_lang)
             else:
                 _mcp_debug("路径2b: server_info 为空")
-                ai_tools_prompt = build_mcp_tools_prompt(current_lang, user_home_dir)
+                ai_tools_prompt = build_native_tools_prompt(current_lang)
 
         # 4. 旧缓存命中
         else:
             _mcp_debug("路径4: 旧 MCP_TOOLS_CACHE 命中")
-            ai_tools_prompt = build_mcp_tools_prompt(current_lang, user_home_dir)
+            ai_tools_prompt = build_native_tools_prompt(current_lang)
 
         # Build native tools array for function-calling API (from whatever path populated the registry)
         native_tools = build_native_tools(user_home_dir)
@@ -4844,7 +4944,7 @@ def handle_ai(
 
         def tui_question_callback(question_text: str, ctx: dict) -> str:
             tui_mode = ctx.get("mode", "normal")
-            tools_prompt = build_mcp_tools_prompt(current_lang)
+            tools_prompt = build_native_tools_prompt(current_lang)
             result = call_ai_api_sse(
                 question=question_text,
                 new_key=None,

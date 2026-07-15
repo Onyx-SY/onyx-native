@@ -902,7 +902,7 @@ class PersistentShell:
             setup_cmd = "prompt $G\n@echo off\n"
         else:
             # bash and other sh-compatible shells
-            setup_cmd = f"PS1='{self._done_marker}:$?\\n'\n"
+            setup_cmd = f"PROMPT_COMMAND=''\nPS1='{self._done_marker}:$?\\n'\n"
 
         try:
             self._write_to_master(setup_cmd.encode('utf-8'))

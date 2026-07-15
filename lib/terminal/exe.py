@@ -548,14 +548,6 @@ class PersistentShell:
 
                     # 过滤内部标记
                     text = re.sub(r'__READY_\w+__\s*', '', text)
-                    # 去掉首行开头的 > (空 PS1 导致的 PS2 泄漏)，不伤及其他行
-                    _stripped = text.lstrip('\n')
-                    if _stripped.startswith('>'):
-                        _nl = _stripped.find('\n')
-                        if _nl != -1:
-                            text = _stripped[_nl + 1:]
-                        else:
-                            text = ''
                     if not text.strip():
                         continue
 
@@ -568,18 +560,19 @@ class PersistentShell:
                             debug_log(f"PS1 done marker, exit={return_code}")
                             before_marker = text[:done_match.start()]
                             if before_marker:
-                                # 原始 PTY 输出中的行尾已经正确，不做额外处理
-                                sys.stdout.write(before_marker)
+                                clean = before_marker.replace('\r\n', '\n')
+                                sys.stdout.write(clean)
                                 sys.stdout.flush()
                                 if output_buffer is not None:
-                                    output_buffer.append(before_marker)
+                                    output_buffer.append(clean)
                             break
 
                     # Real-time output forwarding
-                    sys.stdout.write(text)
+                    clean = text.replace('\r\n', '\n')
+                    sys.stdout.write(clean)
                     sys.stdout.flush()
                     if output_buffer is not None:
-                        output_buffer.append(text)
+                        output_buffer.append(clean)
 
                 # --- Forward stdin to PTY (for TUI programs) ---
                 if stdin_data is not None and len(stdin_data) > 0:

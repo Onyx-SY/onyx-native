@@ -17,6 +17,10 @@ import shlex
 import re
 import secrets
 from typing import List, Tuple, Optional, Dict, Any, Callable
+
+# ── 自研文件编辑系统 ──
+from lib.native_fs.markup_parser import parse_markup as _parse_markup
+from lib.native_fs import process_blocks as _process_native_blocks
 from datetime import datetime, timedelta
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import Completer, Completion
@@ -1718,11 +1722,13 @@ def _parse_legacy_shell(lines: List[str], start_i: int) -> Dict[str, Any]:
     return result
 
 # -------------------------- 7. AI API 调用（SSE模式）-------------------------
-def call_ai_api_sse(question: str, type: Optional[str] = None, new_key: Optional[str] = None, 
+def call_ai_api_sse(question: str = "", type: Optional[str] = None, new_key: Optional[str] = None, 
                     debug_mode: bool = False, onyx_module=None, mode: str = "normal", times: int = 1,
                     ai_tools_prompt: str = "", on_content: Optional[Callable[[str], None]] = None,
+                    on_tool_call: Optional[Callable[[str], None]] = None,
                     user_home_dir: str = None,
-                    tools: Optional[List[Dict]] = None) -> Dict[str, Any]:
+                    tools: Optional[List[Dict]] = None,
+                    messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
     lang = get_current_lang()
     prompts = get_prompt_text(lang)
 
@@ -1878,10 +1884,16 @@ Onyx Mode: {onyx_mode}
             pass
 
     # ── 构建 messages ──
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": env_info})
+    # 如果外部传入了完整 messages（标准对话历史），优先使用
+    if messages is None:
+        # 旧路径：从 question + env_info 构建单轮 user message
+        _messages = []
+        if system_prompt:
+            _messages.append({"role": "system", "content": system_prompt})
+        _messages.append({"role": "user", "content": env_info})
+    else:
+        # 新路径：直接使用外部传入的标准 messages（handle_ai 负责维护）
+        _messages = messages
 
     headers = {
         "Content-Type": "application/json",
@@ -1904,7 +1916,7 @@ Onyx Mode: {onyx_mode}
     if plat_key == "anthropic":
         system_content = ""
         user_content = ""
-        for m in messages:
+        for m in _messages:
             if m["role"] == "system":
                 system_content = m["content"]
             else:
@@ -1919,7 +1931,7 @@ Onyx Mode: {onyx_mode}
     else:
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": _messages,
             "stream": True,
             "max_tokens": p.get("max_tokens", 4096),
         }
@@ -1963,6 +1975,10 @@ Onyx Mode: {onyx_mode}
             )
             _mcp_debug(f"HTTP response: {response.status_code}")
 
+            if response.status_code == 400:
+                _detail = response.text[:500]
+                _mcp_debug(f"HTTP 400 body: {_detail}")
+                return {"error": f"请求参数错误 (400): {_detail}", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code == 401:
                 return {"error": "API key 无效 (401)", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code == 402:
@@ -2033,18 +2049,23 @@ Onyx Mode: {onyx_mode}
                                 if not isinstance(tc_chunk, dict):
                                     continue
                                 tc_idx = tc_chunk.get("index", 0)
-                                if tc_idx not in _tool_calls_acc:
+                                _is_new = tc_idx not in _tool_calls_acc
+                                if _is_new:
                                     _tool_calls_acc[tc_idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                                    # 首次检测到工具调用 → 通知回调
+                                    _tc_name = tc_chunk.get("function", {}).get("name", "")
+                                    if _tc_name and on_tool_call:
+                                        on_tool_call(_tc_name)
                                 tcc = _tool_calls_acc[tc_idx]
-                                if tc_chunk.get("id"):
-                                    tcc["id"] = tc_chunk["id"]
-                                if tc_chunk.get("type"):
-                                    tcc["type"] = tc_chunk["type"]
-                                func_delta = tc_chunk.get("function", {})
-                                if func_delta.get("name"):
-                                    tcc["function"]["name"] = func_delta["name"]
-                                if func_delta.get("arguments"):
-                                    tcc["function"]["arguments"] += func_delta["arguments"]
+                            if tc_chunk.get("id"):
+                                tcc["id"] = tc_chunk["id"]
+                            if tc_chunk.get("type"):
+                                tcc["type"] = tc_chunk["type"]
+                            func_delta = tc_chunk.get("function", {})
+                            if func_delta.get("name"):
+                                tcc["function"]["name"] = func_delta["name"]
+                            if func_delta.get("arguments"):
+                                tcc["function"]["arguments"] += func_delta["arguments"]
                     except json.JSONDecodeError:
                         continue
             else:
@@ -2084,6 +2105,12 @@ Onyx Mode: {onyx_mode}
                 )
 
             result = parse_sse_structured_response(full_content)
+
+            # ── 解析自研标记语言（纯文本 VIEW/EDIT/WRITE/APPEND/INSERT/DELETE）──
+            try:
+                result["markup_blocks"] = _parse_markup(raw_full if raw_full else full_content)
+            except Exception:
+                result["markup_blocks"] = []
 
             # Merge native tool_calls from function calling with text-parsed ones
             if _tool_calls_acc:
@@ -3833,6 +3860,26 @@ def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> 
 
         lines.append("")
 
+    # ── 大文件分块规则（超过 2000 字符的代码必须分批写入）──
+    if lang == "chinese":
+        lines.append("📐 **大文件分块规则**")
+        lines.append("- 超过 2000 字符的文件禁止一次性 write_file 写入完整内容。")
+        lines.append("- 正确做法：")
+        lines.append("  1. 先用 write_file 创建骨架（含 <!-- CHUNK-1 --> <!-- CHUNK-2 --> 等占位标记）")
+        lines.append("  2. 再用 edit_file（SEARCH/REPLACE）逐个替换占位标记为实际代码")
+        lines.append("  3. 每个 edit_file 调用替换一块，每块不超过 2000 字符")
+        lines.append("- 示例：")
+        lines.append('  write_file → 创建文件含 {{CHUNK_1}}')
+        lines.append('  edit_file → SEARCH "{{CHUNK_1}}" REPLACE "<div>...</div>"')
+    else:
+        lines.append("📐 **Large File Chunking Rule**")
+        lines.append("- Files exceeding 2000 chars must NOT use a single write_file.")
+        lines.append("- Correct approach:")
+        lines.append("  1. write_file a skeleton with `{{CHUNK_1}}` `{{CHUNK_2}}` placeholders")
+        lines.append("  2. edit_file (SEARCH/REPLACE) each placeholder with actual code")
+        lines.append("  3. Each edit_file call replaces one chunk, max 2000 chars per chunk")
+    lines.append("")
+
     result = "\n".join(lines)
     _mcp_debug_exit("build_mcp_tools_prompt", ok=len(tools) > 0, detail=f"{len(tools)} tools, {len(result)} chars")
     return result
@@ -3975,6 +4022,29 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
             return True, result
         except Exception as e:
             return False, f"Builtin tool error: {e}"
+
+    # ── write_file 容错：如果参数被 _parse_tool_params 回退成 range_str，尝试从原始 JSON 中抠出 path 和 content ──
+    if raw_tool == "write_file" and "content" not in params and "range_str" in params:
+        _raw = str(params.get("range_str", ""))
+        if _raw.startswith("{"):
+            import re as _re
+            # 尝试从破损 JSON 中提取 path
+            _pm = _re.search(r'"path"\s*:\s*"([^"]*)"', _raw)
+            if _pm:
+                params["path"] = _pm.group(1)
+            # 提取 content：从 "content": " 到文件末尾（JSON 可能被截断，取到最后一个 "） )
+            _cm = _re.search(r'"content"\s*:\s*"(.+)', _raw, _re.DOTALL)
+            if _cm:
+                _raw_content = _cm.group(1)
+                # 去掉末尾可能多出的 `"}` 残留
+                _raw_content = _raw_content.rstrip('"').rstrip('}').rstrip('"').rstrip('}')
+                # 反转义
+                _raw_content = _raw_content.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+                params["content"] = _raw_content
+                params.pop("range_str", None)
+                if _pm and not _raw_content.endswith("\n"):
+                    params["content"] += "\n"
+                _mcp_debug(f"write_file 容错: path={params.get('path', '?')}, content_len={len(params.get('content', ''))}")
 
     # ---- 安全限制：写入类工具仅 mid 及以上模式可用（low 禁止） ----
     write_tools = {"edit_file", "write_file", "create_file", "delete_file",
@@ -4144,7 +4214,8 @@ def _parse_tool_params(params_str: str, body: str) -> Dict:
         if candidate and candidate.strip().startswith("{"):
             try:
                 return json.loads(candidate.strip())
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError) as _je:
+                _mcp_debug(f"_parse_tool_params JSON decode failed: {_je}")
                 pass
 
     # 回退：旧空格分隔格式 "path [operation] [range]"
@@ -4798,15 +4869,12 @@ def handle_ai(
         )
         return
 
-    # Ctrl+C 打断思考：设置中断标志，SSE 流式循环检测到后立即返回
-    global _AI_INTERRUPTED
-    _AI_INTERRUPTED = False
+    # Ctrl+C 打断思考：直接抛出 KeyboardInterrupt 向上传播
+    import signal as _signal
 
     def _on_interrupt(signum, frame):
-        global _AI_INTERRUPTED
-        _AI_INTERRUPTED = True
+        raise KeyboardInterrupt("User interrupted")
 
-    import signal as _signal
     _original_sigint = _signal.signal(_signal.SIGINT, _on_interrupt)
 
     current_session_id = request_id
@@ -4837,7 +4905,40 @@ def handle_ai(
     _thread_locals.last_prompt_tokens = 0
 
     current_times = 1
+    executed_tools = []          # 已执行工具键（跨轮持久）
+    _tool_results_cache = {}     # exec_key → output（供去重时回传缓存结果）
+
+    # ── 标准对话历史（messages 结构）──
+    conversation_history: List[Dict] = []
+    import platform as _pf
+    _env_info = (
+        f"系统: {_pf.system()} - {_pf.release()}\n"
+        f"用户: {os.environ.get('USER', '?')}\n"
+        f"工作目录: {os.getcwd()}\n"
+        f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"#AI工具说明\n{ai_tools_prompt}\n"
+        f"{mood_context()}\n"
+    )
+    # 读取 onyx_ai.md 最高指示
+    _onyx_prompt_path = os.path.join(user_home_dir, ".ai_s", "onyx_ai.md")
+    _onyx_ai_prompt = ""
+    if os.path.exists(_onyx_prompt_path):
+        try:
+            with open(_onyx_prompt_path, "r", encoding="utf-8") as _f:
+                _onyx_ai_prompt = _f.read().strip()
+        except Exception:
+            pass
+    if _onyx_ai_prompt:
+        _env_info += f"\n#最高指示（持久记忆）\n{_onyx_ai_prompt}\n"
+
+    _system_msg = {"role": "system", "content": _env_info}
+    conversation_history.append(_system_msg)
+    conversation_history.append({"role": "user", "content": initial_question})
+
+    current_question = initial_question  # 用于日志/估算，API 实际走 conversation_history
+
     while continue_asking:
+        _tool_calls_processed_this_round = False
         if _AI_INTERRUPTED:
             console.print(_mcp_t("\n⏹ 已中断", "\n⏹ Interrupted"), style="yellow")
             break
@@ -4865,21 +4966,14 @@ def handle_ai(
             )
         
         no_memory_text = lang_text.get("no_memory", "No historical memory" if current_lang == "english" else "无历史记忆")
-        if interaction_count == 1:
-            if memory_section != no_memory_text:
-                current_question = f"#Current Memory\n{memory_section}\n\n#Task\n{initial_question}"
-            else:
-                current_question = initial_question
-        else:
-            # 保留上一轮的追问上下文（ESC 追问 / [ASK] 用户回答），只更新记忆前缀
-            _prev_context = current_question
-            _task_marker = "#Task\n" if "#Task\n" in _prev_context else "#Task" if "#Task" in _prev_context else None
-            if _task_marker:
-                _prev_context = _prev_context.split(_task_marker, 1)[-1].lstrip('\n')
-            if memory_section != no_memory_text:
-                current_question = f"#Current Memory\n{memory_section}\n\n#Task\n{_prev_context}"
-            else:
-                current_question = _prev_context
+        # 记忆上下文注入：首次循环时合并到 initial_question（避免两条连续 user 消息）
+        if interaction_count == 1 and memory_section != no_memory_text:
+            _first_user_idx = next((i for i, m in enumerate(conversation_history) if m.get("role") == "user"), None)
+            if _first_user_idx is not None:
+                conversation_history[_first_user_idx]["content"] = (
+                    f"#聊天记忆\n{memory_section}\n\n---\n\n"
+                    f"{conversation_history[_first_user_idx]['content']}"
+                )
 
         # Plan 模式前缀：告知 AI 当前处于 plan 模式，禁止执行命令和文件修改
         if mode == "plan":
@@ -4887,7 +4981,7 @@ def handle_ai(
                 "⚠️ 当前处于 PLAN 模式。你只能生成计划，不能执行任何命令或修改文件。"
                 "请使用 [plan]...[plan:done] 格式输出你的计划。"
                 "等用户确认后，才能进入执行阶段。")
-            current_question = f"{plan_warning}\n\n{current_question}"
+            conversation_history.append({"role": "system", "content": plan_warning})
         
         # 流式展示：Rich Live Panel — 实时更新 AI 回答
         from rich.live import Live
@@ -4906,7 +5000,6 @@ def handle_ai(
         prompt_val = ""           # [PROMPT]:value — 写入 .ai_s/onyx_ai.md
         live_ref = [None]         # Live 对象引用
         loading_flag = [True]
-        executed_tools = []       # 已实时执行的工具名列表（防重复）
         tool_results_display = []  # 工具执行结果（用于面板展示：名前10行灰色虚影）
         _txt_phase = "pre"        # "pre" | "in_txt" | "post_txt"
 
@@ -4987,9 +5080,8 @@ def handle_ai(
                         parts.append(Panel(Markdown(cleaned.strip()),
                                            title="💬 回复", border_style="green", box=ROUNDED))
                     else:
-                        # 仍在流式接收 → 灰色预览（最后10行）——避免刷屏
-                        lines = cleaned.split('\n')
-                        tail = '\n'.join(lines[-10:]) if len(lines) > 10 else cleaned.strip()
+                        # 仍在流式接收 → 灰色预览（最后100字符）——避免刷屏
+                        tail = cleaned.strip()[-100:] if len(cleaned.strip()) > 100 else cleaned.strip()
                         if tail:
                             parts.append(Text(tail, style="dim"))
 
@@ -5014,13 +5106,10 @@ def handle_ai(
                     icon = "✅" if tr["ok"] else "❌"
                     style = "dim green" if tr["ok"] else "dim red"
                     header = f"{icon} {tr['name']}"
-                    if tr["lines"]:
-                        body = "\n".join(tr["lines"][:4])
-                        total_lines = len(tr["output"].split('\n')) if tr.get("output") else len(tr["lines"])
-                        if total_lines > 4:
-                            body += f"\n…(共 {total_lines} 行，完整输出已保留)"
-                    else:
-                        body = tr.get("output", "")[:200]
+                    body = tr.get("preview", tr.get("output", "")[:100])
+                    _total = len(tr.get("output", ""))
+                    if _total > 100:
+                        body += f"\n…(共 {_total} 字符，完整输出已保留)"
                     parts.append(Panel(body, title=header, border_style=style, box=ROUNDED,
                                        padding=(0, 1)))
 
@@ -5094,13 +5183,12 @@ def handle_ai(
 
             ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
                                           path_validator=_mcp_path_validator)
-            # 取前10行用于面板展示（灰色虚影）
-            output_lines = output.split("\n") if output else []
-            first10 = output_lines[:10]
+            # 取前100字符用于面板展示
+            _preview = output[:100] + ("..." if len(output) > 100 else "")
             tool_results_display.append({
                 "name": tool_name, "params": params_str[:80],
                 "ok": ok, "output": output,
-                "lines": first10
+                "preview": _preview
             })
 
         def _try_extract_blocks() -> None:
@@ -5333,8 +5421,7 @@ def handle_ai(
 
             stream_buffer += chunk
 
-            # 直接追加到 txt_content 驱动灰色流式预览（_try_extract_blocks 会进一步清理）
-            txt_content += chunk
+            # _try_extract_blocks 负责从 stream_buffer 提取文本并追加到 txt_content
 
             # 防止缓冲区无限增长（异常情况下丢旧数据）
             if len(stream_buffer) > 50000:
@@ -5363,10 +5450,21 @@ def handle_ai(
                 loading_flag[0] = False  # Live Panel 已接管展示
                 
                 # 使用SSE模式调用（带实时流式回调）
-                _mcp_debug(f"调用 call_ai_api_sse(question={current_question[:50]}...)")
+                _mcp_debug(f"调用 call_ai_api_sse(messages={len(conversation_history)}条)")
                 try:
+                    def _on_tool_call(tool_name: str) -> None:
+                        """流式检测到工具调用时立即更新面板"""
+                        display_name = tool_name
+                        while display_name.startswith("mcp__"):
+                            parts = display_name.split("__", 2)
+                            display_name = parts[2] if len(parts) > 2 else display_name
+                        live.update(
+                            Panel(f"🔧 AI 正在调用: {display_name}",
+                                  title="🤖 AI", border_style="yellow", box=ROUNDED)
+                        )
                     api_raw_result = call_ai_api_sse(
-                        question=current_question, 
+                        question="", 
+                        messages=conversation_history,
                         new_key=new_key, 
                         debug_mode=debug_mode, 
                     onyx_module=onyx_module,
@@ -5374,6 +5472,7 @@ def handle_ai(
                     times=current_times,
                     ai_tools_prompt=ai_tools_prompt,
                     on_content=on_stream_content,
+                    on_tool_call=_on_tool_call,
                     user_home_dir=user_home_dir,
                     tools=native_tools,
                     )
@@ -5439,6 +5538,7 @@ def handle_ai(
         memory_uuid = ai_result.get("memory", "") or ""
         plan_text = ai_result.get("plan", "") or ""
         tool_calls = ai_result.get("tool_calls", [])
+        markup_blocks = ai_result.get("markup_blocks", [])
         sleep_value = ai_result.get("sleep")
         class_level = ai_result.get("class", "1")
         
@@ -5523,6 +5623,13 @@ def handle_ai(
                 user_answer = ui_text_input("💬 You").strip()
                 last_user_question = user_answer  # 记录追问，供聊天记忆使用
                 message_appended = False           # 新输入 → 允许追加新消息
+                # 标准 messages：AI 提问 + 用户回答
+                _ask_msg = {"role": "assistant", "content": ai_ask.strip()}
+                _ask_reasoning = ai_result.get("_reasoning", "")
+                if _ask_reasoning:
+                    _ask_msg["reasoning_content"] = _ask_reasoning
+                conversation_history.append(_ask_msg)
+                conversation_history.append({"role": "user", "content": user_answer})
                 current_question = f"{current_question}\n\nUser answer: {user_answer}" if current_lang == "english" else f"{current_question}\n\n用户回答：{user_answer}"
                 continue_asking = True
                 
@@ -5594,7 +5701,7 @@ def handle_ai(
 
             if plan_choice == "discard":
                 console.print(lang_text.get("plan_discarded", "🗑️ 计划已摒弃，将通知 AI 重新规划"), style="bold yellow")
-                current_question = f"{current_question}\n\n[用户摒弃了你的计划，请重新制定]"
+                conversation_history.append({"role": "user", "content": "[用户摒弃了你的计划，请重新制定]"})
                 continue_asking = True
                 continue
 
@@ -5606,16 +5713,16 @@ def handle_ai(
                     guide_text = ""
                     console.print()
                 if guide_text:
-                    current_question = f"{current_question}\n\n[用户对计划的指导意见]:\n{guide_text}\n\n请根据指导意见修改计划。"
+                    conversation_history.append({"role": "user", "content": f"[用户对计划的指导意见]:\n{guide_text}\n\n请根据指导意见修改计划。"})
                 else:
-                    current_question = f"{current_question}\n\n[用户未提供具体意见，请简化或重新生成计划]"
+                    conversation_history.append({"role": "user", "content": "[用户未提供具体意见，请简化或重新生成计划]"})
                 continue_asking = True
                 continue
 
             elif plan_choice == "confirm":
                 console.print(lang_text.get("plan_confirmed", "✅ 计划已确认，即将进入执行阶段"), style="bold green")
-                # 将确认后的计划内容追加到当前问题，让 AI 开始执行
-                current_question = f"{current_question}\n\n[用户已确认以下计划，请开始执行]:\n{plan_text}"
+                # 将确认后的计划内容追加到 AI 的上下文
+                conversation_history.append({"role": "user", "content": f"[用户已确认以下计划，请开始执行]:\n{plan_text}"})
                 plan_confirmed = True  # 解锁 MCP 工具和 shell 命令执行
                 continue_asking = True
                 continue
@@ -5628,17 +5735,38 @@ def handle_ai(
             ai_commands = []
             tool_calls = []
         
+        # ── 工具结果收集器（同时服务 markup 和 MCP 工具）──
+        tool_results = []
+
+        # ── 处理自研标记语言块 [VIEW:]/[EDIT:]/[WRITE:]/[APPEND:]/[INSERT:]/[DELETE:] ──
+        if markup_blocks:
+            try:
+                _native_results = _process_native_blocks(markup_blocks, cwd=user_home_dir)
+                for _nr in _native_results:
+                    status_icon = "✅" if _nr.success else "❌"
+                    console.print(f"   {status_icon} [{_nr.type}] {_nr.path}: {_nr.message}", style="dim")
+                    if _nr.success and _nr.content:
+                        tool_results.append(f"[{_nr.type}] {_nr.path} 读取成功 ({len(_nr.content.split(chr(10)))} 行)")
+                    elif _nr.success:
+                        tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.message}")
+                    else:
+                        tool_results.append(f"❌ [{_nr.type}] {_nr.path}: {_nr.message}")
+            except Exception as _native_err:
+                console.print(f"   ❌ 原生文件操作异常: {_native_err}", style="bold red")
+
         # 处理 AI 工具调用 ([tool:...] 格式)
         if tool_calls:
-            tool_results = []
             for tc in tool_calls:
                 tool_name = tc.get("name", "")
                 tool_params_str = tc.get("params_str", "")
                 tool_body = tc.get("body", "")
 
-                # 跳过已在流式阶段实时执行的工具
+                # 去重：相同工具+参数已在前几轮执行过，复用缓存结果
                 exec_key = f"{tool_name}:{tool_params_str}"
                 if exec_key in executed_tools:
+                    cached_output = _tool_results_cache.get(exec_key, "")
+                    tool_results.append(cached_output)
+                    console.print(f"   → (缓存) {cached_output[:100]}...", style="dim")
                     continue
 
                 # 灰字显示工具调用摘要（显示剥离前缀后的干净名称）
@@ -5649,11 +5777,20 @@ def handle_ai(
                 tool_summary = f"🔧 AI 调用了工具: {display_name} {tool_params_str}"
                 console.print(tool_summary, style="dim")
 
-                # 解析参数（JSON优先 + 兼容旧格式）
-                params = _parse_tool_params(tool_params_str, tool_body)
+                # 解析参数（JSON优先 → _parse_tool_params 回退）
+                if tool_params_str.strip().startswith("{"):
+                    try:
+                        params = json.loads(tool_params_str.strip())
+                    except (json.JSONDecodeError, ValueError):
+                        _mcp_debug(f"JSON parse failed for {tool_name}, falling back")
+                        params = _parse_tool_params(tool_params_str, tool_body)
+                else:
+                    params = _parse_tool_params(tool_params_str, tool_body)
 
                 ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
                                               path_validator=_mcp_path_validator)
+                executed_tools.append(exec_key)
+                _tool_results_cache[exec_key] = output  # 缓存结果供后续去重复用
                 if ok:
                     tool_results.append(output)
                     # 灰字显示简短结果
@@ -5664,17 +5801,51 @@ def handle_ai(
                     tool_results.append(err_msg)
                     console.print(f"   {err_msg}", style="bold red")
 
-            # 工具结果：写磁盘 + 追加结构化日志到 current_question
+            # ── 追加标准 messages（assistant tool_calls + tool 结果）──
+            tc_ids = [f"call_{interaction_count}_{i}" for i in range(len(tool_calls))]
+            import json as _json
+            # 1. assistant message（含 tool_calls）
+            # 注意：当有 tool_calls 时 content 留空字符串（某些 API 拒绝 content+tool_calls 同时存在）
+            _tool_call_items = []
+            for i, tc in enumerate(tool_calls):
+                _raw_args = tc.get("params_str", "{}")
+                try:
+                    _parsed = _json.loads(_raw_args)
+                    _args_str = _json.dumps(_parsed, ensure_ascii=False)
+                except (_json.JSONDecodeError, ValueError):
+                    _args_str = _raw_args
+                _tool_call_items.append({
+                    "id": tc_ids[i],
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": _args_str,
+                    }
+                })
+            _reasoning = ai_result.get("_reasoning", "")
+            _assistant_msg = {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": _tool_call_items,
+            }
+            if _reasoning:
+                _assistant_msg["reasoning_content"] = _reasoning
+            conversation_history.append(_assistant_msg)
+            # 2. tool role 结果消息
+            for i, res in enumerate(tool_results):
+                conversation_history.append({
+                    "role": "tool",
+                    "tool_call_id": tc_ids[i],
+                    "content": res,
+                })
+
+            # 写入 library 磁盘（Markdown格式，仅记录用途）
             if tool_results:
                 _now_str = datetime.now().strftime('%H:%M:%S')
                 _log_lines = [f"### 第 {interaction_count} 轮工具调用 ({_now_str})", ""]
                 _res_idx = 0
                 for tc in tool_calls:
                     _tn = tc.get("name", "?")
-                    # 跳过已在流式阶段执行过的（不在 tool_results 中）
-                    _exec_key = f"{_tn}:{tc.get('params_str', '')}"
-                    if _exec_key in executed_tools:
-                        continue
                     _res = tool_results[_res_idx] if _res_idx < len(tool_results) else "(无结果)"
                     _res_idx += 1
                     _log_lines.append(f"- **工具**: `{_tn}`")
@@ -5682,8 +5853,6 @@ def handle_ai(
                     _log_lines.append(f"  {_res}")
                     _log_lines.append(f"  ```")
                 _log_text = "\n".join(_log_lines)
-
-                # 写入 library 磁盘（Markdown格式）
                 _, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                 if record_path:
                     try:
@@ -5691,8 +5860,18 @@ def handle_ai(
                             f.write(f"\n\n{_log_text}\n")
                     except Exception:
                         pass
-                # 追加到 current_question
-                current_question += f"\n\n{_log_text}"
+
+        # ── AI 纯文本回复 → 追加 assistant 消息 ──
+        _ai_txt = (ai_result.get("txt", "") or "").strip()
+        if _ai_txt and not tool_calls:
+            _assistant_msg = {"role": "assistant", "content": _ai_txt}
+            _reasoning = ai_result.get("_reasoning", "")
+            if _reasoning:
+                _assistant_msg["reasoning_content"] = _reasoning
+            conversation_history.append(_assistant_msg)
+
+        # ── 标记本轮已处理工具调用，用于 has_pending 判断 ──
+        _tool_calls_processed_this_round = bool(tool_calls)
         
         cmd_results = {}
         
@@ -5914,12 +6093,12 @@ def handle_ai(
         
         # ── 自动判断是否继续循环（不再依赖 AI 的 [ANSWER] 标记）──
         # 规则：仅当响应中只有 txt/analysis 纯文本字段时才停止循环；
-        #       但凡存在其他字段（memory/plan/ask/commands/tool_calls），
+        #       但凡存在其他字段（memory/plan/ask/commands/本轮新工具调用），
         #       都需要回问 AI 以传递上下文反馈。
         has_pending = bool(
-            memory_uuid or          # AI 引用了记忆 → 需回问让 AI 感知记忆已载入
+            memory_uuid or                # AI 引用了记忆 → 需回问让 AI 感知记忆已载入
             ai_commands or
-            ai_result.get("tool_calls") or
+            _tool_calls_processed_this_round or  # 本轮有刚执行的工具 → 给 AI 机会回应结果
             ai_ask.strip() or
             plan_text.strip()
         )
@@ -5982,6 +6161,7 @@ def handle_ai(
                     last_user_question = follow_up
                     message_appended = False
                     current_question = follow_up
+                    conversation_history.append({"role": "user", "content": follow_up})
                     continue_asking = True
 
     # 恢复原始 SIGINT 处理器

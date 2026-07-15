@@ -116,48 +116,120 @@ Onyx 拥有**超过 10 种系统级硬防护**，在所有 AI 终端设计中属
 
 ---
 
-## 4. AI 工具调用（MCP 协议）
+## 4. AI 文件操作（Onyx 原生标记语言）
 
-工具通过 **MCP (Model Context Protocol)** 协议提供，命名格式为 `mcp__<服务器>__<工具名>`。
-默认服务器为 `filesystem`，提供文件读写编辑等操作。
+Onyx 使用**自研纯文本标记语言**操作文件，不再依赖 MCP JSON-RPC。
+纯文本流式解析，无需 JSON 转义，AI 输出中直接嵌入标记即可。
 
-### 4.1 工具调用原则
-1. **Shell 命令优先用 `@@SHELL`**。`ls`、`cat`、`grep`、`find` 等系统命令直接用 `@@SHELL` 块，不要用 MCP 工具。
-2. **MCP 工具仅用于文件读写编辑**。read_file / write_file / edit_file 等才用 MCP 协议。
-3. **非必要不调用**。基础计算、简单判断直接完成。
-4. **读工具优先于写工具**。先查清楚再动手。
-5. **JSON 参数**。所有参数必须是合法 JSON，严格遵守工具 Schema。
+**优先级**：原生标记语言（首选）> MCP 协议（兜底）
 
-### 4.2 工具调用格式（Reasonix 风格）
+### 4.1 标记语言总览
+
+#### 查看类（100% 精确，不截断）
 ```
-[tool:mcp__filesystem__<工具名>]
-{"param1": "value1", "param2": "value2"}
-[tool:mcp__filesystem__<工具名>:done]
+[VIEW:path/to/file]                    → 完整文件，逐行带行号
+[VIEW:path/to/file:10-30]              → 第 10 到 30 行（含两端）
+[VIEW:path/to/file:42]                 → 第 42 行（单行）
+[VIEW:path/to/file:search:关键词]       → 搜索含关键词的行（带行号）
 ```
 
-### 4.3 edit_file 使用 SEARCH/REPLACE 模式
-- `old_string` — 必须在文件中**逐字节精确匹配**且**唯一**
-- `new_string` — 替换后的文本
-- 不是正则，不是模糊匹配，不是行号操作
+> **精确原则**：AI 要求看什么就给什么，不自动截断、不代 AI 做决定。
+> `[VIEW:path]` 就显示完整文件。截断只发生在 AI 自己指定行范围时。
+
+#### 编辑类
+**替换（SEARCH/REPLACE）**
+```
+[EDIT:path/to/file]
+<<<<<<< SEARCH
+旧内容（逐字节精确匹配，必须唯一）
+=======
+新内容
+>>>>>>> REPLACE
+```
+
+**覆盖写入（创建新文件）**
+```
+[WRITE:path/to/file]
+完整的新文件内容
+[WRITE:DONE]
+```
+
+**追加到文件末尾**
+```
+[APPEND:path/to/file]
+要追加的新内容
+```
+
+**在指定行后插入**
+```
+[INSERT:path/to/file:42]
+要插入的内容（插入在第 42 行之后）
+[INSERT:DONE]
+```
+
+**按行号删除**
+```
+[DELETE:path/to/file:10-15]
+```
+→ 删除文件的第 10 到 15 行（含两端）
+
+**按内容搜索删除**
+```
+[DELETE:path/to/file:search:要删除的精确内容]
+```
+→ 删除匹配到的内容块（必须唯一）
+
+**按行号删除并展示被删内容**
+```
+[DELETE:path/to/file:10-15:show]
+```
+→ 删除 10-15 行，同时在面板中红色高亮展示被删内容
+
+### 4.2 操作原则
+
+1. **Shell 优先**。能用 `@@SHELL` 解决的（`ls`、`cat`、`grep`、`find`、`head`/`tail`、`wc`）就不用标记语言。
+2. **读优先**。改文件前先 `[VIEW:]` 确认目标内容精确行号位置。
+3. **分块修改**。大文件修改拆成多个 `[EDIT:]` 块，每块只改一个 SEARCH 锚点（不超过 50 行）。
+4. **唯一锚点**。`[EDIT:]` 的 SEARCH 文本必须在文件中逐字节精确匹配且唯一，不是正则、不是模糊匹配。
+5. **批量限制**。每次输出最多 5 个操作块。超过的分批，等返回结果后再下一批。
+
+### 4.3 操作可见性
+
+每个操作都会触发彩色反馈面板，让你即时感知 AI 正在做什么：
+
+| 面板 | 颜色 | 含义 |
+|------|------|------|
+| 📖 读取面板 | 🔵 蓝色 | AI 正在查看文件，显示内容+行号 |
+| ✏️ 编辑面板 | 🟢 绿色（新增）/ 🔴 红色（旧内容） | SEARCH/REPLACE 对比 |
+| 🗑️ 删除面板 | 🔴 红色 | 被删内容红色高亮 |
+| 📝 写入面板 | 🟢 绿色 | 新文件创建/覆盖完成 |
+| ❌ 错误面板 | 🟡 黄色 | 操作失败原因 |
+
+面板自动经历：**彩色显示** → **完成变灰** → **1.5s 后消失**，不会堆积。
+
+### 4.4 MCP 兜底（兼容旧格式）
+
+非文件类操作（浏览器、数据库、搜索等）仍使用 MCP 协议。
+格式保持兼容：
 
 ```
-[tool:mcp__filesystem__edit_file]
-{"path": "/home/user/main.py", "old_string": "return a + b", "new_string": "return a + b + 1"}
-[tool:mcp__filesystem__edit_file:done]
+[tool:mcp__<server>__<tool>]
+{"param": "value"}
+[tool:mcp__<server>__<tool>:done]
 ```
 
-### 4.4 其他工具示例
-```
-[tool:mcp__filesystem__read_file]
-{"path": "/home/user/test.py"}
-[tool:mcp__filesystem__read_file:done]
+> **核心区别**：文件操作 → 用原生标记语言（纯文本、无 JSON、带彩色面板）
+> 非文件操作 → 用 MCP（JSON-RPC，兜底）
 
+```
+❌ 错误做法（一次性写入大文件，极易被截断导致 JSON 损坏）：
 [tool:mcp__filesystem__write_file]
-{"path": "/home/user/out.txt", "content": "hello world"}
+{"path": "/home/user/index.html", "content": "<!DOCTYPE html>...（上万字，必然截断）"}
 [tool:mcp__filesystem__write_file:done]
 ```
 
-> 工具调用会从上至下依次执行。
+> 为什么？模型输出受 `max_tokens` 限制，超大 JSON 一旦被截断，字符串缺少闭合引号，整个文件写入失败。
+> edit_file 的 SEARCH/REPLACE 模式每次只处理一小段，payload 小、不出错。
 
 ---
 

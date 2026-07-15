@@ -393,8 +393,8 @@ class PersistentShell:
                         self._extra_vars[key] = str(value)
 
         self._init_shell()
-        # PTY slave 保留 ECHO（input() 等交互需要回显），
-        # 命令回显行由 _execute_passthrough 的 _echo_skipped 机制过滤。
+        # ECHO 已在 _init_shell_unix 的 child 进程中通过 tcsetattr 永久禁用，
+        # 无需再发 stty -echo 命令，消除 echo 泄漏和 sleep 延迟
         self._setup_prompt()
         # Skip _inject_extra_vars() on initial creation: env vars are already
         # passed to the child process via os.execvpe(..., env) in _init_shell.
@@ -472,18 +472,11 @@ class PersistentShell:
             new_tty = termios.tcgetattr(fd_stdin)
             new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
             new_tty[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
-            # VMIN=1, VTIME=0：确保 read() 在至少有1字节时立即返回
-            try:
-                new_tty[6][termios.VMIN] = 1
-                new_tty[6][termios.VTIME] = 0
-            except (AttributeError, IndexError):
-                pass
             termios.tcsetattr(fd_stdin, termios.TCSANOW, new_tty)
 
         old_sigint = None
         old_sigwinch = None
         _interrupted_flag = {'value': False}
-        _ctrl_c_time = None  # 记录 Ctrl+C 的时间戳
         if not is_windows:
             def _sigint_handler(signum, frame):
                 _interrupted_flag['value'] = True
@@ -569,11 +562,6 @@ class PersistentShell:
                             text = ''
                     if not text.strip():
                         continue
-
-                    # Ctrl+C 后 3 秒超时 => 强制退出
-                    if _ctrl_c_time and time.time() - _ctrl_c_time > 3.0:
-                        debug_log("Ctrl+C timeout, force break (passthrough)")
-                        break
 
                     # Check for end marker — 从输出中移除，不显示给用户
                     end_pattern = re.escape(end_marker) + r":(-?\d+)"
@@ -793,8 +781,15 @@ class PersistentShell:
                 os.dup2(slave_fd, 2)
                 if slave_fd > 2:
                     os.close(slave_fd)
-                # PTY slave 保留 ECHO 能力，使 input() 等交互式程序的输入回显能正常返回。
-                # 命令回显行由 _execute_passthrough 的 _echo_skipped 机制过滤。
+                # 根治：在 exec shell 之前直接禁用 PTY slave 的 ECHO，
+                # shell 从一开始就不会回显输入，彻底消除 stty -echo 泄漏和 sleep 延迟
+                try:
+                    attrs = termios.tcgetattr(0)  # fd 0 = slave PTY
+                    attrs[3] &= ~termios.ECHO     # lflag: 关掉 ECHO
+                    termios.tcsetattr(0, termios.TCSANOW, attrs)
+                except termios.error:
+                    pass
+
                 env = os.environ.copy()
                 env['TERM'] = env.get('TERM', 'xterm-256color')
                 env['LINES'] = str(rows)
@@ -944,17 +939,16 @@ class PersistentShell:
             pass
 
     def _disable_echo(self):
-        """
-        抑制 shell 的 PS1/命令回显。
-        注意：不能关 PTY ECHO（stty -echo），否则 input() 输入回显会消失。
-        命令回显由 _execute_passthrough 的 _echo_skipped 机制过滤。
-        """
+        """Send command to disable echo (safety net: PTY slave already has ECHO off from init)"""
         if self.master_fd is None and self._winpty_handle is None:
             return
         try:
-            if self.shell_name == 'cmd':
+            if self.shell_name in ('pwsh', 'powershell'):
+                pass
+            elif self.shell_name == 'cmd':
                 self._write_to_master(b"@echo off\n")
-            # Unix: 不发送 stty -echo，靠 PS1='' + _echo_skipped 过滤
+            else:
+                self._write_to_master(b"stty -echo 2>/dev/null\n")
             self._drain_output()
         except OSError as e:
             debug_log(f"Failed to disable echo: {e}", 'error')
@@ -1285,12 +1279,6 @@ class PersistentShell:
             new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
             # Disable canonical mode, echo, and signal generation
             new_tty[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
-            # VMIN=1, VTIME=0：确保 read() 在至少有1字节时立即返回
-            try:
-                new_tty[6][termios.VMIN] = 1
-                new_tty[6][termios.VTIME] = 0
-            except (AttributeError, IndexError):
-                pass
             termios.tcsetattr(fd_stdin, termios.TCSANOW, new_tty)
             debug_log("TTY settings modified for TUI support")
     
@@ -1299,7 +1287,6 @@ class PersistentShell:
         old_sigint = None
         old_sigwinch = None
         _interrupted_flag = {'value': False}  # mutable container for handler access
-        _ctrl_c_time = None  # 记录 Ctrl+C 的时间戳
         if not is_windows:
             # Custom SIGINT handler as safety net (ISIG is disabled so normally not triggered)
             # We do NOT use SIG_DFL because if a signal somehow reaches us, Python would die
@@ -1404,12 +1391,6 @@ class PersistentShell:
                                     else:
                                         self._display_text(after_marker)
                                 break
-                    # Ctrl+C 后 3 秒超时 => 命令可能已被 SIGINT 杀死且 shell 未输出结束标记
-                    if _ctrl_c_time and time.time() - _ctrl_c_time > 3.0:
-                        debug_log("Ctrl+C timeout, force break (execute)")
-                        interrupted = True
-                        break
-
                     else:
                         full_raw_output += text
                         # Check for end marker
@@ -1430,9 +1411,7 @@ class PersistentShell:
                     if stdin_data is not None:
                         # v9.7: Ctrl+C (\x03) → forward to PTY. If command dies → end marker → OK.
                         #        If shell also dies → EOF detected → break → rebuild on next cmd.
-                        #        3s 超时兜底：Ctrl+C 后 3 秒内没收到结束标记就强制退出。
-                        if b'\x03' in stdin_data:
-                            _ctrl_c_time = time.time()
+                        #        Ctrl+\ (\x1c) or Ctrl+D (\x04) → kill shell pg, EOF → rebuild.
                         if b'\x1c' in stdin_data or b'\x04' in stdin_data:
                             # Force-kill: kill only the foreground process group, not the shell
                             which = 'Ctrl+\\' if b'\x1c' in stdin_data else 'Ctrl+D'

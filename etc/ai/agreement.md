@@ -135,6 +135,11 @@ Onyx 使用**自研纯文本标记语言**操作文件，不再依赖 MCP JSON-R
 
 > **精确原则**：AI 要求看什么就给什么，不自动截断、不代 AI 做决定。
 > `[VIEW:path]` 就显示完整文件。截断只发生在 AI 自己指定行范围时。
+>
+> **行号参考**：返回内容中 `  1  │ import os` 的 `1` 就是行号。
+> 这些行号可直接用于 `[INSERT:path:1]`（在第 1 行后插入）、
+> `[DELETE:path:1-5]`（删除第 1-5 行）、
+> `[EDIT:path:1-5]`（替换第 1-5 行）。
 
 #### 编辑类
 **行号锚点替换（无需提供旧内容，省 Token）**
@@ -216,7 +221,7 @@ Onyx 使用**自研纯文本标记语言**操作文件，不再依赖 MCP JSON-R
 8. **禁止编辑二进制文件**。系统自动拦截 `.png`/`.jpg`/`.pdf`/`.zip`/`.exe` 等二进制文件的编辑操作，请使用 shell 命令处理。
 9. **SEARCH 失败诊断**。系统返回 `最相似内容位于第 X-Y 行` 时，根据提示检查缩进和空格差异后重试。
 10. **自动创建目录**。`[WRITE:path]` 会自动创建父目录，无需手动 `mkdir`。
-11. **大文件用 WRITE**。修改超过 30% 代码时，推荐 `[VIEW:path]` 读完整文件 → `[WRITE:path]` 一次性写入，比多次 `[EDIT:]` 更高效且不易出错。
+11. **大文件用 WRITE**。修改超过 70% 代码时，推荐 `[VIEW:path]` 读完整文件 → `[WRITE:path]` 一次性写入，比多次 `[EDIT:]` 更高效且不易出错。
 
 ### 4.3 操作可见性
 
@@ -238,9 +243,9 @@ Onyx 使用**自研纯文本标记语言**操作文件，不再依赖 MCP JSON-R
 格式保持兼容：
 
 ```
-[tool:mcp__<server>__<tool>]
+[tool:<工具名>]
 {"param": "value"}
-[tool:mcp__<server>__<tool>:done]
+[tool:<工具名>:done]
 ```
 
 > **核心区别**：文件操作 → 用原生标记语言（纯文本、无 JSON、带彩色面板）
@@ -248,9 +253,9 @@ Onyx 使用**自研纯文本标记语言**操作文件，不再依赖 MCP JSON-R
 
 ```
 ❌ 错误做法（一次性写入大文件，极易被截断导致 JSON 损坏）：
-[tool:mcp__filesystem__write_file]
+[tool:write_file]
 {"path": "/home/user/index.html", "content": "<!DOCTYPE html>...（上万字，必然截断）"}
-[tool:mcp__filesystem__write_file:done]
+[tool:write_file:done]
 ```
 
 > 为什么？模型输出受 `max_tokens` 限制，超大 JSON 一旦被截断，字符串缺少闭合引号，整个文件写入失败。

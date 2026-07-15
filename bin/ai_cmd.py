@@ -3792,7 +3792,7 @@ def get_mcp_tools(name: str = "filesystem", user_home_dir: str = None) -> List[D
 def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> str:
     """
     构建注入给 AI 的工具说明提示词（Reasonix 风格）
-    - 工具名使用 mcp__<server>__<tool> 前缀
+    - 工具名使用裸名（无 mcp__ 前缀），系统自动路由到对应 MCP 服务器
     - 参数使用 JSON 格式放在 [tool:...] 块体中
     - edit_file 使用 SEARCH/REPLACE 模式（old_string/new_string）
     """
@@ -3807,19 +3807,19 @@ def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> 
 
     lines = []
     if lang == "chinese":
-        lines.append("## AI 专用工具（MCP）")
-        lines.append("调用格式: [tool:mcp__filesystem__<工具名>] 换行 JSON参数 换行 [tool:mcp__filesystem__<工具名>:done]")
+        lines.append("## AI 工具（MCP）")
+        lines.append("调用格式: [tool:<工具名>] 换行 JSON参数 换行 [tool:<工具名>:done]")
         lines.append("参数必须是合法 JSON，严格遵守各工具的 Schema。")
     else:
         lines.append("## AI Tools (MCP)")
-        lines.append("Call format: [tool:mcp__filesystem__<name>] newline JSON-args newline [tool:mcp__filesystem__<name>:done]")
+        lines.append("Call format: [tool:<name>] newline JSON-args newline [tool:<name>:done]")
         lines.append("Arguments MUST be valid JSON matching the tool's schema.")
 
     lines.append("")
 
     for tool in tools:
         raw_name = tool.get("name", "?")
-        full_name = f"mcp__filesystem__{raw_name}"
+        full_name = raw_name  # 不再加 mcp__filesystem__ 前缀
         desc = tool.get("description", "")
         schema = tool.get("inputSchema", {})
         props = schema.get("properties", {})
@@ -3933,9 +3933,9 @@ def build_native_tools_prompt(lang: str = "chinese") -> str:
         lines.append("5. 每个操作会自动显示彩色面板（绿=增/红=删/蓝=读）")
         lines.append("")
         lines.append("MCP 仅作为兜底（非文件操作时使用）：")
-        lines.append("[tool:mcp__<server>__<tool>]")
+        lines.append("[tool:<工具名>]")
         lines.append('{"param": "value"}')
-        lines.append("[tool:mcp__<server>__<tool>:done]")
+        lines.append("[tool:<工具名>:done]")
     else:
         lines.append("## AI File Operations (Onyx Native Markup)")
         lines.append("Use plain text markup for file operations, no JSON needed.")
@@ -3978,9 +3978,9 @@ def build_native_tools_prompt(lang: str = "chinese") -> str:
         lines.append("5. Color panels auto-show: green=new, red=deleted, blue=reading")
         lines.append("")
         lines.append("MCP fallback (for non-file operations):")
-        lines.append("[tool:mcp__<server>__<tool>]")
+        lines.append("[tool:<name>]")
         lines.append('{"param": "value"}')
-        lines.append("[tool:mcp__<server>__<tool>:done]")
+        lines.append("[tool:<name>:done]")
 
     return "\n".join(lines)
 
@@ -4094,12 +4094,24 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
     # ── 剥离 mcp__ 前缀（递归剥离，防止 AI 输出双重前缀）──
     # 必须在内置工具检查之前剥离，因为 AI 可能误加 mcp__server__ 前缀
     raw_tool = tool_name
+    name = None
     if tool_name.startswith("mcp__"):
         _, server, raw_tool = tool_name.split("__", 2)
         name = server
         while raw_tool.startswith("mcp__"):
             _, server, raw_tool = raw_tool.split("__", 2)
             name = server
+
+    # ── 无前缀的裸工具名 → 在所有 MCP 服务器中查找 ──
+    if name is None:
+        try:
+            _registry = get_registry()
+            for _srv in _registry.server_names():
+                if _registry.get(f"mcp__{_srv}__{raw_tool}"):
+                    name = _srv
+                    break
+        except Exception:
+            pass
 
     # ── 内置分析工具（不经过 MCP，直接 Python 执行）──
     # 用剥离后的 raw_tool 匹配

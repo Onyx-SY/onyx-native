@@ -546,11 +546,6 @@ class PersistentShell:
                             # 整个 chunk 都是命令回显，跳过
                             continue
 
-                    # 过滤内部标记
-                    text = re.sub(r'__READY_\w+__\s*', '', text)
-                    if not text:
-                        continue
-
                     # 检测 shell 提示词中的完成 marker（PS1 的一部分，SIGINT 后仍会打印）
                     if _done_marker:
                         done_pattern = re.escape(_done_marker) + r":(-?\d+)"

@@ -446,112 +446,188 @@ class PersistentShell:
         log_error: Optional[Callable] = None
     ) -> Tuple[int, str]:
         """
-        Passthrough 模式：pty.fork() + 完整终端管理。
-        - 真实终端设 raw mode（tty.setraw，含 VMIN=1/VTIME=0）
-        - PTY 设初始窗口大小 + SIGWINCH 响应
-        - 双向数据复制（read PTY → write stdout, read stdin → write PTY）
-        - Ctrl+C 转发 \x03 到 PTY（slave 端 ISIG 开，触发子进程 SIGINT）
+        Passthrough 模式：命令原样透传 bash，不包 {}、不设 TTY。
+        用于普通 shell 命令和 TUI 程序，确保信号和终端模式不被破坏。
+        通过追加 ; printf marker >&2 检测命令完成。
         """
-        debug_log(f"Passthrough: {repr(cmd[:200])}")
+        markers = generate_markers()
+        end_marker = markers['end']  # "__CMD_END_xxx__:"
 
-        import pty as _pty
-        import tty as _tty
-        import select as _select
+        # 命令 + 完成标记（append，不包裹）
+        full_cmd = (
+            f"{cmd}; "
+            f"EC=$?; "
+            f"printf '%s:%d\\n' '{end_marker}' $EC >&2\n"
+        )
+        debug_log(f"Passthrough full_cmd: {repr(full_cmd[:200])}")
+        shell_log(full_cmd, 'WRITE_CMD')
 
-        collected = []
+        is_windows = platform.system() == "Windows"
         fd_stdin = sys.stdin.fileno()
-        fd_stdout = sys.stdout.fileno()
-        exit_code = -1
-        pid = None
-        master_fd = None
 
-        # ── 保存终端状态 ──
+        # TTY raw mode：箭头键等需要逐字符转发到 PTY，不能行缓冲
         old_tty = None
-        old_sigwinch = None
+        if not is_windows and os.isatty(fd_stdin):
+            old_tty = termios.tcgetattr(fd_stdin)
+            new_tty = termios.tcgetattr(fd_stdin)
+            new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
+            new_tty[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+            # VMIN=1, VTIME=0：确保 read() 在至少有1字节时立即返回
+            try:
+                new_tty[6][termios.VMIN] = 1
+                new_tty[6][termios.VTIME] = 0
+            except (AttributeError, IndexError):
+                pass
+            termios.tcsetattr(fd_stdin, termios.TCSANOW, new_tty)
+
         old_sigint = None
-        shell_cmd = f"cd '{self.cwd}' && {cmd}" if self.cwd else cmd
+        old_sigwinch = None
+        _interrupted_flag = {'value': False}
+        _ctrl_c_time = None  # 记录 Ctrl+C 的时间戳
+        if not is_windows:
+            def _sigint_handler(signum, frame):
+                _interrupted_flag['value'] = True
+                debug_log("SIGINT caught by Python handler (passthrough)")
+            old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
+            if hasattr(signal, 'SIGWINCH'):
+                def sigwinch_handler(signum, frame):
+                    update_pty_size(self.master_fd)
+                old_sigwinch = signal.signal(signal.SIGWINCH, sigwinch_handler)
+
+        full_raw_output = ""
+        interrupted = False
+        return_code = -1
+        fd_stdin = sys.stdin.fileno()
+
+        # 排空 PTY 残留输出（单次 drain，无 sleep — PTY 已就绪时 drain 为 O(1)）
+        self._drain_output()
+        _echo_skipped = False
 
         try:
-            if os.isatty(fd_stdin):
-                old_tty = termios.tcgetattr(fd_stdin)
-                _tty.setraw(fd_stdin)  # 正确 raw mode：ICANON/ECHO/ISIG 全关
-
-            # ── fork + PTY ──
-            pid, master_fd = _pty.fork()
-            if pid == 0:
-                # 子进程
-                try:
-                    os.execvp('sh', ['sh', '-c', shell_cmd])
-                except Exception:
-                    os._exit(1)
-
-            # ── 设 PTY 初始窗口大小 ──
-            update_pty_size(master_fd)
-
-            # ── SIGWINCH ──
-            if hasattr(signal, 'SIGWINCH'):
-                def _swinch(s, f):
-                    update_pty_size(master_fd)
-                old_sigwinch = signal.signal(signal.SIGWINCH, _swinch)
-
-            # ── SIGINT：转发到子进程进程组 ──
-            def _sigint(s, f):
-                debug_log("SIGINT → child process group")
-                try:
-                    os.killpg(pid, signal.SIGINT)
-                except OSError:
-                    pass
-            old_sigint = signal.signal(signal.SIGINT, _sigint)
-
-            # ── 双向复制（同 pty.spawn 的 _copy）──
             try:
-                while True:
-                    rlist, _, _ = _select.select([master_fd, fd_stdin], [], [])
-                    if master_fd in rlist:
-                        data = os.read(master_fd, 4096)
-                        if not data:
-                            break
-                        collected.append(data)
-                        os.write(fd_stdout, data)
-                    if fd_stdin in rlist:
-                        data = os.read(fd_stdin, 1024)
-                        if not data:
-                            break
-                        os.write(master_fd, data)
-            except OSError:
-                pass
+                self._write_to_master(full_cmd.encode('utf-8'))
+                debug_log("Passthrough command written to PTY")
+            except OSError as e:
+                debug_log(f"Failed to write: {e}", 'error')
+                return -1, full_raw_output
 
-            # ── 等待子进程 ──
-            _, status = os.waitpid(pid, 0)
-            if os.WIFEXITED(status):
-                exit_code = os.WEXITSTATUS(status)
-            elif os.WIFSIGNALED(status):
-                exit_code = 128 + os.WTERMSIG(status)
+            while True:
+                if not is_windows and self.master_fd is not None:
+                    try:
+                        rlist, _, _ = select.select([self.master_fd, fd_stdin], [], [])
+                    except (select.error, OSError):
+                        continue
+                    data = None
+                    stdin_data = None
+                    if self.master_fd in rlist:
+                        try:
+                            data = os.read(self.master_fd, 4096)
+                        except OSError:
+                            data = None
+                    if fd_stdin in rlist:
+                        try:
+                            stdin_data = os.read(fd_stdin, 1024)
+                        except OSError:
+                            stdin_data = None
+                else:
+                    data = self._read_from_master(timeout=0.01)
+                    stdin_data = None
+
+                # --- Forward PTY output to terminal ---
+                if data is not None:
+                    if len(data) == 0:
+                        self._dead = True
+                        debug_log("PTY EOF (passthrough)")
+                        break
+                    try:
+                        text = data.decode('utf-8', errors='replace')
+                    except UnicodeDecodeError:
+                        text = data.decode('latin-1', errors='replace')
+
+                    full_raw_output += text
+
+                    # 跳过 shell echo 的命令回显（第一行）
+                    if not _echo_skipped:
+                        # 移除命令回显行（可能跨多个 chunk）
+                        echo_pos = text.find('\n')
+                        if echo_pos != -1:
+                            text = text[echo_pos + 1:]
+                            _echo_skipped = True
+                        else:
+                            # 整个 chunk 都是命令回显，跳过
+                            continue
+
+                    # 过滤内部标记
+                    text = re.sub(r'__READY_\w+__\s*', '', text)
+                    # 去掉首行开头的 > (空 PS1 导致的 PS2 泄漏)，不伤及其他行
+                    _stripped = text.lstrip('\n')
+                    if _stripped.startswith('>'):
+                        _nl = _stripped.find('\n')
+                        if _nl != -1:
+                            text = _stripped[_nl + 1:]
+                        else:
+                            text = ''
+                    if not text.strip():
+                        continue
+
+                    # Ctrl+C 后 3 秒超时 => 强制退出
+                    if _ctrl_c_time and time.time() - _ctrl_c_time > 3.0:
+                        debug_log("Ctrl+C timeout, force break (passthrough)")
+                        break
+
+                    # Check for end marker — 从输出中移除，不显示给用户
+                    end_pattern = re.escape(end_marker) + r":(-?\d+)"
+                    end_match = re.search(end_pattern, text)
+                    if end_match:
+                        return_code = int(end_match.group(1))
+                        debug_log(f"Passthrough end marker, exit={return_code}")
+                        before_marker = text[:end_match.start()]
+                        if before_marker:
+                            sys.stdout.write(before_marker)
+                            sys.stdout.flush()
+                            if output_buffer is not None:
+                                output_buffer.append(before_marker)
+                        break
+
+                    # Real-time output forwarding
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                    if output_buffer is not None:
+                        output_buffer.append(text)
+
+                # --- Forward stdin to PTY (for TUI programs) ---
+                if stdin_data is not None and len(stdin_data) > 0:
+                    try:
+                        self._write_to_master(stdin_data)
+                    except OSError:
+                        pass
+                    if b'\x03' in stdin_data and not _interrupted_flag['value']:
+                        interrupted = True
+                        debug_log("Ctrl+C forwarded to PTY (passthrough)")
+                    if b'\x04' in stdin_data:
+                        debug_log("Ctrl+D detected (passthrough)")
+                        break
 
         except Exception as e:
             debug_log(f"Passthrough exception: {e}", 'error')
-            if pid is not None:
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                    os.waitpid(pid, 0)
-                except Exception:
-                    pass
         finally:
-            if old_tty is not None and os.isatty(fd_stdin):
-                try:
-                    termios.tcsetattr(fd_stdin, termios.TCSANOW, old_tty)
-                except Exception:
-                    pass
-            if old_sigwinch is not None:
-                signal.signal(signal.SIGWINCH, old_sigwinch)
-            if old_sigint is not None:
-                signal.signal(signal.SIGINT, old_sigint)
+            if not is_windows:
+                if old_tty is not None and os.isatty(fd_stdin):
+                    try:
+                        termios.tcsetattr(fd_stdin, termios.TCSANOW, old_tty)
+                    except Exception:
+                        pass
+                if old_sigint:
+                    signal.signal(signal.SIGINT, old_sigint)
+                if old_sigwinch and hasattr(signal, 'SIGWINCH'):
+                    signal.signal(signal.SIGWINCH, old_sigwinch)
 
-        raw_output = b''.join(collected).decode('utf-8', errors='replace')
-        if output_buffer is not None:
-            output_buffer.append(raw_output)
-        debug_log(f"Passthrough done, exit={exit_code}, output_len={len(raw_output)}")
-        return exit_code, raw_output
+        if interrupted:
+            if output_buffer is not None:
+                output_buffer.append("[Interrupted]")
+            return -1, full_raw_output
+
+        return return_code, full_raw_output
 
     def _write_to_master(self, data: bytes):
         """Write data to master PTY (cross-platform)"""
@@ -1112,8 +1188,8 @@ class PersistentShell:
         """
         Execute a command in the persistent shell.
         
-        passthrough=False (默认): 使用持久化 shell，保留变量/cd 等状态。
-        passthrough=True: 使用 pty.fork() 独立子进程，用于交互式/TUI 程序。
+        passthrough=True: 命令原样透传，不包 { }、不加 start marker、不设 TTY。
+        用于 TUI 程序 (nano/vim) 和普通 shell 命令，保证信号和终端模式正确。
         """
         debug_log(f"Executing command (passthrough={passthrough}): {repr(cmd)}")
         

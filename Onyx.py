@@ -1507,7 +1507,7 @@ def verify_admin_password() -> bool:
     return _vap(get_ctx())
 
 def run_cmd_sync(cmd: str, request_id: str, is_tool: bool = False, tool_perm: int = 3,
-                  passthrough: bool = False) -> int:
+                  passthrough: bool = True) -> int:
     global _LAST_EXIT_CODE
     rc = _run_cmd_sync(
         cmd=cmd,

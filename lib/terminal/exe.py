@@ -448,11 +448,10 @@ class PersistentShell:
         """
         Passthrough 模式：使用 pty.spawn() 在独立子进程中运行命令。
         Python 不介入 PTY 数据转发，全部由内核和 stdlib 处理。
-        信号、终端模式、窗口大小变化全部由 pty.spawn() 正确管理。
+        信号、终端模式全部由 pty.spawn() 正确管理，Ctrl+C 瞬时生效。
         """
         debug_log(f"Passthrough spawning: {repr(cmd[:200])}")
 
-        # 收集输出（pty.spawn 直接写 stdout，我们通过 master_read 额外收集一份）
         collected = []
 
         def _master_read(fd):
@@ -461,29 +460,23 @@ class PersistentShell:
                 collected.append(data)
             return data
 
-        is_windows = platform.system() == "Windows"
         exit_code = -1
-        cwd = self.cwd
+        pty_module = None
 
         try:
-            if is_windows:
-                # Windows: 退回到旧的实现
-                return self._execute_passthrough_legacy(
-                    cmd, output_buffer, log_info, log_error)
             import pty as pty_module
+        except ImportError:
+            debug_log("Passthrough failed: pty not available")
+            return -1, "pty not available"
 
-            # pty.spawn 内部处理：
-            # 1. 创建 PTY 对
-            # 2. fork，子进程连接 slave 端到 stdio
-            # 3. 父进程：终端设 raw mode，双向复制数据（select + read/write）
-            # 4. SIGINT → 转发给子进程进程组
-            # 5. SIGWINCH → 调整 PTY 尺寸
-            # 6. 子进程退出后恢复终端设置
+        try:
+            # 先 cd 到正确目录再执行命令
+            shell_cmd = f"cd '{self.cwd}' && {cmd}" if self.cwd else cmd
+            # 使用 login shell 以继承环境变量
             _raw_status = pty_module.spawn(
-                ['sh', '-c', cmd],
+                ['sh', '-c', shell_cmd],
                 master_read=_master_read,
             )
-            # pty.spawn 返回 os.waitpid 的原始状态，需要转换
             if os.WIFEXITED(_raw_status):
                 exit_code = os.WEXITSTATUS(_raw_status)
             elif os.WIFSIGNALED(_raw_status):
@@ -497,7 +490,6 @@ class PersistentShell:
             debug_log(f"Passthrough spawn exception: {e}", 'error')
             return -1, str(e)
 
-        # 收集到的输出合并
         raw_output = b''.join(collected).decode('utf-8', errors='replace')
         if output_buffer is not None:
             output_buffer.append(raw_output)
@@ -1059,13 +1051,14 @@ class PersistentShell:
         output_buffer: List[str],
         log_info: Optional[Callable] = None,
         log_error: Optional[Callable] = None,
-        passthrough: bool = False
+        passthrough: bool = True
     ) -> Tuple[int, str]:
         """
         Execute a command in the persistent shell.
         
-        passthrough=True: 命令原样透传，不包 { }、不加 start marker、不设 TTY。
-        用于 TUI 程序 (nano/vim) 和普通 shell 命令，保证信号和终端模式正确。
+        passthrough=True (默认): 使用 pty.spawn() 独立子进程运行。
+        信号、终端模式由 stdlib 正确管理，Ctrl+C 瞬时生效。
+        passthrough=False: 使用持久化 shell + 标记检测（用于需要保留 shell 状态的场景）。
         """
         debug_log(f"Executing command (passthrough={passthrough}): {repr(cmd)}")
         

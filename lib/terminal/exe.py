@@ -592,6 +592,8 @@ class PersistentShell:
                     if b'\x03' in stdin_data and not _interrupted_flag['value']:
                         interrupted = True
                         debug_log("Ctrl+C forwarded to PTY (passthrough)")
+                        # 立即 break：Ctrl+C 已中断命令链，end marker 不可能到达
+                        break
                     if b'\x04' in stdin_data:
                         debug_log("Ctrl+D detected (passthrough)")
                         break
@@ -609,6 +611,11 @@ class PersistentShell:
                     signal.signal(signal.SIGINT, old_sigint)
                 if old_sigwinch and hasattr(signal, 'SIGWINCH'):
                     signal.signal(signal.SIGWINCH, old_sigwinch)
+
+        # v9.7+: Check if the safety-net SIGINT handler was triggered
+        if not interrupted and _interrupted_flag['value']:
+            interrupted = True
+            debug_log("Passthrough interrupted via SIGINT safety-net handler")
 
         if interrupted:
             if output_buffer is not None:
@@ -1400,10 +1407,19 @@ class PersistentShell:
                 # --- Process stdin input ---
                 if not is_windows:
                     if stdin_data is not None:
-                        # v9.7: Ctrl+C (\x03) → forward to PTY. If command dies → end marker → OK.
-                        #        If shell also dies → EOF detected → break → rebuild on next cmd.
+                        # v9.7+: Ctrl+C (\x03) → forward to PTY. If the command dies from
+                        #        SIGINT, the end marker won't arrive — break immediately.
                         #        Ctrl+\ (\x1c) or Ctrl+D (\x04) → kill shell pg, EOF → rebuild.
-                        if b'\x1c' in stdin_data or b'\x04' in stdin_data:
+                        if b'\x03' in stdin_data and not _interrupted_flag['value']:
+                            interrupted = True
+                            debug_log("Ctrl+C forwarded to PTY (execute)")
+                            # Forward ^C then break — end marker may never come
+                            try:
+                                self._write_to_master(b'\x03')
+                            except OSError:
+                                pass
+                            break
+                        elif b'\x1c' in stdin_data or b'\x04' in stdin_data:
                             # Force-kill: kill only the foreground process group, not the shell
                             which = 'Ctrl+\\' if b'\x1c' in stdin_data else 'Ctrl+D'
                             debug_log(f"{which}: force-killing foreground process group")

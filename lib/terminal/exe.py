@@ -548,7 +548,7 @@ class PersistentShell:
 
                     # 过滤内部标记
                     text = re.sub(r'__READY_\w+__\s*', '', text)
-                    if not text.strip():
+                    if not text:
                         continue
 
                     # 检测 shell 提示词中的完成 marker（PS1 的一部分，SIGINT 后仍会打印）

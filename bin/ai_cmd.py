@@ -3997,23 +3997,14 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         _mcp_debug_exit("build_native_tools", ok=False, detail="no tools")
         return []
 
+    # 文件操作类工具已由原生标记语言替代，不暴露给函数调用 API。
+    # AI 通过系统提示词中的 markup 说明来操作文件。
+    # 非文件类 MCP server（如 puppeteer/github/postgres）后续可在此列保留。
     native = []
+    # 当前所有 MCP tools 来自 filesystem server，全部被 markup 替代
+    # 后续引入非文件 MCP server 时从下方遍历中添加
     for tool in mcp_tools:
-        raw_name = tool.get("name", "")
-        if not raw_name:
-            continue
-        # Skip shell/bash tools that shouldn't be called natively
-        if raw_name in ("shell", "bash", "sh", "zsh", "pwsh"):
-            continue
-        schema = tool.get("inputSchema", {})
-        native.append({
-            "type": "function",
-            "function": {
-                "name": raw_name,
-                "description": tool.get("description", ""),
-                "parameters": schema,
-            },
-        })
+        _ = tool  # 暂时跳过所有 filesystem MCP 工具
 
     # ── 内置分析工具（代码理解 + 编辑验证 + Token预算）──
     BUILTIN_ANALYSIS_TOOLS = [
@@ -5845,8 +5836,11 @@ def handle_ai(
                 for _nr in _native_results:
                     status_icon = "✅" if _nr.success else "❌"
                     console.print(f"   {status_icon} [{_nr.type}] {_nr.path}: {_nr.message}", style="dim")
-                    if _nr.success and _nr.content:
-                        tool_results.append(f"[{_nr.type}] {_nr.path} 读取成功 ({len(_nr.content.split(chr(10)))} 行)")
+                    if _nr.type == "view" and _nr.success and _nr.content:
+                        # VIEW: 把完整内容返回给 AI（像 MCP read_file 一样）
+                        tool_results.append(f"```\n{_nr.content}\n```")
+                    elif _nr.success and _nr.content:
+                        tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.content}")
                     elif _nr.success:
                         tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.message}")
                     else:

@@ -378,6 +378,8 @@ class PersistentShell:
         self._read_thread = None
         self._read_queue = None
         self._stop_thread = False
+        # 用于 PS1 完成检测的随机 marker（在 _init_shell / _setup_prompt / _execute_passthrough 中使用）
+        self._done_marker = f"__DONE_{uuid.uuid4().hex[:12]}__"
 
         # Merge environment variables with extra variables
         self._extra_vars = {}
@@ -446,19 +448,13 @@ class PersistentShell:
         log_error: Optional[Callable] = None
     ) -> Tuple[int, str]:
         """
-        Passthrough 模式：命令原样透传 bash，不包 {}、不设 TTY。
-        用于普通 shell 命令和 TUI 程序，确保信号和终端模式不被破坏。
-        通过追加 ; printf marker >&2 检测命令完成。
+        Passthrough 模式：命令裸写 bash，不包 {}、不设 TTY。
+        用 shell 的 PS1（__DONE__:$?）检测命令完成，不追加 marker。
+        PS1 是 shell 提示词机制的一部分，SIGINT 无法阻止它被打印。
         """
-        markers = generate_markers()
-        end_marker = markers['end']  # "__CMD_END_xxx__:"
-
-        # 命令 + 完成标记（append，不包裹）
-        full_cmd = (
-            f"{cmd}; "
-            f"EC=$?; "
-            f"printf '%s:%d\\n' '{end_marker}' $EC >&2\n"
-        )
+        # 用 PS1 中的 DONE marker 检测命令完成（而非追加 ; printf … 到命令链）
+        _done_marker = self._done_marker
+        full_cmd = f"{cmd}\n"
         debug_log(f"Passthrough full_cmd: {repr(full_cmd[:200])}")
         shell_log(full_cmd, 'WRITE_CMD')
 
@@ -563,19 +559,21 @@ class PersistentShell:
                     if not text.strip():
                         continue
 
-                    # Check for end marker — 从输出中移除，不显示给用户
-                    end_pattern = re.escape(end_marker) + r":(-?\d+)"
-                    end_match = re.search(end_pattern, text)
-                    if end_match:
-                        return_code = int(end_match.group(1))
-                        debug_log(f"Passthrough end marker, exit={return_code}")
-                        before_marker = text[:end_match.start()]
-                        if before_marker:
-                            sys.stdout.write(before_marker)
-                            sys.stdout.flush()
-                            if output_buffer is not None:
-                                output_buffer.append(before_marker)
-                        break
+                    # 检测 shell 提示词中的完成 marker（PS1 的一部分，SIGINT 后仍会打印）
+                    if _done_marker:
+                        done_pattern = re.escape(_done_marker) + r":(-?\d+)"
+                        done_match = re.search(done_pattern, text)
+                        if done_match:
+                            return_code = int(done_match.group(1))
+                            debug_log(f"PS1 done marker, exit={return_code}")
+                            before_marker = text[:done_match.start()]
+                            if before_marker:
+                                # 清除残余 \r\n，确保不多出空行
+                                display = before_marker.rstrip('\n\r')
+                                if display:
+                                    sys.stdout.write(display + '\n')
+                                    sys.stdout.flush()
+                            break
 
                     # Real-time output forwarding
                     sys.stdout.write(text)
@@ -589,14 +587,6 @@ class PersistentShell:
                         self._write_to_master(stdin_data)
                     except OSError:
                         pass
-                    if b'\x03' in stdin_data and not _interrupted_flag['value']:
-                        interrupted = True
-                        debug_log("Ctrl+C forwarded to PTY (passthrough)")
-                        # 立即 break：Ctrl+C 已中断命令链，end marker 不可能到达
-                        break
-                    if b'\x04' in stdin_data:
-                        debug_log("Ctrl+D detected (passthrough)")
-                        break
 
         except Exception as e:
             debug_log(f"Passthrough exception: {e}", 'error')
@@ -795,7 +785,7 @@ class PersistentShell:
                 env['TERM'] = env.get('TERM', 'xterm-256color')
                 env['LINES'] = str(rows)
                 env['COLUMNS'] = str(cols)
-                env['PS1'] = ''
+                env['PS1'] = f'{self._done_marker}:$?\\n'
                 env['PROMPT'] = '$P$G'
                 # For zsh compatibility: disable prompt and other features
                 env['ZDOTDIR'] = '/dev/null'
@@ -882,32 +872,37 @@ class PersistentShell:
         self._drain_output()
 
     def _setup_prompt(self):
-        """Set custom PROMPT_COMMAND based on shell type to eliminate prompt output (completely silent)"""
+        """Set PS1 to unique marker for command completion detection.
+        The marker is printed by the shell after EVERY command (including
+        commands killed by SIGINT), enabling reliable end-of-command detection."""
         if self.master_fd is None and self._winpty_handle is None:
             return
 
-        debug_log(f"Setting up prompt for shell: {self.shell_name}")
+        debug_log(f"Setting up prompt for shell: {self.shell_name}, done_marker={self._done_marker}")
 
         if self.shell_name == 'fish':
             setup_cmd = (
-                "function fish_prompt; printf ''; end\n"
+                f"function fish_prompt; printf '{self._done_marker}:$status\\n'; end\n"
                 "function fish_right_prompt; printf ''; end\n"
             )
         elif self.shell_name == 'zsh':
             setup_cmd = (
                 "unsetopt PROMPT_CR 2>/dev/null\n"
                 "unsetopt PROMPT_SP 2>/dev/null\n"
-                "precmd() { printf ''; }\n"
+                f"precmd() {{ printf '{self._done_marker}:$?\\n'; }}\n"
                 "PROMPT=''\n"
                 "RPROMPT=''\n"
-                "PS1=''\n"
             )
         elif self.shell_name in ('pwsh', 'powershell'):
-            setup_cmd = "Function prompt { '' }\n"
+            setup_cmd = (
+                f"function prompt {{ \"{self._done_marker}:$LASTEXITCODE`n\" }}\n"
+            )
         elif self.shell_name == 'cmd':
-            setup_cmd = "prompt $g\n@echo off\n"
+            # CMD prompt can't embed exit code; keep minimal prompt
+            setup_cmd = "prompt $G\n@echo off\n"
         else:
-            setup_cmd = "PROMPT_COMMAND='printf \"\"'\nPS1=''\n"
+            # bash and other sh-compatible shells
+            setup_cmd = f"PS1='{self._done_marker}:$?\\n'\n"
 
         try:
             self._write_to_master(setup_cmd.encode('utf-8'))
@@ -1302,7 +1297,6 @@ class PersistentShell:
         full_raw_output = ""
         found_start = False
         interrupted = False
-        force_kill = False  # true when Ctrl+\ or Ctrl+D — kill foreground process group
     
         try:
             try:
@@ -1407,75 +1401,26 @@ class PersistentShell:
                 # --- Process stdin input ---
                 if not is_windows:
                     if stdin_data is not None:
-                        # v9.7+: Ctrl+C (\x03) → forward to PTY. If the command dies from
-                        #        SIGINT, the end marker won't arrive — break immediately.
-                        #        Ctrl+\ (\x1c) or Ctrl+D (\x04) → kill shell pg, EOF → rebuild.
-                        if b'\x03' in stdin_data and not _interrupted_flag['value']:
-                            interrupted = True
-                            debug_log("Ctrl+C forwarded to PTY (execute)")
-                            # Forward ^C then break — end marker may never come
-                            try:
-                                self._write_to_master(b'\x03')
-                            except OSError:
-                                pass
-                            break
-                        elif b'\x1c' in stdin_data or b'\x04' in stdin_data:
-                            # Force-kill: kill only the foreground process group, not the shell
-                            which = 'Ctrl+\\' if b'\x1c' in stdin_data else 'Ctrl+D'
-                            debug_log(f"{which}: force-killing foreground process group")
-                            force_kill = True
-                            if DEBUG_ENABLED:
-                                shell_log(stdin_data, f'STDIN_{which.replace("+","")}')
-                            # Forward Ctrl+C to try graceful interrupt first
-                            try:
-                                self._write_to_master(b'\x03')
-                            except OSError:
-                                pass
-                        else:
-                            # Forward all other input including Ctrl+C normally
-                            try:
-                                self._write_to_master(stdin_data)
-                            except OSError:
-                                pass
-                            if DEBUG_ENABLED:
-                                shell_log(stdin_data, 'STDIN')
+                        # 所有输入字节原样转发到 PTY，PTY slave 的 line discipline
+                        # 天然处理 SIGINT(\x03)/SIGQUIT(\x1c)/EOF(\x04)。
+                        try:
+                            self._write_to_master(stdin_data)
+                        except OSError:
+                            pass
+                        if DEBUG_ENABLED:
+                            shell_log(stdin_data, 'STDIN')
                 else:
                     # Windows: use msvcrt.kbhit()
                     try:
                         import msvcrt
                         if msvcrt.kbhit():
                             user_data = msvcrt.getch()
-                            if user_data in (b'\x1c', b'\x04'):
-                                force_kill = True
-                                debug_log("Force kill (Windows)")
-                            else:
-                                self._write_to_master(user_data)
-                    except ImportError:
-                        pass
-
-                # v9.7: Force-kill: kill shell process group.
-                # EOF detection catches it → break → next command triggers rebuild.
-                if force_kill:
-                    debug_log("Force-killing shell process group")
-                    try:
-                        if platform.system() != "Windows" and self.pid:
                             try:
-                                os.killpg(self.pid, signal.SIGKILL)
+                                self._write_to_master(user_data)
                             except OSError:
                                 pass
-                            self._dead = True
-                            self.pid = None
-                        elif platform.system() == "Windows" and self._winpty_handle:
-                            try:
-                                self._winpty_handle.close()
-                            except Exception:
-                                pass
-                            self._winpty_handle = None
-                            self._dead = True
-                    except OSError as e:
-                        debug_log(f"Force-kill error: {e}", 'error')
-                    interrupted = True
-                    break
+                    except ImportError:
+                        pass
     
         except KeyboardInterrupt:
             # v9.7: KeyboardInterrupt is a fallback (ISIG is disabled so this shouldn't fire,
@@ -1541,6 +1486,8 @@ class PersistentShell:
         for i, line in enumerate(lines):
             if '__CMD_START_' in line or '__CMD_END_' in line or '__READY_' in line:
                 continue
+            if self._done_marker and self._done_marker in line:
+                continue
             stripped = line.strip()
             if stripped in _FILTERED_LINES:
                 continue
@@ -1581,6 +1528,8 @@ class PersistentShell:
         for line in lines:
             stripped = line.strip()
             if '__CMD_START_' in line or '__CMD_END_' in line or '__READY_' in line:
+                continue
+            if self._done_marker and self._done_marker in line:
                 continue
             if stripped in _FILTERED_LINES:
                 continue

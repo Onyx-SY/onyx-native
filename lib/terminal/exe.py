@@ -1107,14 +1107,13 @@ class PersistentShell:
         output_buffer: List[str],
         log_info: Optional[Callable] = None,
         log_error: Optional[Callable] = None,
-        passthrough: bool = True
+        passthrough: bool = False
     ) -> Tuple[int, str]:
         """
         Execute a command in the persistent shell.
         
-        passthrough=True (默认): 使用 pty.spawn() 独立子进程运行。
-        信号、终端模式由 stdlib 正确管理，Ctrl+C 瞬时生效。
-        passthrough=False: 使用持久化 shell + 标记检测（用于需要保留 shell 状态的场景）。
+        passthrough=False (默认): 使用持久化 shell，保留变量/cd 等状态。
+        passthrough=True: 使用 pty.fork() 独立子进程，用于交互式/TUI 程序。
         """
         debug_log(f"Executing command (passthrough={passthrough}): {repr(cmd)}")
         

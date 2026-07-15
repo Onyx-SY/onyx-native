@@ -451,12 +451,10 @@ def number_lines(text: str, start: int = 1) -> str:
     """
     给文本添加行号前缀。
 
-    返回格式（行号与内容用竖线分隔，视觉清晰分离）:
-           8| import os
-           9| def main():
-          10|     pass
-
-    ⚠️ 行号前缀仅用于定位，不属于文件内容。
+    返回格式:
+        1  │ #include <stdio.h>
+        2  │ int main() {
+    ⚠️ 行号前缀仅用于定位，不属于文件内容。构造 [EDIT] 的 SEARCH 时必须剥离。
     """
     lines = text.split("\n")
     # 计算行号宽度
@@ -464,5 +462,5 @@ def number_lines(text: str, start: int = 1) -> str:
     result = []
     for i, line in enumerate(lines):
         lineno = start + i
-        result.append(f"{lineno:>{width}}| {line}")
+        result.append(f"{lineno:>{width}}  │ {line}")
     return "\n".join(result)

@@ -193,7 +193,7 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
         formatted_lines = []
         for lineno, text in matched:
             raw_lines.append(text)
-            formatted_lines.append(f"{lineno}| {text}")
+            formatted_lines.append(f"{lineno}  │ {text}")
         raw_content = "\n".join(raw_lines)
         display_content = "\n".join(formatted_lines)
         line_range = None

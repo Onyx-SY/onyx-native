@@ -568,11 +568,11 @@ class PersistentShell:
                             debug_log(f"PS1 done marker, exit={return_code}")
                             before_marker = text[:done_match.start()]
                             if before_marker:
-                                # 清除残余 \r\n，确保不多出空行
-                                display = before_marker.rstrip('\n\r')
-                                if display:
-                                    sys.stdout.write(display + '\n')
-                                    sys.stdout.flush()
+                                # 原始 PTY 输出中的行尾已经正确，不做额外处理
+                                sys.stdout.write(before_marker)
+                                sys.stdout.flush()
+                                if output_buffer is not None:
+                                    output_buffer.append(before_marker)
                             break
 
                     # Real-time output forwarding

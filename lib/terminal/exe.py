@@ -472,11 +472,18 @@ class PersistentShell:
             new_tty = termios.tcgetattr(fd_stdin)
             new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
             new_tty[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+            # VMIN=1, VTIME=0：确保 read() 在至少有1字节时立即返回
+            try:
+                new_tty[6][termios.VMIN] = 1
+                new_tty[6][termios.VTIME] = 0
+            except (AttributeError, IndexError):
+                pass
             termios.tcsetattr(fd_stdin, termios.TCSANOW, new_tty)
 
         old_sigint = None
         old_sigwinch = None
         _interrupted_flag = {'value': False}
+        _ctrl_c_time = None  # 记录 Ctrl+C 的时间戳
         if not is_windows:
             def _sigint_handler(signum, frame):
                 _interrupted_flag['value'] = True
@@ -562,6 +569,11 @@ class PersistentShell:
                             text = ''
                     if not text.strip():
                         continue
+
+                    # Ctrl+C 后 3 秒超时 => 强制退出
+                    if _ctrl_c_time and time.time() - _ctrl_c_time > 3.0:
+                        debug_log("Ctrl+C timeout, force break (passthrough)")
+                        break
 
                     # Check for end marker — 从输出中移除，不显示给用户
                     end_pattern = re.escape(end_marker) + r":(-?\d+)"
@@ -1273,6 +1285,12 @@ class PersistentShell:
             new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
             # Disable canonical mode, echo, and signal generation
             new_tty[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+            # VMIN=1, VTIME=0：确保 read() 在至少有1字节时立即返回
+            try:
+                new_tty[6][termios.VMIN] = 1
+                new_tty[6][termios.VTIME] = 0
+            except (AttributeError, IndexError):
+                pass
             termios.tcsetattr(fd_stdin, termios.TCSANOW, new_tty)
             debug_log("TTY settings modified for TUI support")
     
@@ -1281,6 +1299,7 @@ class PersistentShell:
         old_sigint = None
         old_sigwinch = None
         _interrupted_flag = {'value': False}  # mutable container for handler access
+        _ctrl_c_time = None  # 记录 Ctrl+C 的时间戳
         if not is_windows:
             # Custom SIGINT handler as safety net (ISIG is disabled so normally not triggered)
             # We do NOT use SIG_DFL because if a signal somehow reaches us, Python would die
@@ -1385,6 +1404,12 @@ class PersistentShell:
                                     else:
                                         self._display_text(after_marker)
                                 break
+                    # Ctrl+C 后 3 秒超时 => 命令可能已被 SIGINT 杀死且 shell 未输出结束标记
+                    if _ctrl_c_time and time.time() - _ctrl_c_time > 3.0:
+                        debug_log("Ctrl+C timeout, force break (execute)")
+                        interrupted = True
+                        break
+
                     else:
                         full_raw_output += text
                         # Check for end marker
@@ -1405,7 +1430,9 @@ class PersistentShell:
                     if stdin_data is not None:
                         # v9.7: Ctrl+C (\x03) → forward to PTY. If command dies → end marker → OK.
                         #        If shell also dies → EOF detected → break → rebuild on next cmd.
-                        #        Ctrl+\ (\x1c) or Ctrl+D (\x04) → kill shell pg, EOF → rebuild.
+                        #        3s 超时兜底：Ctrl+C 后 3 秒内没收到结束标记就强制退出。
+                        if b'\x03' in stdin_data:
+                            _ctrl_c_time = time.time()
                         if b'\x1c' in stdin_data or b'\x04' in stdin_data:
                             # Force-kill: kill only the foreground process group, not the shell
                             which = 'Ctrl+\\' if b'\x1c' in stdin_data else 'Ctrl+D'

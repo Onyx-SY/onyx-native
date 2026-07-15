@@ -72,7 +72,31 @@ def parse_markup(text: str) -> List[Dict]:
             i += 1
             continue
 
-        # ── EDIT 块 ──
+        # ── EDIT 块（行号范围模式）──
+        # [EDIT:path:10-20]\n新内容\n[EDIT:DONE]
+        # 直接替换第 10-20 行，无需提供旧内容
+        edit_range_match = re.match(r'^\[EDIT:([^:]+):(\d+)-(\d+)\]$', stripped)
+        if edit_range_match:
+            path = edit_range_match.group(1)
+            start_line = int(edit_range_match.group(2))
+            end_line = int(edit_range_match.group(3))
+            i += 1
+            content_lines = []
+            while i < len(lines) and lines[i].strip() != "[EDIT:DONE]":
+                content_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1  # 跳过 [EDIT:DONE]
+            blocks.append({
+                "type": "edit_range",
+                "path": path,
+                "start": start_line,
+                "end": end_line,
+                "content": "\n".join(content_lines),
+            })
+            continue
+
+        # ── EDIT 块（SEARCH/REPLACE 模式）──
         # [EDIT:path]\n<<<<<<< SEARCH\n旧\n=======\n新\n>>>>>>> REPLACE
         edit_match = re.match(r'^\[EDIT:([^:]+)\]$', stripped)
         if edit_match:
@@ -218,6 +242,34 @@ def parse_markup(text: str) -> List[Dict]:
             i += 1
             continue
 
+        # ── REPLACE_ALL 块 ──
+        # [REPLACE_ALL:glob_pattern]\n旧内容\n=====\n新内容\n[REPLACE_ALL:DONE]
+        replace_all_match = re.match(r'^\[REPLACE_ALL:([^\]]+)\]$', stripped)
+        if replace_all_match:
+            glob_pattern = replace_all_match.group(1)
+            i += 1
+            search_lines = []
+            replace_lines = []
+            mode = "search"  # 先收集 search，遇到 ===== 切到 replace
+            while i < len(lines) and lines[i].strip() != "[REPLACE_ALL:DONE]":
+                line = lines[i]
+                if line.strip() == "=====" and mode == "search":
+                    mode = "replace"
+                elif mode == "search":
+                    search_lines.append(line)
+                else:
+                    replace_lines.append(line)
+                i += 1
+            if i < len(lines):
+                i += 1  # 跳过 [REPLACE_ALL:DONE]
+            blocks.append({
+                "type": "replace_all",
+                "glob": glob_pattern,
+                "search": "\n".join(search_lines),
+                "replace": "\n".join(replace_lines),
+            })
+            continue
+
         # ── 普通行，跳过 ──
         i += 1
 
@@ -225,7 +277,7 @@ def parse_markup(text: str) -> List[Dict]:
 
 
 def has_markup(text: str) -> bool:
-    """快速检查文本是否包含任何标记块"""
+    """快速检查文本是否包含任何标记块（正则匹配）"""
     if not text:
         return False
     patterns = [
@@ -235,9 +287,10 @@ def has_markup(text: str) -> bool:
         r'\[APPEND:',
         r'\[INSERT:',
         r'\[DELETE:',
+        r'\[REPLACE_ALL:',
     ]
     for p in patterns:
-        if p in text:
+        if re.search(p, text):
             return True
     return False
 

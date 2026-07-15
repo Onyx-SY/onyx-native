@@ -5836,9 +5836,10 @@ def handle_ai(
                 for _nr in _native_results:
                     status_icon = "✅" if _nr.success else "❌"
                     console.print(f"   {status_icon} [{_nr.type}] {_nr.path}: {_nr.message}", style="dim")
-                    if _nr.type == "view" and _nr.success and _nr.content:
-                        # VIEW: 把完整内容返回给 AI（像 MCP read_file 一样）
-                        tool_results.append(f"```\n{_nr.content}\n```")
+                    if _nr.type == "view" and _nr.success:
+                        # VIEW: 返回纯文本内容（无行号）给 AI，行号只在终端面板显示
+                        view_content = _nr.raw_content if _nr.raw_content else _nr.content
+                        tool_results.append(f"```\n{view_content}\n```")
                     elif _nr.success and _nr.content:
                         tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.content}")
                     elif _nr.success:

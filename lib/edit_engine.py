@@ -29,6 +29,89 @@ import shutil
 from typing import Tuple, Optional
 
 
+# ──────────────────────────── 二进制文件检测 ──────────────────
+
+# 已知的二进制扩展名集合（禁止 AI 编辑）
+BINARY_EXTENSIONS = frozenset({
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.svg',
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar', '.zst',
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.o', '.a', '.lib', '.obj',
+    '.mp3', '.mp4', '.avi', '.mov', '.wav', '.flac', '.ogg', '.webm',
+    '.woff', '.woff2', '.ttf', '.eot', '.otf',
+    '.ico', '.icns',
+    '.pyc', '.pyo', '.pyd',
+    '.db', '.sqlite', '.sqlite3',
+})
+
+
+def is_binary_path(path: str) -> bool:
+    """
+    检查文件路径是否为已知的二进制文件类型。
+
+    用于在 AI 编辑前做防御性拦截，避免写出损坏的二进制文件。
+    """
+    _, ext = os.path.splitext(path)
+    return ext.lower() in BINARY_EXTENSIONS
+
+
+# ──────────────────────────── 模糊匹配 ───────────────────────
+
+def fuzzy_find_similar(file_path: str, search: str, top_n: int = 1) -> list:
+    """
+    当 SEARCH 文本未找到时，在文件中查找最相似的文本块。
+
+    使用滑动窗口 + difflib SequenceMatcher 逐行比较，
+    返回最相似的代码段及其行号。
+
+    返回:
+        [{"line": int, "text": str, "ratio": float}, ...]
+        按相似度降序排列，最多 top_n 条。
+    """
+    if not os.path.exists(file_path) or not search:
+        return []
+
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception:
+        return []
+
+    file_lines = content.split("\n")
+    search_lines = search.split("\n")
+    search_len = len(search_lines)
+
+    if search_len == 0 or len(file_lines) == 0:
+        return []
+
+    # 允许窗口大小 ±3 行，适应 AI 多复制/少复制了几行
+    candidates = []
+
+    for window_size in range(max(1, search_len - 3), search_len + 4):
+        for i in range(len(file_lines) - window_size + 1):
+            window = "\n".join(file_lines[i:i + window_size])
+            ratio = difflib.SequenceMatcher(None, search, window).ratio()
+            if ratio > 0.3:  # 低于 0.3 的基本就是无关内容
+                candidates.append({
+                    "line": i + 1,  # 1-indexed
+                    "end_line": i + window_size,
+                    "text": window[:200],  # 只取前 200 字符做样本
+                    "ratio": round(ratio, 3),
+                })
+
+    # 去重：如果多窗口匹配到同一区域，只保留最高分
+    candidates.sort(key=lambda x: -x["ratio"])
+    seen_lines = set()
+    unique = []
+    for c in candidates:
+        key = (c["line"], c["end_line"])
+        if key not in seen_lines:
+            seen_lines.add(key)
+            unique.append(c)
+
+    return unique[:top_n]
+
+
 # ──────────────────────────── 校验 ────────────────────────────
 
 def validate_edit(file_path: str, search: str, replace: str) -> Tuple[bool, str]:
@@ -53,6 +136,17 @@ def validate_edit(file_path: str, search: str, replace: str) -> Tuple[bool, str]
 
     count = content.count(search)
     if count == 0:
+        # 精确匹配失败 → 尝试模糊匹配提供诊断信息
+        similar = fuzzy_find_similar(file_path, search, top_n=2)
+        if similar:
+            hint = "；".join(
+                f"第 {s['line']}-{s['end_line']} 行 (相似度 {s['ratio']:.0%})"
+                for s in similar
+            )
+            return False, (
+                f"❌ SEARCH 文本未找到。最相似内容位于 {hint}。"
+                f"请检查缩进和空格后重试。"
+            )
         return False, f"❌ SEARCH text not found in {file_path}"
     if count > 1:
         return False, f"❌ SEARCH text found {count} times (not unique) in {file_path}"

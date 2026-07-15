@@ -12,9 +12,10 @@ engine.py — Onyx 自研文件操作执行引擎
 
 import os
 import sys
+import glob as glob_mod
 from typing import Tuple, Optional
 
-from lib.edit_engine import apply_edit, validate_edit
+from lib.edit_engine import apply_edit, validate_edit, is_binary_path
 from .panels import (
     PanelManager,
     make_reading_panel,
@@ -32,12 +33,14 @@ class BlockResult:
     """单个标记块的执行结果"""
 
     def __init__(self, block: dict, success: bool, message: str,
-                 content: str = None, old_content: str = None):
+                 content: str = None, old_content: str = None,
+                 raw_content: str = None):
         self.type = block.get("type", "unknown")
         self.path = block.get("path", "")
         self.success = success
         self.message = message
-        self.content = content          # VIEW 读取的内容
+        self.content = content          # VIEW 读取的内容（带行号，用于显示）
+        self.raw_content = raw_content  # VIEW 读取的原始内容（无行号，用于 AI 回传）
         self.old_content = old_content  # DELETE/EDIT 被替换的内容
 
     def to_dict(self) -> dict:
@@ -47,6 +50,7 @@ class BlockResult:
             "path": self.path,
             "message": self.message,
             "content": self.content,
+            "raw_content": self.raw_content,
             "old_content": self.old_content,
         }
 
@@ -81,11 +85,21 @@ def execute_block(block: dict, cwd: str = None,
     if panel_mgr is None:
         panel_mgr = PanelManager()
 
+    # ── 二进制文件拦截（仅阻止写操作，VIEW 仍允许）──
+    _mutation_types = {"edit", "edit_range", "write", "append", "insert", "delete", "delete_by_content", "replace_all"}
+    if block_type in _mutation_types and is_binary_path(abs_path):
+        err_msg = f"❌ 拒绝编辑二进制文件: {path}（使用 shell 命令处理）"
+        pm = panel_mgr or PanelManager()
+        pm.show_static(make_error_panel(path, err_msg))
+        return BlockResult(block, False, err_msg)
+
     # 分发
     if block_type == "view":
         return _do_view(block, abs_path, panel_mgr)
     elif block_type == "edit":
         return _do_edit(block, abs_path, panel_mgr)
+    elif block_type == "edit_range":
+        return _do_edit_by_range(block, abs_path, panel_mgr)
     elif block_type == "write":
         return _do_write(block, abs_path, panel_mgr)
     elif block_type == "append":
@@ -96,6 +110,8 @@ def execute_block(block: dict, cwd: str = None,
         return _do_delete(block, abs_path, panel_mgr)
     elif block_type == "delete_by_content":
         return _do_delete_by_content(block, abs_path, panel_mgr)
+    elif block_type == "replace_all":
+        return _do_replace_all(block, abs_path, panel_mgr)
     else:
         return BlockResult(block, False, f"未知操作类型: {block_type}")
 
@@ -131,13 +147,19 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
     start = block.get("start")
     end = block.get("end")
     line = block.get("line")
-    search = block.get("search")
+    search_text = block.get("search")
+
+    # raw_content 始终绑定为不带行号的纯文本（用于 AI 回传）
+    # content 带行号前缀（用于终端面板展示）
+    raw_content = None
+    display_content = None
+    line_range = None
 
     if line is not None:
         # 单行 [VIEW:path:42]
         if 1 <= line <= total_lines:
-            content = number_lines(lines[line - 1], start=line)
-            display_content = content
+            raw_content = lines[line - 1]
+            display_content = number_lines(raw_content, start=line)
             line_range = (line, line)
         else:
             err = f"行号越界: {line}, 文件共 {total_lines} 行"
@@ -153,34 +175,36 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
             pm.show_static(make_error_panel(block["path"], err))
             return BlockResult(block, False, err)
         selected = lines[start_1 - 1:end_1]
-        content = number_lines("\n".join(selected), start=start_1)
-        display_content = content
+        raw_content = "\n".join(selected)
+        display_content = number_lines(raw_content, start=start_1)
         line_range = (start_1, end_1)
 
-    elif search:
+    elif search_text:
         # 搜索 [VIEW:path:search:关键词]
-        matched_lines = []
+        matched = []
         for i, line_text in enumerate(lines):
-            if search in line_text:
-                matched_lines.append((i + 1, line_text))
-        if not matched_lines:
-            msg = f"未找到含 \"{search}\" 的行"
+            if search_text in line_text:
+                matched.append((i + 1, line_text))
+        if not matched:
+            msg = f"未找到含 \"{search_text}\" 的行"
             pm.show_static(make_error_panel(block["path"], msg))
             return BlockResult(block, False, msg)
-        lines_found = []
-        for lineno, text in matched_lines:
-            lines_found.append(f"{lineno}  │ {text}")
-        content = "\n".join(lines_found)
-        display_content = content
+        raw_lines = []
+        formatted_lines = []
+        for lineno, text in matched:
+            raw_lines.append(text)
+            formatted_lines.append(f"{lineno}| {text}")
+        raw_content = "\n".join(raw_lines)
+        display_content = "\n".join(formatted_lines)
         line_range = None
 
     else:
         # 完整文件 [VIEW:path]
-        content = number_lines("\n".join(lines), start=1)
-        display_content = content
+        raw_content = "\n".join(lines)
+        display_content = number_lines(raw_content, start=1)
         line_range = None
 
-    # 构建并显示面板
+    # 构建并显示面板（带行号版本）
     panel = make_reading_panel(
         block["path"], display_content,
         line_range=line_range,
@@ -190,8 +214,10 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
     with pm.show_panel(panel):
         pass  # 面板显示后自动管理生命周期
 
+    # 返回时 content=带行号（面板用），raw_content=纯文本（AI 回传用）
     return BlockResult(block, True, f"已读取 {total_lines} 行",
-                       content=content)
+                       content=display_content,
+                       raw_content=raw_content)
 
 
 def _do_edit(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
@@ -219,6 +245,56 @@ def _do_edit(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
 
     return BlockResult(block, success, msg,
                        old_content=search)
+
+
+def _do_edit_by_range(block: dict, abs_path: str,
+                      pm: PanelManager) -> BlockResult:
+    """执行 EDIT 行号范围替换（无需 SEARCH，直接按行号替换）"""
+    start = block.get("start", 0)
+    end = block.get("end", 0)
+    new_content = block.get("content", "")
+
+    ok, err, lines = _read_file_lines(abs_path)
+    if not ok:
+        pm.show_static(make_error_panel(block["path"], err))
+        return BlockResult(block, False, err)
+
+    total = len(lines)
+    start_1 = max(1, start)
+    end_1 = min(total, end) if end > 0 else total
+
+    if start_1 > end_1 or start_1 > total:
+        err = f"行范围越界: {start}-{end}, 文件共 {total} 行"
+        pm.show_static(make_error_panel(block["path"], err))
+        return BlockResult(block, False, err)
+
+    # 获取被替换的旧内容（用于面板展示）
+    old_lines = lines[start_1 - 1:end_1]
+    old_content = "\n".join(old_lines)
+
+    # 构建新行列表
+    new_lines_list = new_content.split("\n")
+    result_lines = lines[:start_1 - 1] + new_lines_list + lines[end_1:]
+
+    # 构建面板
+    panel, dim_panel = make_edit_panel(
+        block["path"],
+        search=old_content,
+        replace=new_content,
+    )
+
+    try:
+        with pm.show_panel(panel, dim_panel):
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(result_lines))
+        return BlockResult(
+            block, True,
+            f"已替换第 {start_1}-{end_1} 行（{len(new_lines_list)} 行 → {len(old_lines)} 行）",
+            old_content=old_content,
+        )
+    except Exception as e:
+        pm.show_static(make_error_panel(block["path"], f"替换失败: {e}"))
+        return BlockResult(block, False, f"替换失败: {e}")
 
 
 def _do_write(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
@@ -288,8 +364,9 @@ def _do_insert(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
         pm.show_static(make_error_panel(block["path"], err))
         return BlockResult(block, False, err)
 
-    # 在第 line_no 行后插入
-    new_lines = lines[:line_no] + [content] + lines[line_no:]
+    # 在第 line_no 行后插入（正确 split 多行内容）
+    insert_lines = content.split("\n")
+    new_lines = lines[:line_no] + insert_lines + lines[line_no:]
 
     panel, dim_panel = make_insert_panel(block["path"], line_no, content)
 
@@ -346,6 +423,62 @@ def _do_delete(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
     except Exception as e:
         pm.show_static(make_error_panel(block["path"], f"删除失败: {e}"))
         return BlockResult(block, False, f"删除失败: {e}")
+
+
+def _do_replace_all(block: dict, abs_path: str,
+                    pm: PanelManager) -> BlockResult:
+    """执行 REPLACE_ALL（全局搜索替换）操作"""
+    glob_pattern = block.get("glob", "")
+    search_text = block.get("search", "")
+    replace_text = block.get("replace", "")
+
+    if not search_text:
+        return BlockResult(block, False, "搜索内容为空")
+    if not glob_pattern:
+        return BlockResult(block, False, "glob 模式为空")
+
+    # 使用 abs_path 作为基准目录解析 glob
+    base_dir = os.path.dirname(abs_path) if os.path.isabs(abs_path) else "."
+    matched_files = glob_mod.glob(os.path.join(base_dir, glob_pattern), recursive=True)
+
+    # 过滤出普通文件，排除二进制文件
+    targets = []
+    for f in matched_files:
+        if os.path.isfile(f) and not is_binary_path(f):
+            targets.append(f)
+
+    if not targets:
+        return BlockResult(block, False,
+                           f"未找到匹配的文件: {glob_pattern}")
+
+    # 逐文件搜索替换
+    changed = []
+    errors = []
+    for fpath in targets:
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            count = content.count(search_text)
+            if count == 0:
+                continue
+            new_content = content.replace(search_text, replace_text)
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            changed.append(f"{fpath} ({count} 处)")
+        except Exception as e:
+            errors.append(f"{fpath}: {e}")
+
+    msg_parts = []
+    if changed:
+        msg_parts.append(f"已修改 {len(changed)} 个文件: {', '.join(changed)}")
+    else:
+        msg_parts.append("未找到匹配内容")
+
+    if errors:
+        msg_parts.append(f"失败 {len(errors)} 个: {', '.join(errors)}")
+
+    success = len(changed) > 0 or len(errors) == 0
+    return BlockResult(block, success, "；".join(msg_parts))
 
 
 def _do_delete_by_content(block: dict, abs_path: str,

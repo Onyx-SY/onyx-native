@@ -446,54 +446,110 @@ class PersistentShell:
         log_error: Optional[Callable] = None
     ) -> Tuple[int, str]:
         """
-        Passthrough 模式：使用 pty.spawn() 在独立子进程中运行命令。
-        Python 不介入 PTY 数据转发，全部由内核和 stdlib 处理。
-        信号、终端模式全部由 pty.spawn() 正确管理，Ctrl+C 瞬时生效。
+        Passthrough 模式：pty.fork() + 完整终端管理。
+        - 真实终端设 raw mode（tty.setraw，含 VMIN=1/VTIME=0）
+        - PTY 设初始窗口大小 + SIGWINCH 响应
+        - 双向数据复制（read PTY → write stdout, read stdin → write PTY）
+        - Ctrl+C 转发 \x03 到 PTY（slave 端 ISIG 开，触发子进程 SIGINT）
         """
-        debug_log(f"Passthrough spawning: {repr(cmd[:200])}")
+        debug_log(f"Passthrough: {repr(cmd[:200])}")
+
+        import pty as _pty
+        import tty as _tty
+        import select as _select
 
         collected = []
-
-        def _master_read(fd):
-            data = os.read(fd, 4096)
-            if data:
-                collected.append(data)
-            return data
-
+        fd_stdin = sys.stdin.fileno()
+        fd_stdout = sys.stdout.fileno()
         exit_code = -1
-        pty_module = None
+        pid = None
+        master_fd = None
+
+        # ── 保存终端状态 ──
+        old_tty = None
+        old_sigwinch = None
+        old_sigint = None
+        shell_cmd = f"cd '{self.cwd}' && {cmd}" if self.cwd else cmd
 
         try:
-            import pty as pty_module
-        except ImportError:
-            debug_log("Passthrough failed: pty not available")
-            return -1, "pty not available"
+            if os.isatty(fd_stdin):
+                old_tty = termios.tcgetattr(fd_stdin)
+                _tty.setraw(fd_stdin)  # 正确 raw mode：ICANON/ECHO/ISIG 全关
 
-        try:
-            # 先 cd 到正确目录再执行命令
-            shell_cmd = f"cd '{self.cwd}' && {cmd}" if self.cwd else cmd
-            # 使用 login shell 以继承环境变量
-            _raw_status = pty_module.spawn(
-                ['sh', '-c', shell_cmd],
-                master_read=_master_read,
-            )
-            if os.WIFEXITED(_raw_status):
-                exit_code = os.WEXITSTATUS(_raw_status)
-            elif os.WIFSIGNALED(_raw_status):
-                exit_code = 128 + os.WTERMSIG(_raw_status)
-            else:
-                exit_code = -1
-        except FileNotFoundError:
-            debug_log("Passthrough spawn failed: sh not found")
-            return -1, "sh not found"
+            # ── fork + PTY ──
+            pid, master_fd = _pty.fork()
+            if pid == 0:
+                # 子进程
+                try:
+                    os.execvp('sh', ['sh', '-c', shell_cmd])
+                except Exception:
+                    os._exit(1)
+
+            # ── 设 PTY 初始窗口大小 ──
+            update_pty_size(master_fd)
+
+            # ── SIGWINCH ──
+            if hasattr(signal, 'SIGWINCH'):
+                def _swinch(s, f):
+                    update_pty_size(master_fd)
+                old_sigwinch = signal.signal(signal.SIGWINCH, _swinch)
+
+            # ── SIGINT：转发到子进程进程组 ──
+            def _sigint(s, f):
+                debug_log("SIGINT → child process group")
+                try:
+                    os.killpg(pid, signal.SIGINT)
+                except OSError:
+                    pass
+            old_sigint = signal.signal(signal.SIGINT, _sigint)
+
+            # ── 双向复制（同 pty.spawn 的 _copy）──
+            try:
+                while True:
+                    rlist, _, _ = _select.select([master_fd, fd_stdin], [], [])
+                    if master_fd in rlist:
+                        data = os.read(master_fd, 4096)
+                        if not data:
+                            break
+                        collected.append(data)
+                        os.write(fd_stdout, data)
+                    if fd_stdin in rlist:
+                        data = os.read(fd_stdin, 1024)
+                        if not data:
+                            break
+                        os.write(master_fd, data)
+            except OSError:
+                pass
+
+            # ── 等待子进程 ──
+            _, status = os.waitpid(pid, 0)
+            if os.WIFEXITED(status):
+                exit_code = os.WEXITSTATUS(status)
+            elif os.WIFSIGNALED(status):
+                exit_code = 128 + os.WTERMSIG(status)
+
         except Exception as e:
-            debug_log(f"Passthrough spawn exception: {e}", 'error')
-            return -1, str(e)
+            debug_log(f"Passthrough exception: {e}", 'error')
+            if pid is not None:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                except Exception:
+                    pass
+        finally:
+            if old_tty is not None and os.isatty(fd_stdin):
+                try:
+                    termios.tcsetattr(fd_stdin, termios.TCSANOW, old_tty)
+                except Exception:
+                    pass
+            if old_sigwinch is not None:
+                signal.signal(signal.SIGWINCH, old_sigwinch)
+            if old_sigint is not None:
+                signal.signal(signal.SIGINT, old_sigint)
 
         raw_output = b''.join(collected).decode('utf-8', errors='replace')
         if output_buffer is not None:
             output_buffer.append(raw_output)
-
         debug_log(f"Passthrough done, exit={exit_code}, output_len={len(raw_output)}")
         return exit_code, raw_output
 

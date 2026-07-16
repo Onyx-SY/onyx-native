@@ -194,11 +194,16 @@ def make_reading_panel(path: str, content: str,
         total_str = f" (共 {total_lines} 行)" if total_lines else ""
         title = f"{ICON_READ} AI 正在读取文件  {path}{total_str}"
 
-    # 构建内容
-    body = Text(content)
-    if total_lines and len(content.split("\n")) > 200:
-        # 如果终端显示超过 200 行，加个提示
-        body = Text(f"{content}\n\n... (超出终端可视区域，可滚动查看) ...")
+    # 人类屏幕只显示前 100 字符，完整内容只发给 AI
+    if len(content) > 100:
+        preview = content[:100]
+        # 找到最后一个换行，避免截断行
+        last_newline = preview.rfind("\n")
+        if last_newline > 50:
+            preview = preview[:last_newline]
+        body = Text(f"{preview}\n\n... (共 {total_lines} 行, 屏幕仅预览前 100 字符)")
+    else:
+        body = Text(content)
 
     return Panel(
         body,
@@ -210,6 +215,19 @@ def make_reading_panel(path: str, content: str,
     )
 
 
+def _trim_for_display(text: str, max_chars: int = 200, label: str = "") -> str:
+    """截断文本用于屏幕显示，保留首尾关键信息。"""
+    if len(text) <= max_chars:
+        return text
+    lines = text.split("\n")
+    if len(lines) <= 3:
+        return text[:max_chars] + "\n..."
+    # 显示前 2 行 + "..." + 后 1 行
+    head = "\n".join(lines[:2])
+    tail = lines[-1]
+    return f"{head}\n... ({len(text)} chars, {len(lines)} lines)\n{tail}"
+
+
 def make_edit_panel(path: str, search: str, replace: str,
                     context_before: List[str] = None,
                     context_after: List[str] = None) -> Tuple[Panel, Panel]:
@@ -218,15 +236,17 @@ def make_edit_panel(path: str, search: str, replace: str,
 
     返回: (彩色面板, 灰色摘要面板)
     """
-    # 构建修改前内容
+    # 构建修改前内容（仅显示变更行，全量内容只发给 AI）
     old_text = Text()
+    search_display = _trim_for_display(search, max_chars=200)
     old_text.append("修改前:\n", style=RichStyle(color=C_RED, bold=True))
-    old_text.append(search, style=RichStyle(color=C_RED, strike=True))
+    old_text.append(search_display, style=RichStyle(color=C_RED, strike=True))
 
     # 构建修改后内容
     new_text = Text()
+    replace_display = _trim_for_display(replace, max_chars=200)
     new_text.append("\n修改后:\n", style=RichStyle(color=C_GREEN, bold=True))
-    new_text.append(replace, style=C_GREEN)
+    new_text.append(replace_display, style=C_GREEN)
 
     body = Group(old_text, new_text)
 

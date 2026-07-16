@@ -6188,6 +6188,7 @@ def handle_ai(
         #       但凡存在其他字段（memory/plan/ask/commands/本轮新工具调用），
         #       都需要回问 AI 以传递上下文反馈。
         has_pending = bool(
+            markup_blocks or              # AI 输出了标记块（VIEW/EDIT/WRITE）→ 需回传结果
             memory_uuid or                # AI 引用了记忆 → 需回问让 AI 感知记忆已载入
             ai_commands or
             _tool_calls_processed_this_round or  # 本轮有刚执行的工具 → 给 AI 机会回应结果
@@ -6204,15 +6205,10 @@ def handle_ai(
             continue_asking = False
         else:
             # 非 REPL 模式，无待执行 → 显示 ESC 门控
-            # ── 显示 token 量 ──
+            # ── 显示 token 量（仅当 API 返回了精确值）──
             _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
             if _pt:
-                console.print(f"  [dim]📊 上下文 ~{_pt} tokens（API 精确值）[/]")
-            elif current_question:
-                # 回退估算：current_question + 系统提示词 baseline
-                _q_tokens = len(current_question) // 4 + 2  # 简单 char/4 估算
-                _total = _q_tokens + 1500  # 1500 = agreement.md + env_info 约值
-                console.print(f"  [dim]📊 上下文 ~{_total} tokens（估算）[/]")
+                console.print(f"  [dim]📊 上下文 ~{_pt} tokens[/]")
             continue_asking = False
             esc_pressed = [False]
             kb_esc = KeyBindings()

@@ -1733,6 +1733,7 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None, new_key: Opt
                     debug_mode: bool = False, onyx_module=None, mode: str = "normal", times: int = 1,
                     ai_tools_prompt: str = "", on_content: Optional[Callable[[str], None]] = None,
                     on_tool_call: Optional[Callable[[str], None]] = None,
+                    on_reasoning: Optional[Callable[[str], None]] = None,
                     user_home_dir: str = None,
                     tools: Optional[List[Dict]] = None,
                     messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
@@ -2040,10 +2041,9 @@ Onyx Mode: {onyx_mode}
                         # DeepSeek reasoner: separate thinking tokens from content
                         reasoning = delta.get("reasoning_content")
                         if reasoning:
-                            # Collect separately — do NOT mix into full_content or on_content,
-                            # since the structured parser (parse_sse_structured_response) and
-                            # the live display panel expect clean content with [TXT] markers.
                             _reasoning_display.append(reasoning)
+                            if on_reasoning:
+                                on_reasoning(reasoning)
                         content = delta.get("content")
                         if content:
                             full_content += content
@@ -5509,7 +5509,8 @@ def handle_ai(
 
         def on_stream_content(chunk: str) -> None:
             """实时流式回调：统一提取所有块类型并更新复合 Panel"""
-            nonlocal stream_buffer, txt_content
+            nonlocal stream_buffer, txt_content, _content_started
+            _content_started = True  # 首次收到内容，切换到内容面板
 
             # 规范化换行符 + 去除原始回车符（防止 ^M 污染显示）
             chunk = chunk.replace('\r\n', '\n').replace('\r', '\n')
@@ -5547,16 +5548,24 @@ def handle_ai(
                 # 使用SSE模式调用（带实时流式回调）
                 _mcp_debug(f"调用 call_ai_api_sse(messages={len(conversation_history)}条)")
                 try:
+                    _reasoning_buffer = []
+                    _content_started = False
+                    def _on_reasoning(chunk: str) -> None:
+                        """流式显示 AI 思考过程"""
+                        nonlocal _reasoning_buffer, _content_started
+                        if _content_started:
+                            return  # 已切换到内容显示，不再更新思考面板
+                        _reasoning_buffer.append(chunk)
+                        _text = "".join(_reasoning_buffer[-100:])
+                        live.update(Panel(
+                            Text(_text, style="dim italic"),
+                            title="🤖 AI 思考中...",
+                            border_style="bright_black",
+                            box=ROUNDED,
+                        ))
                     def _on_tool_call(tool_name: str) -> None:
                         """流式检测到工具调用时立即更新面板"""
-                        display_name = tool_name
-                        while display_name.startswith("mcp__"):
-                            parts = display_name.split("__", 2)
-                            display_name = parts[2] if len(parts) > 2 else display_name
-                        live.update(
-                            Panel(f"🔧 AI 正在调用: {display_name}",
-                                  title="🤖 AI", border_style="yellow", box=ROUNDED)
-                        )
+                        # 不展示工具调用信息给用户，保持界面清爽
                     api_raw_result = call_ai_api_sse(
                         question="", 
                         messages=conversation_history,
@@ -5568,6 +5577,7 @@ def handle_ai(
                     ai_tools_prompt=ai_tools_prompt,
                     on_content=on_stream_content,
                     on_tool_call=_on_tool_call,
+                    on_reasoning=_on_reasoning,
                     user_home_dir=user_home_dir,
                     tools=native_tools,
                     )
@@ -5882,13 +5892,7 @@ def handle_ai(
                     console.print(f"   → (缓存) {cached_output[:100]}...", style="dim")
                     continue
 
-                # 灰字显示工具调用摘要（显示剥离前缀后的干净名称）
-                display_name = tool_name
-                while display_name.startswith("mcp__"):
-                    parts = display_name.split("__", 2)
-                    display_name = parts[2] if len(parts) > 2 else display_name
-                tool_summary = f"🔧 AI 调用了工具: {display_name} {tool_params_str}"
-                console.print(tool_summary, style="dim")
+                # 工具调用过程不显示给用户（内部执行，不刷屏）
 
                 # 解析参数（JSON优先 → _parse_tool_params 回退）
                 if tool_params_str.strip().startswith("{"):

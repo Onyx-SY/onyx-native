@@ -5893,42 +5893,53 @@ def handle_ai(
                     tool_results.append(err_msg)
                     console.print(f"   {err_msg}", style="bold red")
 
-            # ── 追加标准 messages（assistant tool_calls + tool 结果）──
-            tc_ids = [f"call_{interaction_count}_{i}" for i in range(len(tool_calls))]
-            import json as _json
-            # 1. assistant message（含 tool_calls）
-            # 注意：当有 tool_calls 时 content 留空字符串（某些 API 拒绝 content+tool_calls 同时存在）
-            _tool_call_items = []
-            for i, tc in enumerate(tool_calls):
-                _raw_args = tc.get("params_str", "{}")
-                try:
-                    _parsed = _json.loads(_raw_args)
-                    _args_str = _json.dumps(_parsed, ensure_ascii=False)
-                except (_json.JSONDecodeError, ValueError):
-                    _args_str = _raw_args
-                _tool_call_items.append({
-                    "id": tc_ids[i],
-                    "type": "function",
-                    "function": {
-                        "name": tc.get("name", ""),
-                        "arguments": _args_str,
-                    }
-                })
-            _reasoning = ai_result.get("_reasoning", "")
-            _assistant_msg = {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": _tool_call_items,
-            }
-            if _reasoning:
-                _assistant_msg["reasoning_content"] = _reasoning
-            conversation_history.append(_assistant_msg)
-            # 2. tool role 结果消息
-            for i, res in enumerate(tool_results):
+            # ── 追加工具调用结果到 conversation_history ──
+            # 无论来源是 MCP tool_calls 还是原生 markup_blocks，
+            # 结果必须回传给 AI，否则 AI 不知道自己操作已生效，会反复重试
+            if tool_calls:
+                # 标准 OpenAI/DeepSeek 工具调用格式：
+                # assistant: tool_calls → tool: 结果
+                tc_ids = [f"call_{interaction_count}_{i}" for i in range(len(tool_calls))]
+                import json as _json
+                _tool_call_items = []
+                for i, tc in enumerate(tool_calls):
+                    _raw_args = tc.get("params_str", "{}")
+                    try:
+                        _parsed = _json.loads(_raw_args)
+                        _args_str = _json.dumps(_parsed, ensure_ascii=False)
+                    except (_json.JSONDecodeError, ValueError):
+                        _args_str = _raw_args
+                    _tool_call_items.append({
+                        "id": tc_ids[i],
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("name", ""),
+                            "arguments": _args_str,
+                        }
+                    })
+                _reasoning = ai_result.get("_reasoning", "")
+                _assistant_msg = {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": _tool_call_items,
+                }
+                if _reasoning:
+                    _assistant_msg["reasoning_content"] = _reasoning
+                conversation_history.append(_assistant_msg)
+                # tool role 结果消息
+                for i, res in enumerate(tool_results):
+                    conversation_history.append({
+                        "role": "tool",
+                        "tool_call_id": tc_ids[i],
+                        "content": res,
+                    })
+            elif tool_results:
+                # 原生标记语言结果（无 tool_calls）：用 user role 回传
+                # 格式：标记语言操作结果摘要
+                _result_text = "\n".join(tool_results)
                 conversation_history.append({
-                    "role": "tool",
-                    "tool_call_id": tc_ids[i],
-                    "content": res,
+                    "role": "user",
+                    "content": f"[系统：标记语言操作结果]\n{_result_text}",
                 })
 
             # 写入 library 磁盘（Markdown格式，仅记录用途）

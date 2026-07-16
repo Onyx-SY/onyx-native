@@ -5825,26 +5825,39 @@ def handle_ai(
         
         # ── 工具结果收集器（同时服务 markup 和 MCP 工具）──
         tool_results = []
+        _native_call_log_text = ""
 
         # ── 处理自研标记语言块 [VIEW:]/[EDIT:]/[WRITE:]/[APPEND:]/[INSERT:]/[DELETE:] ──
         if markup_blocks:
             try:
                 _native_results = _process_native_blocks(markup_blocks, cwd=user_home_dir)
+                _native_call_log = []  # 调用记录，完整写入 conversation
                 for _nr in _native_results:
                     status_icon = "✅" if _nr.success else "❌"
                     console.print(f"   {status_icon} [{_nr.type}] {_nr.path}: {_nr.message}", style="dim")
+                    # 构建调用记录块
+                    _op_type = _nr.type.upper()
+                    _op_path = _nr.path
                     if _nr.type == "view" and _nr.success:
-                        # VIEW: 返回纯文本内容（无行号）给 AI，行号只在终端面板显示
+                        # VIEW: 完整内容（无行号）写入调用记录，不截断
                         view_content = _nr.raw_content if _nr.raw_content else _nr.content
+                        _record = f"[{_op_type}] {_op_path}\n```\n{view_content}\n```"
                         tool_results.append(f"```\n{view_content}\n```")
                     elif _nr.success and _nr.content:
+                        _record = f"[{_op_type}] {_op_path}: {_nr.content}"
                         tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.content}")
                     elif _nr.success:
+                        _record = f"[{_op_type}] {_op_path}: {_nr.message}"
                         tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.message}")
                     else:
+                        _record = f"❌ [{_op_type}] {_op_path}: {_nr.message}"
                         tool_results.append(f"❌ [{_nr.type}] {_nr.path}: {_nr.message}")
+                    _native_call_log.append(_record)
+                # 保存调用记录，供后续写入 conversation_history
+                _native_call_log_text = "\n\n".join(_native_call_log)
             except Exception as _native_err:
                 console.print(f"   ❌ 原生文件操作异常: {_native_err}", style="bold red")
+                _native_call_log_text = f"❌ 原生文件操作异常: {_native_err}"
 
         # 处理 AI 工具调用 ([tool:...] 格式)
         if tool_calls:
@@ -5933,13 +5946,11 @@ def handle_ai(
                         "tool_call_id": tc_ids[i],
                         "content": res,
                     })
-            elif tool_results:
-                # 原生标记语言结果（无 tool_calls）：用 user role 回传
-                # 格式：标记语言操作结果摘要
-                _result_text = "\n".join(tool_results)
+            elif tool_results and _native_call_log_text:
+                # 原生标记语言结果（无 tool_calls）：写入调用记录
                 conversation_history.append({
                     "role": "user",
-                    "content": f"[系统：标记语言操作结果]\n{_result_text}",
+                    "content": f"[调用记录]\n{_native_call_log_text}",
                 })
 
             # 写入 library 磁盘（Markdown格式，仅记录用途）

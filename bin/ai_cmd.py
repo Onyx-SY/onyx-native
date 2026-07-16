@@ -5954,10 +5954,9 @@ def handle_ai(
                         "tool_call_id": tc_ids[i],
                         "content": res,
                     })
-            elif _native_call_log_text:
-                # 原生标记语言结果：嵌入 AI 自己的回复中，让 AI 在同一消息内看到结果
-                _orig_txt = ai_result.get("txt", "") or ""
-                ai_result["txt"] = _orig_txt + f"\n\n[调用记录]\n{_native_call_log_text}"
+            # 原生标记语言结果由 library 记忆系统持久化（record_ai_session），
+            # 下一轮 build_memory_context 从磁盘加载注入提示词。
+            # 不嵌入 AI 回复，保持流式输出纯净。
 
             # 写入 library 磁盘（Markdown格式，仅记录用途）
             if tool_results:

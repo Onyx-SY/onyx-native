@@ -5846,9 +5846,10 @@ def handle_ai(
                     _op_type = _nr.type.upper()
                     _op_path = _nr.path
                     if _nr.type == "view" and _nr.success:
-                        # VIEW: 完整内容（无行号）写入调用记录，不截断
-                        view_content = _nr.raw_content if _nr.raw_content else _nr.content
+                        # VIEW: 带行号内容写入调用记录和磁盘记忆，方便 AI 定位行号
+                        view_content = _nr.content  # 带行号（如 "  8  │ import os"）
                         _record = f"[{_op_type}] {_op_path}\n```\n{view_content}\n```"
+                        # tool_results 也用带行号版本，AI 立即能看到
                         tool_results.append(f"```\n{view_content}\n```")
                     elif _nr.success and _nr.content:
                         _record = f"[{_op_type}] {_op_path}: {_nr.content}"
@@ -5953,12 +5954,10 @@ def handle_ai(
                         "tool_call_id": tc_ids[i],
                         "content": res,
                     })
-            elif tool_results and _native_call_log_text:
-                # 原生标记语言结果（无 tool_calls）：写入调用记录
-                conversation_history.append({
-                    "role": "user",
-                    "content": f"[调用记录]\n{_native_call_log_text}",
-                })
+            elif _native_call_log_text:
+                # 原生标记语言结果：嵌入 AI 自己的回复中，让 AI 在同一消息内看到结果
+                _orig_txt = ai_result.get("txt", "") or ""
+                ai_result["txt"] = _orig_txt + f"\n\n[调用记录]\n{_native_call_log_text}"
 
             # 写入 library 磁盘（Markdown格式，仅记录用途）
             if tool_results:
@@ -6234,10 +6233,15 @@ def handle_ai(
             continue_asking = False
         else:
             # 非 REPL 模式，无待执行 → 显示 ESC 门控
-            # ── 显示 token 量（仅当 API 返回了精确值）──
+            # ── 显示 token 量 ──
             _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
             if _pt:
-                console.print(f"  [dim]📊 上下文 ~{_pt} tokens[/]")
+                console.print(f"  [dim]📊 上下文 ~{_pt} tokens（API 精确值）[/]")
+            elif conversation_history:
+                # 根据对话历史实际长度估算
+                _total_chars = sum(len(m.get("content", "") or "") for m in conversation_history)
+                _est_tokens = _total_chars // 3 + 1500  # 字符→token 粗略 + 系统提示词基线
+                console.print(f"  [dim]📊 上下文 ~{_est_tokens} tokens（估算）[/]")
             continue_asking = False
             esc_pressed = [False]
             kb_esc = KeyBindings()

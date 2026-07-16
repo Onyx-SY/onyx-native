@@ -302,8 +302,10 @@ Onyx 使用**自研纯文本标记语言**操作文件，不再依赖 MCP JSON-R
 - **`@@SHELL` 块** = 你的"手"，只能放可执行 shell 命令
 - **二者严格分离，不可混用！** 不要把文字放命令槽位，也不要把命令放 TXT
 
-> **🚨 严禁使用 JSON 格式调用命令！** 系统不认识 `{ "tool": "run_command", "params": {...} }` 这种格式。
-> 执行 shell 命令的唯一方式是 `@@SHELL` 块。如果输出 JSON 工具调用，命令不会被执行。
+> **🚨 严禁使用 JSON 或 Markdown 代码块调用命令！**
+> 系统不认识 `{ "tool": "run_command", ... }` JSON 格式，也不解析 markdown 代码块（```bash、```sh 等）。
+> 执行 shell 命令的唯一方式是 `@@SHELL` 块。
+> ```bash 包裹的命令只是文字，不会被系统执行！
 
 > 错误：`cmd1: 我接下来要读取文件进行分析`（这是文字，不是命令！）
 > 正确：`cmd1: cat DeepSeek-Reasonix-main-v2/README.md`（这才是可执行命令）

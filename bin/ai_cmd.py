@@ -5028,6 +5028,20 @@ def handle_ai(
     if _onyx_ai_prompt:
         _env_info += f"\n#最高指示（持久记忆）\n{_onyx_ai_prompt}\n"
 
+    # ── 加载核心系统提示词 agreement.md ──
+    try:
+        _agreement_paths = [
+            os.path.join(ROOT_DIR, "onyx", "etc", "ai", "agreement.md"),
+            os.path.join("etc", "ai", "agreement.md"),
+        ]
+        for _ap in _agreement_paths:
+            if os.path.exists(_ap):
+                with open(_ap, "r", encoding="utf-8") as _af:
+                    _env_info = _af.read() + "\n\n" + _env_info
+                break
+    except Exception:
+        pass
+
     _system_msg = {"role": "system", "content": _env_info}
     conversation_history.append(_system_msg)
     conversation_history.append({"role": "user", "content": initial_question})

@@ -270,6 +270,27 @@ def parse_markup(text: str) -> List[Dict]:
             })
             continue
 
+        # ── BATCH 块（原子批量操作）──
+        # [BATCH]\n多个 [EDIT:]/[WRITE:]/[DELETE:] 等\n[BATCH:DONE]
+        batch_match = re.match(r'^\[BATCH\]$', stripped)
+        if batch_match:
+            i += 1
+            inner_lines = []
+            while i < len(lines) and lines[i].strip() != "[BATCH:DONE]":
+                inner_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1  # 跳过 [BATCH:DONE]
+            inner_text = "\n".join(inner_lines)
+            # 递归解析内部标记块
+            inner_blocks = parse_markup(inner_text)
+            blocks.append({
+                "type": "batch",
+                "blocks": inner_blocks,
+                "source": inner_text,
+            })
+            continue
+
         # ── 普通行，跳过 ──
         i += 1
 
@@ -288,6 +309,7 @@ def has_markup(text: str) -> bool:
         r'\[INSERT:',
         r'\[DELETE:',
         r'\[REPLACE_ALL:',
+        r'\[BATCH\]',
     ]
     for p in patterns:
         if re.search(p, text):

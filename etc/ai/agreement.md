@@ -198,6 +198,32 @@ Onyx 使用**自研纯文本标记语言**操作文件，不再依赖 MCP JSON-R
 ```
 → 删除 10-15 行，同时在面板中红色高亮展示被删内容
 
+**原子批量操作（多个编辑一次性提交，失败全回滚）**
+```
+[BATCH]
+[EDIT:path/to/file]
+<<<<<<< SEARCH
+旧内容1
+=======
+新内容1
+>>>>>>> REPLACE
+
+[EDIT:path/to/file]
+<<<<<<< SEARCH
+旧内容2
+=======
+新内容2
+>>>>>>> REPLACE
+
+[WRITE:path/to/other]
+新文件内容
+[WRITE:DONE]
+[BATCH:DONE]
+```
+→ `[BATCH]` 内的所有操作作为一个原子事务：全部成功或全部回滚。
+> ⚠️ `[BATCH]` 整体算一个编辑块，遵守"每次只输出一个编辑块"的铁律。
+> `[BATCH]` 内可以混合 `[EDIT:]`、`[WRITE:]`、`[DELETE:]` 等操作。
+
 **全局搜索替换（跨文件批量修改）**
 ```
 [REPLACE_ALL:*.py]

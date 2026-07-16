@@ -12,6 +12,7 @@ engine.py — Onyx 自研文件操作执行引擎
 
 import os
 import sys
+import shutil
 import glob as glob_mod
 from typing import Tuple, Optional
 
@@ -94,7 +95,10 @@ def execute_block(block: dict, cwd: str = None,
         return BlockResult(block, False, err_msg)
 
     # 分发
-    if block_type == "view":
+    if block_type == "batch":
+        # batch 的 path 是多文件操作，不传 abs_path
+        return _do_batch(block, cwd, panel_mgr)
+    elif block_type == "view":
         return _do_view(block, abs_path, panel_mgr)
     elif block_type == "edit":
         return _do_edit(block, abs_path, panel_mgr)
@@ -519,3 +523,80 @@ def _do_delete_by_content(block: dict, abs_path: str,
     except Exception as e:
         pm.show_static(make_error_panel(block["path"], f"删除失败: {e}"))
         return BlockResult(block, False, f"删除失败: {e}")
+
+
+def _do_batch(block: dict, cwd: str = None,
+              pm: PanelManager = None) -> BlockResult:
+    """
+    执行 BATCH（原子批量操作）块。
+
+    先备份所有涉及的文件，然后逐个执行子块。
+    任一子块失败 → 全部回滚。
+    全部成功 → 清理备份。
+    """
+    sub_blocks = block.get("blocks", [])
+    if pm is None:
+        pm = PanelManager()
+
+    if not sub_blocks:
+        return BlockResult(block, False, "BATCH 块内没有操作")
+
+    # Step 1: 收集所有要修改的文件路径
+    affected_files = {}
+    for sb in sub_blocks:
+        sb_path = sb.get("path", "")
+        if sb_path:
+            abs_sb_path = _resolve_path(sb_path, cwd)
+            if os.path.isfile(abs_sb_path):
+                affected_files[abs_sb_path] = None
+
+    # Step 2: 备份所有文件
+    backups = {}
+    try:
+        for fpath in affected_files:
+            bak = fpath + ".bak.batch"
+            shutil.copy2(fpath, bak)
+            backups[fpath] = bak
+    except Exception as e:
+        for b in backups.values():
+            try:
+                os.remove(b)
+            except Exception:
+                pass
+        return BlockResult(block, False, f"BATCH 备份失败: {e}")
+
+    # Step 3: 逐个执行子块
+    sub_results = []
+    try:
+        for sb in sub_blocks:
+            r = execute_block(sb, cwd, pm)
+            sub_results.append(r)
+            if not r.success:
+                raise Exception(f"子操作失败: {r.message}")
+    except Exception as e:
+        # 回滚所有已修改的文件
+        for fpath, bak in backups.items():
+            try:
+                if os.path.exists(bak):
+                    shutil.copy2(bak, fpath)
+                    os.remove(bak)
+            except Exception:
+                pass
+        return BlockResult(block, False,
+                           f"BATCH 已回滚: {e}",
+                           content=str(sub_results))
+
+    # Step 4: 全部成功，清理备份
+    for bak in backups.values():
+        try:
+            os.remove(bak)
+        except Exception:
+            pass
+
+    success_count = sum(1 for r in sub_results if r.success)
+    total = len(sub_results)
+    return BlockResult(
+        block, True,
+        f"BATCH 完成: {success_count}/{total} 个操作成功",
+        content=str(sub_results),
+    )

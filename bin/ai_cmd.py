@@ -3931,6 +3931,9 @@ def build_native_tools_prompt(lang: str = "chinese") -> str:
         lines.append("[DELETE:路径:search:内容]     — 按内容删除（必须唯一）")
         lines.append("[DELETE:路径:10-15:show]     — 删除并展示被删内容")
         lines.append("")
+        lines.append("[REPLACE_ALL:*.py]            — 全局搜索替换（跨文件）")
+        lines.append("[BATCH]...[BATCH:DONE]        — 原子批量操作（失败全回滚）")
+        lines.append("")
         lines.append("### ⚠️ 铁律（违反必出错）")
         lines.append("1. **禁止调用 MCP 文件工具**：文件操作只能用原生标记语言，禁止使用 `[tool:read_file]`、`[tool:edit_file]`、`[tool:write_file]` 等 MCP 文件工具")
         lines.append("2. **每次只输出一个编辑块**：严禁在一次回复中输出多个 `[EDIT:]`、`[WRITE:]` 块。每次只做一个编辑，等系统返回 ✅ 后再做下一个")
@@ -3979,6 +3982,9 @@ def build_native_tools_prompt(lang: str = "chinese") -> str:
         lines.append("[DELETE:path:search:text]     — Delete by content (unique)")
         lines.append("[DELETE:path:10-15:show]     — Delete & show removed content")
         lines.append("")
+        lines.append("[REPLACE_ALL:*.py]            — Global search & replace")
+        lines.append("[BATCH]...[BATCH:DONE]        — Atomic batch (all or nothing)")
+        lines.append("")
         lines.append("### ⚠️ Iron Rules")
         lines.append("1. **No MCP file tools**: File operations use native markup ONLY. Never use `[tool:read_file]`, `[tool:edit_file]`, `[tool:write_file]`")
         lines.append("2. **One edit per response**: Never output multiple `[EDIT:]` or `[WRITE:]` blocks. Wait for ✅ before the next edit")
@@ -4018,45 +4024,12 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
     for tool in mcp_tools:
         _ = tool  # 暂时跳过所有 filesystem MCP 工具
 
-    # ── 内置分析工具（代码理解 + 编辑验证 + Token预算）──
-    BUILTIN_ANALYSIS_TOOLS = [
-        {
-            "type": "function",
-            "function": {
-                "name": "validate_edit",
-                "description": "校验 SEARCH/REPLACE 编辑是否安全（检查 search 文本存在且唯一）",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string", "description": "目标文件路径"},
-                        "search": {"type": "string", "description": "要查找的文本"},
-                        "replace": {"type": "string", "description": "替换文本"},
-                    },
-                    "required": ["file_path", "search", "replace"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "preview_edit",
-                "description": "预览 SEARCH/REPLACE 编辑的 unified diff",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string", "description": "目标文件路径"},
-                        "search": {"type": "string", "description": "要查找的文本"},
-                        "replace": {"type": "string", "description": "替换文本"},
-                    },
-                    "required": ["file_path", "search", "replace"],
-                },
-            },
-        },
-    ]
+    # ── validate_edit / preview_edit 已移除 ──
+    # 原生标记语言直接执行，不需要 preview/validate 步骤
+    # AI 通过系统提示词中的铁律已明确禁止调用预览/校验工具
 
-    native.extend(BUILTIN_ANALYSIS_TOOLS)
     _mcp_debug_exit("build_native_tools", ok=len(native) > 0,
-                    detail=f"{len(native)} native tools ({len(native)-len(BUILTIN_ANALYSIS_TOOLS)} mcp + {len(BUILTIN_ANALYSIS_TOOLS)} builtin)")
+                    detail=f"{len(native)} native tools")
     return native
 
 

@@ -29,7 +29,7 @@ panel_manager = PanelManager()
 # 标记块类型：哪些是修改操作
 _MUTATION_TYPES = frozenset({
     "edit", "edit_range", "write", "delete", "delete_by_content",
-    "append", "insert", "replace_all",
+    "append", "insert", "replace_all", "batch",
 })
 
 

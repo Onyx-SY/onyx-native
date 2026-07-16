@@ -1862,6 +1862,7 @@ Onyx Mode: {onyx_mode}
     try:
         _agreement_paths = [
             os.path.join(ROOT_DIR, "onyx", "etc", "ai", "agreement.md"),
+            os.path.join("etc", "ai", "agreement.md"),
         ]
         for _ap in _agreement_paths:
             if os.path.exists(_ap):
@@ -1885,7 +1886,7 @@ Onyx Mode: {onyx_mode}
     # ── 条件加载情感模块提示词 etc/ai/mood.md ──
     if is_mood_enabled():
         try:
-            _mood_prompt_path = os.path.join(ROOT_DIR, "onyx", "etc", "ai", "mood.md")
+            _mood_prompt_path = os.path.join(ROOT_DIR, "etc", "ai", "mood.md")
             if os.path.exists(_mood_prompt_path):
                 with open(_mood_prompt_path, "r", encoding="utf-8") as _mf:
                     system_prompt = (system_prompt or "") + "\n\n" + _mf.read()

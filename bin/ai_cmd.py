@@ -5847,7 +5847,7 @@ def handle_ai(
         # ── 处理自研标记语言块 [VIEW:]/[EDIT:]/[WRITE:]/[APPEND:]/[INSERT:]/[DELETE:] ──
         if markup_blocks:
             try:
-                _native_results = _process_native_blocks(markup_blocks, cwd=user_home_dir)
+                _native_results = _process_native_blocks(markup_blocks, cwd=user_home_dir, user_mode=_current_user_mode)
                 _native_call_log = []  # 调用记录，完整写入 conversation
                 for _nr in _native_results:
                     status_icon = "✅" if _nr.success else "❌"

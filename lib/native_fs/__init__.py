@@ -55,22 +55,29 @@ def process_markup(text: str, cwd: str = None) -> list:
     return _process_blocks_with_limit(blocks, cwd)
 
 
-def process_blocks(blocks: list, cwd: str = None) -> list:
+def process_blocks(blocks: list, cwd: str = None, user_mode: str = "mid") -> list:
     """
     直接执行已解析的标记块列表（跳过解析步骤）。
+
+    参数:
+        blocks:    标记块列表
+        cwd:       工作目录
+        user_mode: 安全模式（low/mid/adv），low 禁止写操作
 
     用于 ai_cmd.py 中已分离出 blocks 的场景。
     同样遵守单修改块铁律。
     """
-    return _process_blocks_with_limit(blocks, cwd)
+    return _process_blocks_with_limit(blocks, cwd, user_mode)
 
 
-def _process_blocks_with_limit(blocks: list, cwd: str = None) -> list:
+def _process_blocks_with_limit(blocks: list, cwd: str = None,
+                                user_mode: str = "mid") -> list:
     """
     内部：执行标记块，但限制修改操作每次只能有一个。
 
     - VIEW 块不受限（只读）
     - 多个修改块时，只执行第一个，其余返回跳过警告
+    - low 模式下禁止写操作（需要 activite -m mid）
     """
     total_mutations = _count_mutations(blocks)
     mutation_seen = False
@@ -80,8 +87,18 @@ def _process_blocks_with_limit(blocks: list, cwd: str = None) -> list:
         panel_manager.clear_previous()
         is_mutation = block.get("type") in _MUTATION_TYPES
 
+        # low 模式权限检查
+        if is_mutation and user_mode == "low":
+            _type = block.get("type", "?")
+            _path = block.get("path", "")
+            results.append(BlockResult(
+                block, False,
+                f"⛔ 权限不足：'{_type}' 需要 mid 模式才能执行。"
+                f"请告诉用户执行 activite -m mid 提升权限后重试。",
+            ))
+            continue
+
         if is_mutation and mutation_seen:
-            # 已有修改块执行过 → 这个跳过
             path = block.get("path", "")
             results.append(BlockResult(
                 block, False,

@@ -3791,33 +3791,46 @@ def get_mcp_tools(name: str = "filesystem", user_home_dir: str = None) -> List[D
 
 def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> str:
     """
-    构建注入给 AI 的工具说明提示词（Reasonix 风格）
-    - 工具名使用裸名（无 mcp__ 前缀），系统自动路由到对应 MCP 服务器
-    - 参数使用 JSON 格式放在 [tool:...] 块体中
-    - edit_file 使用 SEARCH/REPLACE 模式（old_string/new_string）
+    构建注入给 AI 的工具说明提示词。
+    文件操作已由原生标记语言覆盖，这里只展示非文件类 MCP 工具。
     """
     _mcp_debug_enter("build_mcp_tools_prompt")
     tools = get_mcp_tools(user_home_dir=user_home_dir)
-    _mcp_debug(f"get_mcp_tools 返回 {len(tools)} 个工具")
-    if not tools:
-        _mcp_debug_exit("build_mcp_tools_prompt", ok=False, detail="no tools")
-        if lang == "chinese":
-            return "## AI 工具\n(无可用的 MCP 工具)\n"
-        return "## AI Tools\n(No MCP tools available)\n"
+
+    # ── 过滤掉 filesystem 工具（文件操作用原生标记语言）──
+    non_file_tools = []
+    for t in tools:
+        name = t.get("name", "")
+        # filesystem 工具的常见名
+        if name in ("read_file", "write_file", "edit_file",
+                     "create_directory", "list_directory",
+                     "directory_tree", "move_file", "copy_file",
+                     "delete_file", "delete_directory",
+                     "get_file_info", "search_files", "search_content",
+                     "glob", "find_on_path", "get_workspace_folders"):
+            continue
+        non_file_tools.append(t)
+
+    _mcp_debug(f"get_mcp_tools 返回 {len(tools)} 个工具，过滤后 {len(non_file_tools)} 个")
+
+    if not non_file_tools:
+        # 没有非文件 MCP 工具，返回空字符串（不占用 prompt 空间）
+        _mcp_debug_exit("build_mcp_tools_prompt", ok=True, detail="only file tools, skipped")
+        return ""
 
     lines = []
     if lang == "chinese":
-        lines.append("## AI 工具（MCP）")
+        lines.append("## 非文件工具（MCP 兜底）")
         lines.append("调用格式: [tool:<工具名>] 换行 JSON参数 换行 [tool:<工具名>:done]")
-        lines.append("参数必须是合法 JSON，严格遵守各工具的 Schema。")
+        lines.append("参数必须是合法 JSON。")
     else:
-        lines.append("## AI Tools (MCP)")
+        lines.append("## Non-file Tools (MCP Fallback)")
         lines.append("Call format: [tool:<name>] newline JSON-args newline [tool:<name>:done]")
-        lines.append("Arguments MUST be valid JSON matching the tool's schema.")
+        lines.append("Arguments MUST be valid JSON.")
 
     lines.append("")
 
-    for tool in tools:
+    for tool in non_file_tools:
         raw_name = tool.get("name", "?")
         full_name = raw_name  # 不再加 mcp__filesystem__ 前缀
         desc = tool.get("description", "")
@@ -3860,24 +3873,17 @@ def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> 
 
         lines.append("")
 
-    # ── 大文件分块规则（超过 2000 字符的代码必须分批写入）──
+    # ── 分块提示（原生标记语言场景）──
     if lang == "chinese":
-        lines.append("📐 **大文件分块规则**")
-        lines.append("- 超过 2000 字符的文件禁止一次性 write_file 写入完整内容。")
-        lines.append("- 正确做法：")
-        lines.append("  1. 先用 write_file 创建骨架（含 <!-- CHUNK-1 --> <!-- CHUNK-2 --> 等占位标记）")
-        lines.append("  2. 再用 edit_file（SEARCH/REPLACE）逐个替换占位标记为实际代码")
-        lines.append("  3. 每个 edit_file 调用替换一块，每块不超过 2000 字符")
-        lines.append("- 示例：")
-        lines.append('  write_file → 创建文件含 {{CHUNK_1}}')
-        lines.append('  edit_file → SEARCH "{{CHUNK_1}}" REPLACE "<div>...</div>"')
+        lines.append("📐 **大文件操作建议**")
+        lines.append("- 超过 200 行的文件，修改超过 70% 时直接用 `[WRITE:]` 全量重写")
+        lines.append("- 局部修改用 `[EDIT:path:N-M]` 行号替换，省 Token 且不出错")
+        lines.append("- 每个 `[EDIT:]` 的 SEARCH 块不超过 50 行")
     else:
-        lines.append("📐 **Large File Chunking Rule**")
-        lines.append("- Files exceeding 2000 chars must NOT use a single write_file.")
-        lines.append("- Correct approach:")
-        lines.append("  1. write_file a skeleton with `{{CHUNK_1}}` `{{CHUNK_2}}` placeholders")
-        lines.append("  2. edit_file (SEARCH/REPLACE) each placeholder with actual code")
-        lines.append("  3. Each edit_file call replaces one chunk, max 2000 chars per chunk")
+        lines.append("📐 **Large File Tips**")
+        lines.append("- Over 200 lines & >70% change → use `[WRITE:]` to rewrite entirely")
+        lines.append("- Local changes → `[EDIT:path:N-M]` line-range replacement (cheaper, safer)")
+        lines.append("- Each `[EDIT:]` SEARCH block ≤ 50 lines")
     lines.append("")
 
     result = "\n".join(lines)
@@ -3925,17 +3931,20 @@ def build_native_tools_prompt(lang: str = "chinese") -> str:
         lines.append("[DELETE:路径:search:内容]     — 按内容删除（必须唯一）")
         lines.append("[DELETE:路径:10-15:show]     — 删除并展示被删内容")
         lines.append("")
-        lines.append("### 原则")
-        lines.append("1. Shell 优先：ls/cat/grep/find 能做的就别用标记")
-        lines.append("2. 读优先：改文件前先 [VIEW:] 确认行号")
-        lines.append("3. 唯一锚点：[EDIT:] 的 SEARCH 必须逐字节匹配且唯一")
-        lines.append("4. 分块：每块不超过 50 行，每次最多 5 个操作")
-        lines.append("5. 每个操作会自动显示彩色面板（绿=增/红=删/蓝=读）")
+        lines.append("### ⚠️ 铁律（违反必出错）")
+        lines.append("1. **禁止调用 MCP 文件工具**：文件操作只能用原生标记语言，禁止使用 `[tool:read_file]`、`[tool:edit_file]`、`[tool:write_file]` 等 MCP 文件工具")
+        lines.append("2. **每次只输出一个编辑块**：严禁在一次回复中输出多个 `[EDIT:]`、`[WRITE:]` 块。每次只做一个编辑，等系统返回 ✅ 后再做下一个")
+        lines.append("3. **直接执行不预览**：原生标记语言直接执行，不需要 preview/validate。直接输出 `[EDIT:]` 块，系统会自动执行")
         lines.append("")
-        lines.append("MCP 仅作为兜底（非文件操作时使用）：")
-        lines.append("[tool:<工具名>]")
-        lines.append('{"param": "value"}')
-        lines.append("[tool:<工具名>:done]")
+        lines.append("### 操作原则")
+        lines.append("- Shell 优先：ls/cat/grep/find 能做的就别用标记")
+        lines.append("- 读优先：改文件前先 `[VIEW:]` 确认行号")
+        lines.append("- 唯一锚点：`[EDIT:]` 的 SEARCH 必须逐字节匹配且唯一")
+        lines.append("- SEARCH 失败时系统会返回最相似行号，按提示调整缩进后重试")
+        lines.append("- 每个操作自动显示彩色面板（绿=增/红=删/蓝=读）")
+        lines.append("")
+        lines.append("> 文件操作 → 原生标记语言（纯文本，无需 JSON）")
+        lines.append("> 非文件操作 → MCP 协议（兜底）")
     else:
         lines.append("## AI File Operations (Onyx Native Markup)")
         lines.append("Use plain text markup for file operations, no JSON needed.")
@@ -3970,17 +3979,20 @@ def build_native_tools_prompt(lang: str = "chinese") -> str:
         lines.append("[DELETE:path:search:text]     — Delete by content (unique)")
         lines.append("[DELETE:path:10-15:show]     — Delete & show removed content")
         lines.append("")
-        lines.append("### Rules")
-        lines.append("1. Shell first: use ls/cat/grep/find when possible")
-        lines.append("2. View first: [VIEW:] before editing")
-        lines.append("3. Unique anchor: SEARCH text must be byte-exact and unique")
-        lines.append("4. Chunk: each block ≤ 50 lines, max 5 operations per response")
-        lines.append("5. Color panels auto-show: green=new, red=deleted, blue=reading")
+        lines.append("### ⚠️ Iron Rules")
+        lines.append("1. **No MCP file tools**: File operations use native markup ONLY. Never use `[tool:read_file]`, `[tool:edit_file]`, `[tool:write_file]`")
+        lines.append("2. **One edit per response**: Never output multiple `[EDIT:]` or `[WRITE:]` blocks. Wait for ✅ before the next edit")
+        lines.append("3. **Execute directly**: Native markup executes immediately. No preview/validate needed. Just output `[EDIT:]`")
         lines.append("")
-        lines.append("MCP fallback (for non-file operations):")
-        lines.append("[tool:<name>]")
-        lines.append('{"param": "value"}')
-        lines.append("[tool:<name>:done]")
+        lines.append("### Guidelines")
+        lines.append("- Shell first: use ls/cat/grep/find when possible")
+        lines.append("- View first: `[VIEW:]` before editing")
+        lines.append("- Unique anchor: SEARCH text must be byte-exact and unique")
+        lines.append("- On SEARCH failure, system returns closest line numbers — fix whitespace and retry")
+        lines.append("- Color panels auto-show: green=new, red=deleted, blue=reading")
+        lines.append("")
+        lines.append("> File operations → Native markup (plain text, no JSON)")
+        lines.append("> Non-file operations → MCP protocol (fallback)")
 
     return "\n".join(lines)
 

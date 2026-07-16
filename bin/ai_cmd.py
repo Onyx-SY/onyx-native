@@ -31,6 +31,7 @@ from datetime import datetime
 warnings.filterwarnings('ignore', category=requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 from rich.console import Console
+from rich.text import Text as RichText
 console = Console()
 
 # AI 工具已切换为 MCP 协议（见下方 MCP 客户端模块），不再使用 plugin_loader
@@ -5558,7 +5559,7 @@ def handle_ai(
                         _reasoning_buffer.append(chunk)
                         _text = "".join(_reasoning_buffer[-100:])
                         live.update(Panel(
-                            Text(_text, style="dim italic"),
+                            RichText(_text, style="dim italic"),
                             title="🤖 AI 思考中...",
                             border_style="bright_black",
                             box=ROUNDED,

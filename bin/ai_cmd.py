@@ -780,7 +780,8 @@ def load_memory_by_uuid(home_dir: str, memory_uuid: str) -> str:
 
 def record_ai_session(home_dir: str, session_id: str, user_question: str, 
                       ai_result: Dict[str, Any], user_answer: str = "", 
-                      cmd_results: Dict[str, str] = None, referenced_memory: str = "") -> None:
+                      cmd_results: Dict[str, str] = None, referenced_memory: str = "",
+                      native_results: str = "") -> None:
     cmd_results = cmd_results or {}
     library_dir = get_ai_session_library_dir(home_dir)
     record_path = os.path.join(library_dir, f"{session_id}.txt")
@@ -881,6 +882,12 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
                 content.append(f"- `{tc_name}`")
             else:
                 content.append(f"- `{str(tc)[:80]}`")
+        content.append("")
+    
+    # 原生标记语言操作记录（VIEW/EDIT/WRITE 等）
+    if native_results:
+        content.append(f"### {'File Operations' if md else '文件操作记录'}")
+        content.append(native_results)
         content.append("")
     
     # 写入文件（Markdown 格式）
@@ -5722,7 +5729,7 @@ def handle_ai(
                 continue_asking = True
                 
                 if interaction_count == 1:
-                    record_ai_session(user_home_dir, current_session_id, initial_question, ai_result, user_answer, {}, referenced_memory_uuid or "")
+                    record_ai_session(user_home_dir, current_session_id, initial_question, ai_result, user_answer, {}, referenced_memory_uuid or "", native_results=_native_call_log_text)
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
@@ -6139,7 +6146,7 @@ def handle_ai(
                         final_ai_result["txt"] = refuse_summary
                 
                 if interaction_count == 1:
-                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "")
+                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "", native_results=_native_call_log_text)
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
@@ -6171,7 +6178,7 @@ def handle_ai(
                         final_ai_result["txt"] = refuse_summary
                 
                 if interaction_count == 1:
-                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "")
+                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "", native_results=_native_call_log_text)
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:

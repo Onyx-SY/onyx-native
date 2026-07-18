@@ -154,7 +154,7 @@ class SmartSyntaxDetector:
         'redirect': r'[<>]&?\d*|&>[>&]?|<<<|<<',
         'pipe': r'\|[|&]?',
         'test_bracket': r'\[\s+.*?\s+\]|\[\[.*?\]\]',
-        'here_doc': r'<<[-]?\s*\w+',
+        'here_doc': r'<<[-]?\s*[\'\"]?\w+[\'\"]?',
     }
     
     JS_PATTERNS = {
@@ -947,7 +947,7 @@ class MultiLineState:
 class MultiLineDetector:
     
     BASH_MULTILINE_PATTERNS = [
-        (r'<<\s*[-]?\s*(\w+)', 'heredoc', 'bash'),
+        (r'<<\s*[-]?\s*[\'\"]?(\w+)[\'\"]?', 'heredoc', 'bash'),
         (r'\bif\b\s+.*?;\s*then\b', 'if_fi', 'bash'),  # 修复：必须包含 then
         (r'\belif\b\s+.*?;\s*then\b', 'if_fi', 'bash'),
         (r'\belse\b\s*$', 'if_fi', 'bash'),
@@ -1144,7 +1144,7 @@ class MultiLineDetector:
                 )
                 
                 if ml_type == 'heredoc':
-                    delim_match = re.search(r'<<\s*[-]?\s*(\w+)', line)
+                    delim_match = re.search(r'<<\s*[-]?\s*[\'\"]?(\w+)[\'\"]?', line)
                     if delim_match:
                         state.delimiter = delim_match.group(1)
                 

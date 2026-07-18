@@ -285,6 +285,40 @@ def apply_people_action(action: str, name: str, value: str = ""):
         p["perception"] = value
     save_mood(data)
 
+def _render_edit_diff(old_text: str, new_text: str, context_lines: int = 2):
+    """渲染彩色 diff：整行底色变色"""
+    import difflib, shutil
+    old_lines = old_text.split("\n")
+    new_lines = new_text.split("\n")
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+    _w = shutil.get_terminal_size().columns - 2
+
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        if op == "equal":
+            total = i2 - i1
+            if total <= context_lines * 2 + 1:
+                show_range = range(i1, i2)
+            else:
+                show_range = list(range(i1, i1 + context_lines)) + list(range(i2 - context_lines, i2))
+                console.print(f"       [dim white]... {total - context_lines * 2} 行未变化 ...[/]")
+            for idx in show_range:
+                console.print((f"  {idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="dim white")
+            if total > context_lines * 2 + 1:
+                continue
+        elif op == "delete":
+            for idx in range(i1, i2):
+                console.print((f"  {idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="white on red")
+        elif op == "replace":
+            for idx in range(i1, i2):
+                console.print((f"  {idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="white on blue")
+            for idx in range(j1, j2):
+                console.print((f"  {idx + 1:>4} │ {new_lines[idx]}").ljust(_w), style="black on yellow")
+        elif op == "insert":
+            for idx in range(j1, j2):
+                console.print((f"  {idx + 1:>4} │ {new_lines[idx]}").ljust(_w), style="black on green")
+    console.print(f"  [dim white]────────────────[/]")
+
+
 def mood_context() -> str:
     """生成 mood 上下文，注入 AI 请求。情感模块禁用时返回空字符串。"""
     if not is_mood_enabled():
@@ -710,7 +744,7 @@ def switch_chat_memory(home_dir: str, name: str) -> bool:
     return True
 
 def load_chat_memory_for_context(home_dir: str, chat_name: str) -> str:
-    """加载chat记忆用于AI上下文，不截断"""
+    """加载chat记忆用于AI上下文 — 每条消息用 {id:xxx} 标记，可被 MEMORY 字段按 UUID 精确引用"""
     chat_data = load_chat_json(home_dir, chat_name)
     chat_data = clean_expired_messages(chat_data)
     save_chat_json(home_dir, chat_name, chat_data)
@@ -722,20 +756,32 @@ def load_chat_memory_for_context(home_dir: str, chat_name: str) -> str:
     
     lang = get_current_lang()
     context_lines = []
-    context_lines.append("# Chat Memory" if lang == "english" else "# 聊天记忆")
+    is_en = lang == "english"
+    header = ("{chat_history_summary} — archived context, each entry tagged with id for MEMORY lookup."
+              if is_en else "{chat_history_summary} — 摘要历史，每条带 id 标记，可通过 MEMORY 字段按 UUID 精确查询。")
+    context_lines.append(header)
+    context_lines.append("")
     
     for msg in messages:
-        time_str = msg["timestamp"]
-        user_q = msg["user_question"]
-        ai_r = msg["ai_response"]
+        msg_id = msg.get("id", "?")
+        session_uuid = msg.get("session_uuid", "?")
+        time_str = msg.get("timestamp", "")
+        user_q = msg.get("user_question", "")
+        ai_r = msg.get("ai_response", "")
         tag = msg.get("tag", "")
         class_level = msg.get("class", "1")
         
-        context_lines.append(f"\n[{time_str}] [Class:{class_level}]")
-        context_lines.append(f"User: {user_q}")
-        context_lines.append(f"AI: {ai_r}")
+        context_lines.append("{")
+        context_lines.append(f"  id: {msg_id}")
+        context_lines.append(f"  session: {session_uuid}")
+        context_lines.append(f"  time: {time_str}")
+        context_lines.append(f"  class: {class_level}")
+        context_lines.append(f"  user: {user_q}")
+        context_lines.append(f"  ai: {ai_r[:200]}{'...' if len(ai_r) > 200 else ''}")
         if tag:
-            context_lines.append(f"Tag: {tag}")
+            context_lines.append(f"  tag: {tag}")
+        context_lines.append("}")
+        context_lines.append("")
     
     return "\n".join(context_lines)
 
@@ -1770,7 +1816,7 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None, new_key: Opt
                     for info in onyx_module.TOOL_INDEX_CACHE.values()
                     if hasattr(info, 'path') and info.path
                 ]
-                tool_list = list(set(tool_list))
+                tool_list = sorted(set(tool_list))  # sort: 稳定顺序=可缓存
             else:
                 tool_list = ["- No available tools (tool cache is empty)" if lang == "english" else "- 无可用工具（工具缓存为空）"]
         except Exception:
@@ -1838,24 +1884,27 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None, new_key: Opt
     except Exception:
         pass
 
-    env_info = f"""{system_label}: {sys_main_type} - {sys_sub_type}（{platform.release()}）
-{env_label}: {'Termux (' + termux_type + ')' if is_termux else 'PC'}
+    # 构建用户消息：稳定前缀（可缓存） + 动态后缀
+    # ⚠️ 稳定前缀里不要放任何会变的内容——时间、记忆、情绪都放后面
+    _stable_env = f"""{system_label}: {sys_main_type} - {sys_sub_type}
+{env_label}: {'Termux' if is_termux else 'PC'}
 {user_label}: {USER}
-{permission_label}: {permission_value if lang == 'english' else permission_value_cn}
 Shell: {current_shell}
 Onyx Mode: {onyx_mode}
-{workdir_label}: {os.getcwd()}
 {language_label}: {get_current_lang()}
-{time_label}: {current_time}
-#tml工具{tools_label}（{tool_count}）
+#可用工具（{tool_count}）
 {chr(10).join(tool_list)}
-#AI工具说明
-{ai_tools_prompt}
-#最高指示（持久记忆 — 通过 [PROMPT]: 维护）
+{ai_tools_prompt}"""
+
+    _dynamic_suffix = f"""#当前时间: {current_time}
+#工作目录: {os.getcwd()}
+#持久记忆
 {onyx_ai_prompt if onyx_ai_prompt else '(暂无)'}
 {mood_context()}
 #{task_label}
 {question}"""
+
+    env_info = _stable_env + "\n" + _dynamic_suffix
 
     # ── 加载系统提示词 etc/ai/agreement.md ──
     system_prompt = ""
@@ -2131,7 +2180,7 @@ Onyx Mode: {onyx_mode}
                     except (json.JSONDecodeError, ValueError):
                         args = tc["function"]["arguments"]
                     native_tools.append({
-                        "name": f"mcp__{plat_key}__{tc['function']['name']}",
+                        "name": tc['function']['name'],
                         "params_str": json.dumps(args) if isinstance(args, dict) else str(args),
                         "_native": True,
                     })
@@ -2237,40 +2286,87 @@ def extract_ai_commands(ai_result: Dict[str, Any]) -> List[str]:
 def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
                          referenced_memory_uuid: Optional[str], is_first_interaction: bool,
                          mode: str = "normal") -> str:
-    """构建记忆上下文"""
+    """构建记忆上下文 — 分三段：历史摘要(UUID链) | 当前会话(ongoing) | 引用记忆"""
     lang = get_current_lang()
-    memory_sections = []
+    is_en = lang == "english"
+    parts = []
     
     if mode == "normal":
+        # ── 第一段：UUID 链 — 历史摘要，每条带独立 id，可被 MEMORY 精确引用 ──
         chat_memory = load_chat_memory_for_context(home_dir, chat_name)
+        uuid_chain = []
         if chat_memory:
-            memory_sections.append(chat_memory)
-        
-        existing_memory, _ = get_latest_ai_session(home_dir, current_session_id)
-        if existing_memory and existing_memory.strip():
-            session_label = f"## Current Session Memory (library/{current_session_id}.txt)\n{existing_memory.strip()}" if lang == "english" else f"## 当前会话记忆 (library/{current_session_id}.txt)\n{existing_memory.strip()}"
-            memory_sections.append(session_label)
+            uuid_chain.append(chat_memory)
         
         previous_uuid = get_previous_session_uuid(home_dir, chat_name, current_session_id, is_first_interaction)
         if previous_uuid:
             prev_memory = load_memory_by_uuid(home_dir, previous_uuid)
             if prev_memory:
-                prev_label = f"## Previous Session Memory (library/{previous_uuid}.txt)\n{prev_memory.strip()}" if lang == "english" else f"## 上一次会话记忆 (library/{previous_uuid}.txt)\n{prev_memory.strip()}"
-                memory_sections.append(prev_label)
+                prev_block = (
+                    f"\n--- {{UUID链: {previous_uuid}}} ---\n"
+                    f"{prev_memory.strip()}"
+                ) if is_en else (
+                    f"\n--- {{UUID链: {previous_uuid}}} ---\n"
+                    f"{prev_memory.strip()}"
+                )
+                uuid_chain.append(prev_block)
         
+        if uuid_chain:
+            header = (
+                "═══════════════════════════════════════\n"
+                " UUID 链 — 历史参考（非当前对话，按 id/session 标记可精确引用）\n"
+                "═══════════════════════════════════════"
+            ) if is_en else (
+                "═══════════════════════════════════════\n"
+                " UUID 链 — 历史参考（非当前对话，每条带独立 id，可按 MEMORY 精确引用）\n"
+                "═══════════════════════════════════════"
+            )
+            parts.append(header + "\n" + "\n\n".join(uuid_chain))
+        
+        # ── 第二段：当前正在进行的会话（ongoing，实时更新）──
+        existing_memory, _ = get_latest_ai_session(home_dir, current_session_id)
+        if existing_memory and existing_memory.strip():
+            header = (
+                "═══════════════════════════════════════\n"
+                f" 当前会话（ongoing）— library/{current_session_id}.txt （实时更新）\n"
+                "═══════════════════════════════════════"
+            ) if is_en else (
+                "═══════════════════════════════════════\n"
+                f" 当前会话（ongoing）— library/{current_session_id}.txt （实时更新）\n"
+                "═══════════════════════════════════════"
+            )
+            parts.append(header + "\n" + existing_memory.strip())
+        
+        # ── 第三段：引用记忆（通过 [MEMORY]uuid 主动查询）──
         if referenced_memory_uuid:
             ref_memory = load_memory_by_uuid(home_dir, referenced_memory_uuid)
             if ref_memory:
-                ref_label = f"## Referenced Memory (library/{referenced_memory_uuid}.txt)\n{ref_memory.strip()}" if lang == "english" else f"## 指定引用记忆 (library/{referenced_memory_uuid}.txt)\n{ref_memory.strip()}"
-                memory_sections.append(ref_label)
+                header = (
+                    "═══════════════════════════════════════\n"
+                    f" 引用记忆 — [MEMORY:{referenced_memory_uuid}]\n"
+                    "═══════════════════════════════════════"
+                ) if is_en else (
+                    "═══════════════════════════════════════\n"
+                    f" 引用记忆 — [MEMORY:{referenced_memory_uuid}]\n"
+                    "═══════════════════════════════════════"
+                )
+                parts.append(header + "\n" + ref_memory.strip())
     
     elif mode in ["adv_code", "adv_terminal"]:
         existing_memory, _ = get_latest_ai_session(home_dir, current_session_id)
         if existing_memory and existing_memory.strip():
-            session_label = f"## Current Session Memory (library/{current_session_id}.txt)\n{existing_memory.strip()}" if lang == "english" else f"## 当前会话记忆 (library/{current_session_id}.txt)\n{existing_memory.strip()}"
-            memory_sections.append(session_label)
+            header = (
+                "═══════════════════════════════════════\n"
+                f" Current Session (library/{current_session_id}.txt)\n"
+                "═══════════════════════════════════════"
+            ) if is_en else (
+                "═══════════════════════════════════════\n"
+                f" 当前会话 (library/{current_session_id}.txt)\n"
+                "═══════════════════════════════════════"
+            )
+            parts.append(header + "\n" + existing_memory.strip())
     
-    return "\n\n".join(memory_sections) if memory_sections else ("No historical memory" if lang == "english" else "无历史记忆")
+    return "\n\n".join(parts) if parts else ("No historical memory" if is_en else "无历史记忆")
 
 # handle_path_field 已移除 — 文件编辑现在通过 AI 工具 (edit_file, write_file) 以 [tool:...] 格式调用
 # -------------------------- 9. 双语映射表 --------------------------
@@ -2559,29 +2655,33 @@ def set_ai_thread_priority(lang_text: Dict[str, str], thread: threading.Thread, 
 
 def confirm_plan(plan_text: str, lang_text: Dict[str, str]) -> str:
     """
-    Plan 确认流程：Rich Panel 渲染计划 + InquirerPy select 选择。
+    上下键选择 Plan 确认流程：Rich Panel 展示计划 + 箭头键选择。
     返回: "confirm" / "guide" / "discard"
     """
-    # Rich Panel 渲染计划内容（支持 Markdown）
+    # Rich Panel 渲染计划内容
     console.print(render_plan_panel(plan_text))
+    console.print()
 
-    options = [
-        lang_text.get("plan_confirm", "确认这份计划"),
-        lang_text.get("plan_guide", "继续指导 AI 修改计划"),
-        lang_text.get("plan_discard", "摒弃这份计划"),
-    ]
-
-    choice = select_option(
-        message=lang_text.get("plan_choose", "请选择操作:"),
-        options=options,
-        default=options[0],
-    )
-
-    if choice == options[0]:
+    try:
+        choice = select_option(
+            message=lang_text.get("plan_prompt", "请选择操作:"),
+            options=[
+                lang_text.get("plan_opt_confirm", "✅ 确认计划，开始执行"),
+                lang_text.get("plan_opt_guide", "💡 提出修改意见"),
+                lang_text.get("plan_opt_discard", "🗑️ 摒弃计划，重新制定"),
+            ],
+            default=lang_text.get("plan_opt_confirm", "✅ 确认计划，开始执行"),
+            lang=get_current_lang(),
+        )
+    except (KeyboardInterrupt, EOFError):
+        console.print()
         return "confirm"
-    elif choice == options[1]:
+
+    if choice in (lang_text.get("plan_opt_discard", "🗑️ 摒弃计划，重新制定"),):
+        return "discard"
+    elif choice in (lang_text.get("plan_opt_guide", "💡 提出修改意见"),):
         return "guide"
-    return "discard"
+    return "confirm"
 
 
 def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module=None) -> Tuple:
@@ -2597,7 +2697,6 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
     chat_action = None
     chat_param = None
     mode = "normal"
-    use_tui = False
     times = 1
     
     i = 0
@@ -2610,7 +2709,7 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
                 i += 2
             else:
                 i += 1
-            return ("model_command", model_name or "", [], auto_exec, new_key, None, None, mode, times, use_tui)
+            return ("model_command", model_name or "", [], auto_exec, new_key, None, None, mode, times)
         # ── -effort 推理强度 ──
         elif arg == "-effort":
             effort_val = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else None
@@ -2618,10 +2717,10 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
                 i += 2
             else:
                 i += 1
-            return ("effort_command", effort_val or "", [], auto_exec, new_key, None, None, mode, times, use_tui)
+            return ("effort_command", effort_val or "", [], auto_exec, new_key, None, None, mode, times)
         # ── -mid / -machine-id ──
         elif arg in ("-mid", "-machine-id"):
-            return ("machine_id_command", "", [], auto_exec, new_key, None, None, mode, times, use_tui)
+            return ("machine_id_command", "", [], auto_exec, new_key, None, None, mode, times)
         # ── -plugin 子命令 ──
         elif arg in ("-plugin", "plugin"):
             sub = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else "list"
@@ -2631,82 +2730,79 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
                 i += len(extra) + 2
             else:
                 i += 2 if sub != "list" else 1
-            return ("plugin_command", sub, extra, auto_exec, new_key, None, None, mode, times, use_tui)
+            return ("plugin_command", sub, extra, auto_exec, new_key, None, None, mode, times)
         # ── -mcp 子命令 ──
         elif arg in ("-mcp", "mcp"):
             if i + 1 >= len(ai_args):
-                return ("mcp_command", "list", [], auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("mcp_command", "list", [], auto_exec, new_key, None, None, mode, times)
             mcp_sub = ai_args[i + 1].lower()
             mcp_args = ai_args[i + 2:] if i + 2 < len(ai_args) else []
             if mcp_sub in ("install", "remove", "list", "start"):
-                return ("mcp_command", mcp_sub, mcp_args, auto_exec, new_key, None, None, mode, times, use_tui)
-            return ("error", f"Invalid -mcp subcommand: {mcp_sub}. Use install/list/remove", None, auto_exec, new_key, None, None, mode, times, use_tui)
-        elif arg == "-tui":
-            use_tui = True
-            i += 1
+                return ("mcp_command", mcp_sub, mcp_args, auto_exec, new_key, None, None, mode, times)
+            return ("error", f"Invalid -mcp subcommand: {mcp_sub}. Use install/list/remove", None, auto_exec, new_key, None, None, mode, times)
         elif arg == "-cmd":
             if i + 1 >= len(ai_args):
-                return ("error", lang_text["cmd_option_usage"], None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["cmd_option_usage"], None, auto_exec, new_key, None, None, mode, times)
             cmd_val = ai_args[i+1].lower()
             if cmd_val not in ["true", "false"]:
-                return ("error", lang_text["cmd_option_usage"], None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["cmd_option_usage"], None, auto_exec, new_key, None, None, mode, times)
             auto_exec = (cmd_val == "true")
             i += 2
         elif arg == "-m":
             if i + 1 >= len(ai_args):
-                return ("error", "Missing mode for -m parameter", None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", "Missing mode for -m parameter", None, auto_exec, new_key, None, None, mode, times)
             mode_val = ai_args[i+1].lower()
             if mode_val not in ["plan", "normal"]:
-                return ("error", "Invalid -m mode! Must be 'plan' or 'normal'", None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", "Invalid -m mode! Must be 'plan' or 'normal'", None, auto_exec, new_key, None, None, mode, times)
             mode = mode_val
             i += 2
         elif arg == "-mode":
             if i + 1 >= len(ai_args):
-                return ("error", "Missing mode type for -mode", None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", "Missing mode type for -mode", None, auto_exec, new_key, None, None, mode, times)
             mode_type = ai_args[i+1].lower()
             mode_val = ai_args[i+2] if i + 2 < len(ai_args) and not ai_args[i+2].startswith("-") else "true"
             if mode_type == "deep-aff":
-                return ("deep_aff_mode", mode_val, [], auto_exec, new_key, None, None, mode, times, use_tui)
-            return ("error", f"Unknown mode: {mode_type}", None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("deep_aff_mode", mode_val, [], auto_exec, new_key, None, None, mode, times)
+            return ("error", f"Unknown mode: {mode_type}", None, auto_exec, new_key, None, None, mode, times)
         elif arg == "-c":
             if i + 1 >= len(ai_args):
-                return ("chat_only", "", None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("chat_only", "", None, auto_exec, new_key, None, None, mode, times)
             chat_action = ai_args[i+1].lower()
             if chat_action in ["switch", "new"]:
                 if i + 2 >= len(ai_args):
-                    return ("chat_only", f"Missing name for -c {chat_action}", None, auto_exec, new_key, chat_action, None, mode, times, use_tui)
+                    return ("chat_only", f"Missing name for -c {chat_action}", None, auto_exec, new_key, chat_action, None, mode, times)
                 chat_param = ai_args[i+2]
                 i += 3
             elif chat_action == "list":
                 i += 2
             else:
-                return ("error", f"Invalid -c action: {chat_action}. Use switch/list/new", None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", f"Invalid -c action: {chat_action}. Use switch/list/new", None, auto_exec, new_key, None, None, mode, times)
         elif arg == "-t":
             if i + 1 >= len(ai_args):
-                return ("error", lang_text["text_usage"], None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["text_usage"], None, auto_exec, new_key, None, None, mode, times)
             text_parts = []
             j = i + 1
             while j < len(ai_args) and not ai_args[j].startswith("-"):
                 text_parts.append(ai_args[j])
                 j += 1
             if not text_parts:
-                return ("error", lang_text["text_usage"], None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["text_usage"], None, auto_exec, new_key, None, None, mode, times)
             content = " ".join(text_parts)
             content_type = "text"
             i = j
         elif arg == "-f":
             if i + 1 >= len(ai_args):
-                return ("error", lang_text["file_usage"], None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["file_usage"], None, auto_exec, new_key, None, None, mode, times)
             file_path = ai_args[i+1]
             if onyx_module and hasattr(onyx_module, "SANDBOX_CONFIG") and onyx_module.SANDBOX_CONFIG.get("enable", False):
                 if hasattr(onyx_module, "check_sandbox_path") and not onyx_module.check_sandbox_path(file_path, str(uuid.uuid4())):
-                    return ("error", lang_text["sandbox_block"].format(file_path), None, auto_exec, new_key, None, None, mode, times, use_tui)
+                    return ("error", lang_text["sandbox_block"].format(file_path), None, auto_exec, new_key, None, None, mode, times)
             if not os.path.exists(file_path):
-                return ("error", lang_text["file_not_exist"].format(file_path), None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["file_not_exist"].format(file_path), None, auto_exec, new_key, None, None, mode, times)
             if not os.access(file_path, os.R_OK):
-                return ("error", lang_text["file_no_perm"].format(file_path), None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["file_no_perm"].format(file_path), None, auto_exec, new_key, None, None, mode, times)
             if os.path.getsize(file_path) > 1024 * 200:
-                return ("error", lang_text["file_too_large"].format(file_path), None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["file_too_large"].format(file_path), None, auto_exec, new_key, None, None, mode, times)
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     file_content = f.read().strip()
@@ -2716,35 +2812,32 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
                 extra_info = file_path
                 i += 2
             except Exception as e:
-                return ("error", lang_text["file_read_fail"].format(str(e)[:20]), None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["file_read_fail"].format(str(e)[:20]), None, auto_exec, new_key, None, None, mode, times)
         elif arg == "-key":
             if i + 1 >= len(ai_args):
-                return ("error", lang_text["key_format_error"], None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["key_format_error"], None, auto_exec, new_key, None, None, mode, times)
             new_key = ai_args[i+1].strip()
             if len(new_key) != 32:
-                return ("error", lang_text["key_format_error"], None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("error", lang_text["key_format_error"], None, auto_exec, new_key, None, None, mode, times)
             i += 2
         # ── 裸子命令（无需 -c/-mcp 前缀的快捷方式）──
         elif arg in ("new", "switch", "list"):
             chat_action = arg
             if arg in ("new", "switch"):
                 if i + 1 >= len(ai_args):
-                    return ("chat_only", f"Missing name for {arg}", None, auto_exec, new_key, arg, None, mode, times, use_tui)
+                    return ("chat_only", f"Missing name for {arg}", None, auto_exec, new_key, arg, None, mode, times)
                 chat_param = ai_args[i + 1]
                 i += 2
             else:
                 i += 1
-        elif arg == "tui":
-            use_tui = True
-            i += 1
         elif arg == "mcp":
             if i + 1 >= len(ai_args):
-                return ("mcp_command", "list", [], auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("mcp_command", "list", [], auto_exec, new_key, None, None, mode, times)
             mcp_sub = ai_args[i + 1].lower()
             mcp_args = ai_args[i + 2:] if i + 2 < len(ai_args) else []
             if mcp_sub in ("install", "remove", "list", "start"):
-                return ("mcp_command", mcp_sub, mcp_args, auto_exec, new_key, None, None, mode, times, use_tui)
-            return ("error", f"Invalid mcp subcommand: {mcp_sub}. Use install/list/remove", None, auto_exec, new_key, None, None, mode, times, use_tui)
+                return ("mcp_command", mcp_sub, mcp_args, auto_exec, new_key, None, None, mode, times)
+            return ("error", f"Invalid mcp subcommand: {mcp_sub}. Use install/list/remove", None, auto_exec, new_key, None, None, mode, times)
         elif arg.startswith("-"):
             i += 1
         else:
@@ -2759,15 +2852,15 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
                 i += 1
     
     if chat_action is not None:
-        return ("chat_only", "", None, auto_exec, new_key, chat_action, chat_param, mode, times, use_tui)
+        return ("chat_only", "", None, auto_exec, new_key, chat_action, chat_param, mode, times)
     
     if new_key is not None and not content:
-        return ("key_only", "", None, auto_exec, new_key, None, None, mode, times, use_tui)
+        return ("key_only", "", None, auto_exec, new_key, None, None, mode, times)
     
     if not content and new_key is None:
-        return ("error", lang_text["param_error"], None, auto_exec, new_key, None, None, mode, times, use_tui)
+        return ("error", lang_text["param_error"], None, auto_exec, new_key, None, None, mode, times)
     
-    return (content_type, content, extra_info, auto_exec, new_key, None, None, mode, times, use_tui)
+    return (content_type, content, extra_info, auto_exec, new_key, None, None, mode, times)
 
 def show_loading(loading_flag: List[bool], lang_text: Dict[str, str]) -> None:
     symbols = ["◐", "◓", "◑", "◒"]
@@ -3044,7 +3137,7 @@ def _migrate_mcp_config_if_needed(user_home_dir: str = None) -> str:
                 "description": "文件系统操作 (read/write/edit/list/search)",
                 "command": "npx",
                 "args": ["-y", "@modelcontextprotocol/server-filesystem", "{CWD}"],
-                "auto_start": True,
+                "auto_start": False,
                 "installed": False
             }
         }
@@ -3902,103 +3995,59 @@ def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> 
 
 def build_native_tools_prompt(lang: str = "chinese") -> str:
     """
-    构建注入给 AI 的原生标记语言操作说明（取代 MCP tools prompt）。
-    告诉 AI 使用纯文本标记操作文件，不再依赖 MCP JSON-RPC。
+    构建注入给 AI 的工具说明。
+    文件操作使用 function calling（read_file/edit_file/write_file/validate_edit/preview_edit）
+    TXT/ANALYSIS/PLAN/ASK/@@SHELL 仍使用原生标记语言。
     """
     lines = []
     if lang == "chinese":
-        lines.append("## AI 文件操作（Onyx 原生标记语言）")
-        lines.append("直接用纯文本标记操作文件，无需 JSON 转义。")
-        lines.append("**优先级**：原生标记语言（首选）> MCP 协议（兜底）")
+        lines.append("## 文件操作（Function Calling）")
+        lines.append("文件读写编辑使用标准 function calling 工具，通过 tool_calls 调用。")
+        lines.append("注意：工具名是 `read_file`/`edit_file`/`write_file`，不要加 `mcp_` 或 `mcp__filesystem__` 前缀。")
         lines.append("")
-        lines.append("### 查看（精确，不截断）")
-        lines.append("[VIEW:路径]                   — 完整文件，每行带行号")
-        lines.append("[VIEW:路径:10-30]             — 第 10 到 30 行")
-        lines.append("[VIEW:路径:42]                — 第 42 行")
-        lines.append("[VIEW:路径:search:关键词]     — 搜索含关键词的行")
-        lines.append("")
-        lines.append("### 编辑")
-        lines.append("[EDIT:路径]")
-        lines.append("<<<<<<< SEARCH")
-        lines.append("旧内容（逐字节匹配，必须唯一）")
-        lines.append("=======")
-        lines.append("新内容")
-        lines.append(">>>>>>> REPLACE")
-        lines.append("")
-        lines.append("[WRITE:路径]")
-        lines.append("新文件全部内容")
-        lines.append("[WRITE:DONE]")
-        lines.append("")
-        lines.append("[APPEND:路径]")
-        lines.append("追加的内容")
-        lines.append("")
-        lines.append("[INSERT:路径:行号]")
-        lines.append("插入的内容")
-        lines.append("[INSERT:DONE]")
-        lines.append("")
-        lines.append("[DELETE:路径:10-15]          — 按行号删除")
-        lines.append("[DELETE:路径:search:内容]     — 按内容删除（必须唯一）")
-        lines.append("[DELETE:路径:10-15:show]     — 删除并展示被删内容")
-        lines.append("")
-        lines.append("[REPLACE_ALL:*.py]            — 全局搜索替换（跨文件）")
-        lines.append("[BATCH]...[BATCH:DONE]        — 原子批量操作（失败全回滚）")
-        lines.append("")
-        lines.append("### ⚠️ 铁律（违反必出错）")
-        lines.append("1. **禁止调用 MCP 文件工具**：文件操作只能用原生标记语言，禁止使用 `[tool:read_file]`、`[tool:edit_file]`、`[tool:write_file]` 等 MCP 文件工具")
-        lines.append("2. **每次只输出一个编辑块**：严禁在一次回复中输出多个 `[EDIT:]`、`[WRITE:]` 块。每次只做一个编辑，等系统返回 ✅ 后再做下一个")
-        lines.append("3. **直接执行不预览**：原生标记语言直接执行，不需要 preview/validate。直接输出 `[EDIT:]` 块，系统会自动执行")
+        lines.append("### 可用工具")
+        lines.append("- `get_file_info(path)` — 获取文件信息（大小/行数/修改时间）")
+        lines.append("- `read_file(path, range?)` — 读取文件，range='10-30' 指定行范围")
+        lines.append("- `edit_file(path, old_string, new_string)` — SEARCH/REPLACE 精确替换")
+        lines.append("- `write_file(path, content)` — 创建/覆盖文件")
+        lines.append("- `validate_edit(file_path, search, replace)` — 校验 SEARCH 存在且唯一")
+        lines.append("- `preview_edit(file_path, search, replace)` — 预览 diff")
         lines.append("")
         lines.append("### 操作原则")
-        lines.append("- Shell 优先：ls/cat/grep/find 能做的就别用标记")
-        lines.append("- 读优先：改文件前先 `[VIEW:]` 确认行号")
-        lines.append("- 唯一锚点：`[EDIT:]` 的 SEARCH 必须逐字节匹配且唯一")
-        lines.append("- SEARCH 失败时系统会返回最相似行号，按提示调整缩进后重试")
-        lines.append("- 每个操作自动显示彩色面板（绿=增/红=删/蓝=读）")
+        lines.append("1. **先查后改**：先 `get_file_info` 了解文件概况，再 `read_file` 看具体内容")
+        lines.append("2. **优先用 edit_file**：局部修改用 `edit_file`，只有新建文件或超 70% 改动才用 `write_file`")
+        lines.append("3. **超过 20KB 的新文件：先骨架后血肉**：先用 `write_file` 创建骨架，再用多次 `edit_file` 逐步填入具体实现")
+        lines.append("4. **先校验再编辑**：每次 `edit_file` 前先调 `validate_edit` 校验")
+        lines.append("5. **唯一锚点**：`edit_file` 的 old_string 必须逐字节匹配且唯一")
+        lines.append("6. **Shell 优先**：ls/cat/grep/find 能用 `@@SHELL` 解决的就不用读文件")
         lines.append("")
-        lines.append("> 文件操作 → 原生标记语言（纯文本，无需 JSON）")
-        lines.append("> 非文件操作 → MCP 协议（兜底）")
+        lines.append("### 计划工具")
+        lines.append("- `submit_plan(plan, steps?)` — 提交计划给用户确认，steps 是结构化步骤数组")
+        lines.append("- `mark_step_complete(step_id)` — 完成一步后标记进度")
+        lines.append("")
+        lines.append("> TXT/ANALYSIS/ASK/@@SHELL 仍使用原生标记语言")
     else:
-        lines.append("## AI File Operations (Onyx Native Markup)")
-        lines.append("Use plain text markup for file operations, no JSON needed.")
-        lines.append("**Priority**: Native Markup (primary) > MCP Protocol (fallback)")
+        lines.append("## File Operations (Function Calling)")
+        lines.append("Use standard function calling tools for file read/write/edit.")
         lines.append("")
-        lines.append("### View (exact, no truncation)")
-        lines.append("[VIEW:path]                  — Full file with line numbers")
-        lines.append("[VIEW:path:10-30]            — Lines 10 to 30")
-        lines.append("[VIEW:path:42]               — Line 42 only")
-        lines.append("[VIEW:path:search:keyword]   — Search lines containing keyword")
+        lines.append("### Available Tools")
+        lines.append("- `get_file_info(path)` — Get file info (size/lines/mtime)")
+        lines.append("- `read_file(path, range?)` — Read file, range='10-30' for line range")
+        lines.append("- `edit_file(path, old_string, new_string)` — SEARCH/REPLACE edit")
+        lines.append("- `write_file(path, content)` — Create/overwrite file")
+        lines.append("- `validate_edit(file_path, search, replace)` — Validate SEARCH exists & unique")
+        lines.append("- `preview_edit(file_path, search, replace)` — Preview diff")
         lines.append("")
-        lines.append("### Edit")
-        lines.append("[EDIT:path]")
-        lines.append("<<<<<<< SEARCH")
-        lines.append("old text (byte-exact match, must be unique)")
-        lines.append("=======")
-        lines.append("new text")
-        lines.append(">>>>>>> REPLACE")
+        lines.append("### Guidelines")
+        lines.append("1. **Check first**: `get_file_info` then `read_file` before editing")
+        lines.append("2. **Prefer edit_file**: local changes → `edit_file`; new file or >70% change → `write_file`")
+        lines.append("3. **Large file chunking**: for new files >20KB, create skeleton with `write_file` then fill with multiple `edit_file` calls")
+        lines.append("4. **Validate before edit**: Always call `validate_edit` before `edit_file`")
+        lines.append("5. **Unique anchor**: `edit_file` old_string must be byte-exact and unique")
+        lines.append("6. **Shell first**: use `@@SHELL` for ls/cat/grep/find when possible")
         lines.append("")
-        lines.append("[WRITE:path]")
-        lines.append("full content")
-        lines.append("[WRITE:DONE]")
-        lines.append("")
-        lines.append("[APPEND:path]")
-        lines.append("content to append")
-        lines.append("")
-        lines.append("[INSERT:path:line_number]")
-        lines.append("content to insert")
-        lines.append("[INSERT:DONE]")
-        lines.append("")
-        lines.append("[DELETE:path:10-15]          — Delete by line range")
-        lines.append("[DELETE:path:search:text]     — Delete by content (unique)")
-        lines.append("[DELETE:path:10-15:show]     — Delete & show removed content")
-        lines.append("")
-        lines.append("[REPLACE_ALL:*.py]            — Global search & replace")
-        lines.append("[BATCH]...[BATCH:DONE]        — Atomic batch (all or nothing)")
-        lines.append("")
-        lines.append("### ⚠️ Iron Rules")
-        lines.append("1. **No MCP file tools**: File operations use native markup ONLY. Never use `[tool:read_file]`, `[tool:edit_file]`, `[tool:write_file]`")
-        lines.append("2. **One edit per response**: Never output multiple `[EDIT:]` or `[WRITE:]` blocks. Wait for ✅ before the next edit")
-        lines.append("3. **Execute directly**: Native markup executes immediately. No preview/validate needed. Just output `[EDIT:]`")
-        lines.append("")
+        lines.append("> TXT/ANALYSIS/PLAN/ASK/@@SHELL still use native markup language")
+
         lines.append("### Guidelines")
         lines.append("- Shell first: use ls/cat/grep/find when possible")
         lines.append("- View first: `[VIEW:]` before editing")
@@ -4012,31 +4061,339 @@ def build_native_tools_prompt(lang: str = "chinese") -> str:
     return "\n".join(lines)
 
 
-def build_native_tools(user_home_dir: str = None) -> List[Dict]:
-    """Build OpenAI-compatible tools array from MCP tool registry.
+# ── 权限级别常量 ──
+PERM_READONLY = "ReadOnly"           # 安全只读，自动放行
+PERM_WORKSPACE_WRITE = "WorkspaceWrite"  # 修改工作区，需轻确认
+PERM_DANGER_FULL = "DangerFullAccess"    # 危险操作，需显式批准
 
-    Returns a list of dicts in the format expected by the OpenAI/DeepSeek
-    API 'tools' parameter, or an empty list when no MCP tools are available.
+
+def _make_tool(name: str, description: str, properties: dict, required: list,
+               permission: str = PERM_READONLY) -> Dict:
+    """构建标准 OpenAI function calling 工具定义。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
+        },
+        "x_permission": permission,  # 自定义字段，用于执行时权限检查
+    }
+
+
+def build_native_tools(user_home_dir: str = None) -> List[Dict]:
+    """Build OpenAI-compatible tools array — Claw Code inspired full tool set.
+
+    Permission levels: ReadOnly (auto), WorkspaceWrite (light confirm), DangerFullAccess (approval).
+    Each tool has exact JSON Schema parameters (type, enum, required, additionalProperties=False).
     """
     _mcp_debug_enter("build_native_tools")
+
+    native = [
+        # ═══════════════════════════════════════════
+        # ReadOnly — 安全只读，自动放行
+        # ═══════════════════════════════════════════
+
+        _make_tool(
+            "get_file_info",
+            "获取文件基本信息：大小、修改时间、行数、类型。修改文件前先调用此工具了解概况。",
+            {"path": {"type": "string", "description": "文件路径"}},
+            ["path"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "read_file",
+            "读取文件内容。支持行号范围。改文件前务必先读文件确认当前内容。",
+            {
+                "path": {"type": "string", "description": "文件路径"},
+                "range": {"type": "string", "description": "可选行号范围，如 '10-30' 或 '42'（单行）"},
+            },
+            ["path"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "glob_search",
+            "使用 glob 模式查找文件。如 'src/**/*.ts' 查找所有 TypeScript 文件。",
+            {
+                "pattern": {"type": "string", "description": "Glob 模式，如 'src/**/*.py'"},
+                "path": {"type": "string", "description": "可选搜索根目录，默认当前工作目录"},
+            },
+            ["pattern"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "grep_search",
+            "使用正则表达式搜索文件内容。支持上下文行、大小写控制。",
+            {
+                "pattern": {"type": "string", "description": "搜索的正则表达式"},
+                "path": {"type": "string", "description": "可选搜索根目录"},
+                "glob": {"type": "string", "description": "可选文件过滤，如 '*.py'"},
+                "context": {"type": "integer", "description": "可选上下各行数，默认 0"},
+                "-i": {"type": "boolean", "description": "可选忽略大小写，默认 false"},
+                "head_limit": {"type": "integer", "description": "可选结果数量上限"},
+            },
+            ["pattern"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "ToolSearch",
+            "搜索可用工具的名称或关键字。不知道用什么工具时调用此工具查找。",
+            {"query": {"type": "string", "description": "搜索关键词，如 'file'、'search'、'web'"}},
+            ["query"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "Skill",
+            "加载并执行一个技能剧本。技能是预定义的可复用操作流程。",
+            {
+                "skill": {"type": "string", "description": "技能名称"},
+                "args": {"type": "string", "description": "可选参数"},
+            },
+            ["skill"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "Sleep",
+            "等待指定秒数。用于监控、等待异步操作等场景。",
+            {"seconds": {"type": "integer", "minimum": 1, "description": "等待秒数"}},
+            ["seconds"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "StructuredOutput",
+            "以请求的格式返回结构化数据。format='json'时返回 JSON 字符串。",
+            {
+                "format": {"type": "string", "enum": ["json"], "description": "输出格式"},
+                "data": {"type": "string", "description": "要结构化的数据"},
+            },
+            ["format", "data"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "TodoWrite",
+            "更新当前会话的任务列表。用于多步骤任务中跟踪进度。设置状态为 completed 表示该步骤完成。",
+            {
+                "todos": {
+                    "type": "array",
+                    "description": "任务列表",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "任务描述"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"],
+                                       "description": "任务状态"},
+                            "activeForm": {"type": "string", "description": "进行中状态的动名词描述，如'正在分析架构'"},
+                        },
+                        "required": ["content", "status", "activeForm"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            ["todos"],
+            PERM_WORKSPACE_WRITE,
+        ),
+
+        # ═══════════════════════════════════════════
+        # WorkspaceWrite — 修改工作区，需轻确认
+        # ═══════════════════════════════════════════
+
+        _make_tool(
+            "write_file",
+            "创建新文件或全量覆盖现有文件。仅用于新建文件或超过 70% 内容变动。局部修改优先用 edit_file。超过 20KB 的新文件应先用 write_file 创建骨架，再用多次 edit_file 填入实现。",
+            {
+                "path": {"type": "string", "description": "文件路径"},
+                "content": {"type": "string", "description": "完整的文件内容"},
+            },
+            ["path", "content"],
+            PERM_WORKSPACE_WRITE,
+        ),
+        _make_tool(
+            "edit_file",
+            "SEARCH/REPLACE 精确替换。old_string 必须逐字节匹配文件内容且唯一。改前先用 validate_edit 校验。保留代码缩进。",
+            {
+                "path": {"type": "string", "description": "目标文件路径"},
+                "old_string": {"type": "string", "description": "要替换的旧文本（逐字节精确匹配，必须唯一）"},
+                "new_string": {"type": "string", "description": "替换后的新文本"},
+                "replace_all": {"type": "boolean", "description": "可选：是否替换所有匹配项（默认只替换第一个）"},
+            },
+            ["path", "old_string", "new_string"],
+            PERM_WORKSPACE_WRITE,
+        ),
+        _make_tool(
+            "validate_edit",
+            "校验 SEARCH 文本在目标文件中存在且唯一。每次 edit_file 前务必先调用此工具校验。",
+            {
+                "file_path": {"type": "string", "description": "目标文件路径"},
+                "search": {"type": "string", "description": "要搜索的旧文本（逐字节精确匹配）"},
+                "replace": {"type": "string", "description": "替换后的新文本"},
+            },
+            ["file_path", "search", "replace"],
+            PERM_READONLY,  # 校验是安全的
+        ),
+        _make_tool(
+            "preview_edit",
+            "预览 edit_file 的 unified diff。确认修改正确后再执行编辑。",
+            {
+                "file_path": {"type": "string", "description": "目标文件路径"},
+                "search": {"type": "string", "description": "要搜索的旧文本"},
+                "replace": {"type": "string", "description": "替换后的新文本"},
+            },
+            ["file_path", "search", "replace"],
+            PERM_READONLY,  # 预览是安全的
+        ),
+        _make_tool(
+            "submit_plan",
+            "提交多步骤执行计划给用户确认。steps 是结构化步骤数组，plan 是纯文本描述（二选一）。确认后才能开始执行。复杂任务必须先用此工具提交计划。",
+            {
+                "plan": {"type": "string", "description": "Markdown 格式的计划描述"},
+                "steps": {
+                    "type": "array",
+                    "description": "结构化步骤列表",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "步骤 ID，如 step-1"},
+                            "title": {"type": "string", "description": "简短标题"},
+                            "action": {"type": "string", "description": "具体操作描述"},
+                            "risk": {"type": "string", "enum": ["low", "med", "high"], "description": "风险等级"},
+                        },
+                        "required": ["id", "title"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            ["plan"],
+            PERM_WORKSPACE_WRITE,
+        ),
+        _make_tool(
+            "mark_step_complete",
+            "标记一个步骤已完成。提交计划后每完成一步调用此工具更新进度。",
+            {"step_id": {"type": "string", "description": "步骤 ID，如 step-1"}},
+            ["step_id"],
+            PERM_WORKSPACE_WRITE,
+        ),
+        _make_tool(
+            "EnterPlanMode",
+            "进入计划模式。在此模式下禁止执行任何命令和文件修改，只能输出计划。调用 EnterPlanMode 后应紧接着用 submit_plan 提交计划。",
+            {},
+            [],
+            PERM_WORKSPACE_WRITE,
+        ),
+        _make_tool(
+            "ExitPlanMode",
+            "退出计划模式，恢复正常执行模式。计划被确认后调用此工具退出 plan 模式并开始执行。",
+            {},
+            [],
+            PERM_WORKSPACE_WRITE,
+        ),
+        _make_tool(
+            "Config",
+            "获取或设置 Onyx 配置。action='get' 返回当前配置，action='set' 设置指定键的值。",
+            {
+                "action": {"type": "string", "enum": ["get", "set"], "description": "操作类型"},
+                "key": {"type": "string", "description": "配置键名"},
+                "value": {"type": "string", "description": "配置值（set 时需要）"},
+            },
+            ["action", "key"],
+            PERM_WORKSPACE_WRITE,
+        ),
+
+        # ═══════════════════════════════════════════
+        # 情感工具（内部使用，不在 TXT 中提及）
+        # ═══════════════════════════════════════════
+
+        _make_tool(
+            "set_mood",
+            "调整情感状态。dimension: happy/angry, delta: -3~+3。此工具静默执行，不要在 TXT 回复中提及。",
+            {
+                "dimension": {"type": "string", "enum": ["happy", "angry"], "description": "情感维度"},
+                "delta": {"type": "number", "description": "调整值（-3.0 ~ +3.0）"},
+            },
+            ["dimension", "delta"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "update_people",
+            "更新人物档案。此工具静默执行，不要在 TXT 回复中提及。",
+            {
+                "action": {"type": "string", "enum": ["add", "likeability", "perception"], "description": "操作类型"},
+                "name": {"type": "string", "description": "人物名称"},
+                "value": {"type": "string", "description": "likeability 时传数字，perception 时传描述"},
+            },
+            ["action", "name"],
+            PERM_READONLY,
+        ),
+
+        # ═══════════════════════════════════════════
+        # DangerFullAccess — 危险操作，需显式批准
+        # ═══════════════════════════════════════════
+
+        _make_tool(
+            "Agent",
+            "启动一个子代理处理独立任务。子代理在隔离环境中运行，返回结果后继续。用于并行探索或独立子任务。",
+            {
+                "description": {"type": "string", "description": "子代理任务描述"},
+                "prompt": {"type": "string", "description": "子代理的完整指令"},
+                "name": {"type": "string", "description": "可选子代理名称"},
+            },
+            ["description", "prompt"],
+            PERM_DANGER_FULL,
+        ),
+        _make_tool(
+            "WebFetch",
+            "获取 URL 内容并转换为可读文本。需用户批准。",
+            {
+                "url": {"type": "string", "description": "要获取的 URL"},
+                "prompt": {"type": "string", "description": "关于获取内容的具体问题"},
+            },
+            ["url", "prompt"],
+            PERM_DANGER_FULL,
+        ),
+        _make_tool(
+            "WebSearch",
+            "搜索网络获取最新信息并返回引用结果。需用户批准。",
+            {
+                "query": {"type": "string", "minLength": 2, "description": "搜索关键词"},
+                "allowed_domains": {"type": "array", "items": {"type": "string"}, "description": "可选限制搜索域名"},
+            },
+            ["query"],
+            PERM_DANGER_FULL,
+        ),
+    ]
+
+    # ── Include non-filesystem MCP tools (puppeteer/github/postgres etc.) ──
     mcp_tools = get_mcp_tools(user_home_dir=user_home_dir)
-    if not mcp_tools:
-        _mcp_debug_exit("build_native_tools", ok=False, detail="no tools")
-        return []
+    if mcp_tools:
+        seen_names = {t["function"]["name"] for t in native if "function" in t}
+        for mt in mcp_tools:
+            name = mt.get("name", "")
+            if not name or name in seen_names:
+                continue
+            if name in ("read_file", "write_file", "edit_file",
+                         "create_directory", "list_directory",
+                         "directory_tree", "move_file", "copy_file",
+                         "delete_file", "delete_directory",
+                         "get_file_info", "search_files", "search_content",
+                         "glob", "find_on_path", "get_workspace_folders"):
+                continue
+            mcp_prefixed = f"mcp_{name}"
+            native.append({
+                "type": "function",
+                "function": {
+                    "name": mcp_prefixed,
+                    "description": f"[MCP {name}] {mt.get('description', '')}",
+                    "parameters": mt.get("inputSchema", {}),
+                },
+                "x_permission": PERM_DANGER_FULL,  # MCP 工具默认危险
+            })
+            seen_names.add(mcp_prefixed)
 
-    # 文件操作类工具已由原生标记语言替代，不暴露给函数调用 API。
-    # AI 通过系统提示词中的 markup 说明来操作文件。
-    # 非文件类 MCP server（如 puppeteer/github/postgres）后续可在此列保留。
-    native = []
-    # 当前所有 MCP tools 来自 filesystem server，全部被 markup 替代
-    # 后续引入非文件 MCP server 时从下方遍历中添加
-    for tool in mcp_tools:
-        _ = tool  # 暂时跳过所有 filesystem MCP 工具
-
-    # ── validate_edit / preview_edit 已移除 ──
-    # 原生标记语言直接执行，不需要 preview/validate 步骤
-    # AI 通过系统提示词中的铁律已明确禁止调用预览/校验工具
-
+    native.sort(key=lambda t: t.get("function", {}).get("name", ""))
     _mcp_debug_exit("build_native_tools", ok=len(native) > 0,
                     detail=f"{len(native)} native tools")
     return native
@@ -4069,6 +4426,583 @@ def _exec_preview_edit(file_path: str, search: str, replace: str) -> str:
         return f"❌ preview_edit failed: {e}"
 
 
+def _exec_get_file_info(file_path: str) -> str:
+    """获取文件基本信息。"""
+    try:
+        import os, datetime
+        if not os.path.exists(file_path):
+            return f"❌ File not found: {file_path}"
+        stat = os.stat(file_path)
+        size = stat.st_size
+        mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+        # 行数
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                line_count = sum(1 for _ in f)
+        except Exception:
+            line_count = -1
+        size_str = f"{size:,} bytes"
+        if size > 1024:
+            size_str += f" ({size/1024:.1f} KB)"
+        if size > 1024*1024:
+            size_str += f" ({size/1024/1024:.1f} MB)"
+        # 文件类型
+        _, ext = os.path.splitext(file_path)
+        ext = ext.lower() if ext else "(no extension)"
+        return (
+            f"📄 {file_path}\n"
+            f"  大小: {size_str}\n"
+            f"  修改时间: {mtime}\n"
+            f"  行数: {line_count if line_count >= 0 else 'binary/unknown'}\n"
+            f"  类型: {ext}"
+        )
+    except Exception as e:
+        return f"❌ get_file_info failed: {e}"
+
+
+def _exec_read_file(file_path: str, range_str: str = None) -> str:
+    """读取文件内容，支持行号范围。"""
+    try:
+        if not os.path.exists(file_path):
+            return f"❌ File not found: {file_path}"
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        if range_str:
+            try:
+                if "-" in range_str:
+                    start, end = map(int, range_str.split("-", 1))
+                    lines = content.split("\n")
+                    lines = lines[max(0, start-1):end]
+                    content = "\n".join(lines)
+                else:
+                    line_no = int(range_str)
+                    lines = content.split("\n")
+                    content = lines[min(line_no-1, len(lines)-1)]
+            except (ValueError, IndexError):
+                pass
+        return content
+    except Exception as e:
+        return f"❌ read_file failed: {e}"
+
+
+def _exec_write_file(file_path: str, content: str) -> str:
+    """写入文件（全量覆盖）。"""
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        # 检查内容是否相同，避免无效写入
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                if f.read() == content:
+                    return f"⏭️ 内容未变化，跳过写入 {file_path}"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        total_lines = content.count("\n") + (1 if content else 0)
+        return f"✅ 已写入 {file_path}（{total_lines} 行）"
+    except Exception as e:
+        return f"❌ write_file failed: {e}"
+
+
+def _exec_edit_file(file_path: str, old_string: str, new_string: str) -> str:
+    """SEARCH/REPLACE 精确替换。先读旧内容做 diff 展示，再执行编辑。"""
+    try:
+        from lib.edit_engine import apply_edit
+        # 读旧内容做 diff 预览
+        old_content = ""
+        try:
+            if os.path.exists(file_path):
+                with open(file_path, "r", encoding="utf-8", errors="replace") as _f:
+                    old_content = _f.read()
+        except Exception:
+            old_content = ""
+        if old_content and old_string in old_content:
+            new_content = old_content.replace(old_string, new_string, 1)
+            console.print(f"  ✅ ✏️ 编辑 {file_path}")
+            try:
+                _render_edit_diff(old_content, new_content)
+            except Exception:
+                pass
+        ok, msg = apply_edit(file_path, old_string, new_string)
+        if ok:
+            return f"✅ 编辑成功: {file_path}"
+        _err_lower = msg.lower()
+        if "not found" in _err_lower or "not unique" in _err_lower:
+            return f"❌ {msg}\n提示：使用 validate_edit 先校验 SEARCH 文本，或用 [EDIT:path:N-M] 行号模式"
+        return f"❌ {msg}"
+    except Exception as e:
+        return f"❌ edit_file failed: {e}"
+
+
+def _exec_set_mood(dimension: str, delta: float) -> str:
+    """调整情感状态。"""
+    try:
+        apply_mood_delta(dimension, delta)
+        return f"✅ mood {dimension} {delta:+.1f}"
+    except Exception as e:
+        return f"❌ set_mood failed: {e}"
+
+
+def _exec_update_people(action: str, name: str, value: str = "") -> str:
+    """更新人物档案。"""
+    try:
+        apply_people_action(action, name, value)
+        return f"✅ people {action} {name}" + (f" {value}" if value else "")
+    except Exception as e:
+        return f"❌ update_people failed: {e}"
+
+
+# ──────────────────── 新增工具执行器 ────────────────────
+
+def _exec_glob_search(pattern: str, path: str = None) -> str:
+    """使用 glob 模式查找文件。"""
+    try:
+        import glob as _glob
+        search_root = path or "."
+        matches = _glob.glob(pattern, root_dir=search_root, recursive=True) if hasattr(_glob, 'root_dir') else []
+        if not matches:
+            try:
+                import subprocess as _sp
+                if "**" in pattern:
+                    result = _sp.run(["find", search_root, "-type", "f", "-name", pattern.split("/")[-1]],
+                                     capture_output=True, text=True, timeout=5)
+                    matches = [l.strip() for l in result.stdout.split("\n") if l.strip()]
+                else:
+                    result = _sp.run(["ls", "-1", os.path.join(search_root, pattern)],
+                                     capture_output=True, text=True, timeout=5, shell=True)
+                    matches = [l.strip() for l in result.stdout.split("\n") if l.strip()]
+            except Exception:
+                pass
+        if not matches:
+            return f"(no matches for '{pattern}' in {search_root})"
+        # 限制返回数量
+        total = len(matches)
+        if total > 200:
+            matches = matches[:200]
+            return f"\n".join(matches) + f"\n... 以及 {total - 200} 个其他文件（共 {total} 个）"
+        return "\n".join(matches)
+    except Exception as e:
+        return f"❌ glob_search failed: {e}"
+
+
+def _exec_grep_search(pattern: str, path: str = None, glob: str = None,
+                      context: int = 0, i: bool = False, head_limit: int = None) -> str:
+    """使用正则表达式搜索文件内容。"""
+    try:
+        import subprocess as _sp
+        cmd = ["grep", "-rn"]
+        if i:
+            cmd.append("-i")
+        if context and context > 0:
+            cmd.append(f"-C{context}")
+        if glob:
+            cmd.extend(["--include", glob])
+        search_root = path or "."
+        cmd.extend([pattern, search_root])
+        result = _sp.run(cmd, capture_output=True, text=True, timeout=15)
+        output = result.stdout.strip() or result.stderr.strip() or "(no matches)"
+        lines = output.split("\n")
+        if head_limit and len(lines) > head_limit:
+            output = "\n".join(lines[:head_limit]) + f"\n…[共 {len(lines)} 行，仅显示前 {head_limit} 行]"
+        if len(output) > 10000:
+            output = output[:5000] + f"\n…[输出过长，截断至 5000 字符，共 {len(output)} 字符]"
+        return output
+    except subprocess.TimeoutExpired:
+        return "❌ grep_search: 搜索超时（15s），请缩小搜索范围"
+    except Exception as e:
+        return f"❌ grep_search failed: {e}"
+
+
+def _exec_tool_search(query: str) -> str:
+    """搜索可用工具。"""
+    try:
+        # 获取当前注册的工具列表
+        from bin.ai_cmd import build_native_tools
+        import inspect
+        tools = build_native_tools()
+        query_lower = query.lower()
+        matches = []
+        for t in tools:
+            func = t.get("function", {})
+            name = func.get("name", "")
+            desc = func.get("description", "")
+            if query_lower in name.lower() or query_lower in desc.lower():
+                perm = t.get("x_permission", "Unknown")
+                matches.append(f"- `{name}` [{perm}]\n  {desc[:120]}")
+        if not matches:
+            # 返回所有工具列表供参考
+            all_tools = []
+            for t in tools:
+                func = t.get("function", {})
+                name = func.get("name", "")
+                perm = t.get("x_permission", "?")
+                all_tools.append(f"- `{name}` [{perm}]")
+            return f"未找到与 '{query}' 相关的工具。可用工具列表:\n" + "\n".join(all_tools)
+        return f"找到 {len(matches)} 个相关工具:\n\n" + "\n\n".join(matches)
+    except Exception as e:
+        return f"❌ ToolSearch failed: {e}"
+
+
+def _find_skill_file(skill_name: str) -> Tuple[Optional[str], str]:
+    """在所有标准位置查找 SKILL.md 文件。
+    
+    查找路径（按优先级）:
+      1. .onyx/skills/<name>/SKILL.md        ← Onyx 原生
+      2. .onyx/commands/<name>.md
+      3. .claw/skills/<name>/SKILL.md         ← Claude Code 兼容
+      4. .claw/commands/<name>.md
+      5. .claude/skills/<name>/SKILL.md
+      6. .claude/commands/<name>.md
+      7. ~/.onyx/skills/<name>/SKILL.md
+      8. ~/.claw/skills/<name>/SKILL.md
+      9. ~/.claude/skills/<name>/SKILL.md
+     10. .reasonix/skills/<name>/SKILL.md
+     11. <name>.md (当前目录)
+     12. skills/<name>.md (当前目录)
+    """
+    import glob as _glob
+    _cwd = os.getcwd()
+    _home = os.path.expanduser("~")
+
+    _search_roots = [
+        # ═══ Onyx 原生（最高优先级）═══
+        os.path.join(_cwd, ".onyx", "skills"),
+        os.path.join(_cwd, ".onyx", "commands"),
+        # ═══ Claude Code 兼容 ═══
+        os.path.join(_cwd, ".claw", "skills"),
+        os.path.join(_cwd, ".claw", "commands"),
+        os.path.join(_cwd, ".claude", "skills"),
+        os.path.join(_cwd, ".claude", "commands"),
+        # ═══ 其他 ═══
+        os.path.join(_cwd, ".reasonix", "skills"),
+        os.path.join(_cwd, "skills"),
+        # ═══ 用户 Home ═══
+        os.path.join(_home, ".onyx", "skills"),
+        os.path.join(_home, ".onyx", "commands"),
+        os.path.join(_home, ".claw", "skills"),
+        os.path.join(_home, ".claw", "commands"),
+        os.path.join(_home, ".claude", "skills"),
+        os.path.join(_home, ".claude", "commands"),
+        os.path.join(_home, ".reasonix", "skills"),
+        os.path.join(_home, ".ai_s", "skills"),
+    ]
+
+    _found = []
+
+    for root in _search_roots:
+        if not os.path.isdir(root):
+            continue
+        # 精确匹配: <root>/<name>/SKILL.md
+        exact = os.path.join(root, skill_name, "SKILL.md")
+        if os.path.isfile(exact):
+            _found.append((exact, os.path.getmtime(exact)))
+
+        # 精确匹配: <root>/<name>/<name>.md
+        exact2 = os.path.join(root, skill_name, f"{skill_name}.md")
+        if os.path.isfile(exact2):
+            _found.append((exact2, os.path.getmtime(exact2)))
+
+        # 精确匹配: <root>/<name>.md（commands 风格）
+        exact3 = os.path.join(root, f"{skill_name}.md")
+        if os.path.isfile(exact3):
+            _found.append((exact3, os.path.getmtime(exact3)))
+
+        # 精确匹配: <root>/SKILL.md（直接将 root 当作技能目录）
+        direct = os.path.join(root, "SKILL.md")
+        if os.path.isfile(direct) and os.path.basename(os.path.dirname(direct)).lower() == skill_name.lower():
+            _found.append((direct, os.path.getmtime(direct)))
+
+    # 按修改时间排序（最新的优先）
+    _found.sort(key=lambda x: x[1], reverse=True)
+
+    if _found:
+        return _found[0][0], ""
+
+    # 尝试在当前目录直接查找 <name>.md
+    for ext in [".md", ".txt"]:
+        _local = os.path.join(os.getcwd(), f"{skill_name}{ext}")
+        if os.path.isfile(_local):
+            return _local, ""
+
+    # 如果找不到精确匹配，扫描所有 skill 目录做大小写不敏感匹配
+    for root in _search_roots:
+        if not os.path.isdir(root):
+            continue
+        try:
+            for entry in os.listdir(root):
+                entry_path = os.path.join(root, entry)
+                if os.path.isdir(entry_path):
+                    # 大小写不敏感比较目录名
+                    if entry.lower() == skill_name.lower():
+                        for _sf in ["SKILL.md", f"{entry}.md"]:
+                            _skill_file = os.path.join(entry_path, _sf)
+                            if os.path.isfile(_skill_file):
+                                return _skill_file, ""
+                    # 检查子目录中的 SKILL.md 的 frontmatter name
+                    _sf = os.path.join(entry_path, "SKILL.md")
+                    if os.path.isfile(_sf):
+                        _fm_name = _parse_skill_name_from_file(_sf)
+                        if _fm_name and _fm_name.lower() == skill_name.lower():
+                            return _sf, ""
+                # 也检查根目录下的 .md 文件
+                elif entry.lower() == f"{skill_name.lower()}.md":
+                    _full = os.path.join(root, entry)
+                    if os.path.isfile(_full):
+                        return _full, ""
+        except PermissionError:
+            continue
+
+    return None, f"未找到技能 '{skill_name}'"
+
+
+def _parse_skill_name_from_file(filepath: str) -> Optional[str]:
+    """从 SKILL.md 的 YAML frontmatter 中提取 name 字段。"""
+    try:
+        with open(filepath, "r", encoding="utf-8") as _f:
+            _content = _f.read()
+        if _content.startswith("---"):
+            _end = _content.find("---", 3)
+            if _end > 0:
+                _fm = _content[3:_end].strip()
+                for _line in _fm.split("\n"):
+                    if _line.strip().startswith("name:"):
+                        _val = _line.split(":", 1)[1].strip().strip('"').strip("'")
+                        if _val:
+                            return _val
+    except Exception:
+        pass
+    return None
+
+
+def _exec_skill(skill: str, args: str = "") -> str:
+    """加载并执行技能（Claw Code 兼容的 Skill.md 发现系统）。"""
+    try:
+        skill_path, error = _find_skill_file(skill)
+        if not skill_path:
+            return f"⚠️ {error}\n\n支持的位置: .onyx/skills/<name>/SKILL.md, .claw/skills/<name>/SKILL.md, .claude/skills/<name>/SKILL.md, ~/.onyx/skills/<name>/SKILL.md"
+
+        with open(skill_path, "r", encoding="utf-8") as _f:
+            content = _f.read()
+
+        # 解析 frontmatter
+        description = ""
+        skill_name = skill
+        if content.startswith("---"):
+            _end = content.find("---", 3)
+            if _end > 0:
+                _fm = content[3:_end].strip()
+                for _line in _fm.split("\n"):
+                    _line = _line.strip()
+                    if _line.startswith("name:"):
+                        skill_name = _line.split(":", 1)[1].strip().strip('"').strip("'")
+                    elif _line.startswith("description:"):
+                        description = _line.split(":", 1)[1].strip().strip('"').strip("'")
+                # 去掉 frontmatter 后的正文
+                body = content[_end + 3:].strip()
+        else:
+            body = content.strip()
+            # 尝试从首行提取 description
+            _first_line = body.split("\n")[0] if body else ""
+            if _first_line.startswith("description:"):
+                description = _first_line.split(":", 1)[1].strip()
+                body = "\n".join(body.split("\n")[1:]).strip()
+
+        # 如果传了 args，追加到 body
+        if args:
+            body += f"\n\n## Arguments\n{args}"
+
+        result_parts = [f"✅ 已加载技能: **{skill_name}**"]
+        if description:
+            result_parts.append(f"📝 {description}")
+        result_parts.append(f"📂 {skill_path}")
+        result_parts.append("")
+        result_parts.append(body)
+
+        return "\n".join(result_parts)
+
+    except Exception as e:
+        return f"❌ Skill '{skill}' 加载失败: {e}"
+
+
+def _exec_sleep(seconds: int) -> str:
+    """等待指定秒数。"""
+    try:
+        import time as _time
+        seconds = max(1, min(seconds, 300))  # 限制 1-300 秒
+        _time.sleep(seconds)
+        return f"✅ 等待 {seconds} 秒完成"
+    except Exception as e:
+        return f"❌ Sleep failed: {e}"
+
+
+def _exec_structured_output(format: str, data: str) -> str:
+    """返回结构化数据。"""
+    try:
+        if format == "json":
+            import json as _json
+            # 尝试解析 data 是否为合法 JSON
+            try:
+                parsed = _json.loads(data)
+                return _json.dumps(parsed, ensure_ascii=False, indent=2)
+            except (_json.JSONDecodeError, ValueError):
+                # data 不是 JSON，包装成 JSON
+                return _json.dumps({"data": data}, ensure_ascii=False, indent=2)
+        return data
+    except Exception as e:
+        return f"❌ StructuredOutput failed: {e}"
+
+
+def _exec_todo_write(todos: list) -> str:
+    """更新任务列表。"""
+    try:
+        if not todos:
+            return "✅ 任务列表已清空"
+        lines = []
+        pending = sum(1 for t in todos if t.get("status") == "pending")
+        in_progress = sum(1 for t in todos if t.get("status") == "in_progress")
+        completed = sum(1 for t in todos if t.get("status") == "completed")
+        lines.append(f"📋 任务列表（共 {len(todos)} 项：⏳ {pending} 待办 · 🔄 {in_progress} 进行中 · ✅ {completed} 完成）")
+        for t in todos:
+            status = t.get("status", "pending")
+            content = t.get("content", "")
+            active = t.get("activeForm", "")
+            icon = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}.get(status, "⏳")
+            status_text = {"pending": "待办", "in_progress": active or "进行中", "completed": "完成"}.get(status, "")
+            lines.append(f"{icon} {content} _{status_text}_")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ TodoWrite failed: {e}"
+
+
+def _exec_enter_plan_mode() -> str:
+    """进入计划模式。通过修改全局标记实现。"""
+    try:
+        global _PLAN_MODE_ACTIVE
+        _PLAN_MODE_ACTIVE = True
+        return "✅ 已进入 Plan 模式。在此模式下禁止执行命令和修改文件。请输出计划并提交用户确认。"
+    except Exception as e:
+        return f"❌ EnterPlanMode failed: {e}"
+
+
+def _exec_exit_plan_mode() -> str:
+    """退出计划模式。"""
+    try:
+        global _PLAN_MODE_ACTIVE
+        _PLAN_MODE_ACTIVE = False
+        return "✅ 已退出 Plan 模式，恢复正常执行模式。"
+    except Exception as e:
+        return f"❌ ExitPlanMode failed: {e}"
+
+
+def _exec_config(action: str, key: str, value: str = None) -> str:
+    """获取或设置配置。"""
+    try:
+        config_path = os.path.join(os.path.expanduser("~"), ".config", "onyx", "config.json")
+        if action == "get":
+            if os.path.exists(config_path):
+                import json as _json
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = _json.load(f)
+                if key in config:
+                    val = config[key]
+                    return f"`{key}` = {_json.dumps(val, ensure_ascii=False)}"
+                return f"`{key}` 未设置"
+            return "配置文件不存在"
+        elif action == "set":
+            if value is None:
+                return "❌ set 操作需要提供 value"
+            import json as _json
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            config = {}
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    try:
+                        config = _json.load(f)
+                    except Exception:
+                        config = {}
+            # 尝试解析 value 为数字或布尔
+            try:
+                parsed = _json.loads(value)
+                config[key] = parsed
+            except Exception:
+                config[key] = value
+            with open(config_path, "w", encoding="utf-8") as f:
+                _json.dump(config, f, ensure_ascii=False, indent=2)
+            return f"✅ `{key}` 已设置为 {config[key]}"
+        return f"❌ 未知操作: {action}"
+    except Exception as e:
+        return f"❌ Config failed: {e}"
+
+
+def _exec_agent(description: str, prompt: str, name: str = "") -> str:
+    """启动子代理。"""
+    try:
+        # 尝试通过 Skill/run_skill 工具执行子代理
+        agent_name = name or description[:30]
+        try:
+            import json as _json
+            # 尝试调用 run_skill（工具系统注册的顶层工具）
+            from .ai_lib import mcp_registry as _mcp_reg
+            result = f"[子代理 {agent_name}]\n任务: {prompt[:200]}...\n\n子代理系统已激活，请使用 Skill 工具或 explore/research 子代理工具执行具体任务。"
+        except ImportError:
+            result = f"[子代理 {agent_name}]\n请使用 explore 或 research 工具来执行此子任务。"
+        return result
+    except Exception as e:
+        return f"❌ Agent 执行失败: {e}"
+
+
+def _exec_web_fetch(url: str, prompt: str) -> str:
+    """获取 URL 内容。"""
+    try:
+        # 尝试使用 requests 获取
+        import requests as _req
+        resp = _req.get(url, timeout=15, headers={"User-Agent": "Onyx-AI/1.0"})
+        text = resp.text[:5000]
+        return f"✅ 已获取 {url} ({len(resp.text)} bytes)\n\n{text[:3000]}"
+    except ImportError:
+        pass
+    except Exception as e:
+        return f"❌ WebFetch '{url}' 失败: {e}"
+
+    # 回退：通过 shell curl
+    try:
+        import subprocess as _sp
+        result = _sp.run(["curl", "-sL", "--max-time", "10", url], capture_output=True, text=True, timeout=15)
+        if result.stdout:
+            text = result.stdout[:5000]
+            return f"✅ 已获取 {url}\n\n{text[:3000]}"
+        return f"⚠️ curl 返回空: {result.stderr[:200]}"
+    except Exception as e:
+        return f"❌ WebFetch '{url}' 全部方法失败: {e}"
+
+
+def _exec_web_search(query: str, allowed_domains: list = None) -> str:
+    """搜索网络。"""
+    try:
+        # 尝试通过 requests + DuckDuckGo 轻搜索
+        import requests as _req
+        import re as _re
+        search_url = f"https://html.duckduckgo.com/html/?q={_req.utils.quote(query)}"
+        resp = _req.get(search_url, timeout=15, headers={"User-Agent": "Onyx-AI/1.0"})
+        # 简单提取结果
+        snippets = _re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', resp.text, _re.DOTALL)
+        if snippets:
+            results = []
+            for s in snippets[:5]:
+                clean = _re.sub(r'<[^>]+>', '', s).strip()
+                results.append(f"- {clean}")
+            return "搜索结果:\n" + "\n".join(results)
+        return f"WebSearch 返回 {len(resp.text)} bytes，请使用更精确的查询"
+    except ImportError:
+        pass
+    except Exception as e:
+        return f"❌ WebSearch '{query}' 失败: {e}"
+
+    return "⚠️ WebSearch 不可用（需要安装 requests 库）"
+
+
+# 计划系统已简化为纯引导模式（不再跟踪步骤状态）
+_PLAN_MODE_ACTIVE = False  # 全局 plan 模式标记
+
+
 # 线程局部存储
 import threading as _threading_mod
 _thread_locals = _threading_mod.local()
@@ -4078,40 +5012,69 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
                      user_mode: str = "low", user_home_dir: str = None,
                      path_validator: Callable = None) -> Tuple[bool, str]:
     """
-    通过 MCP 协议执行工具调用（Reasonix 风格）
+    执行工具调用。
+    优先级：内置 handler → MCP 协议（外部 server）
 
-    - 自动剥离 mcp__server__ 前缀得到真实 MCP 工具名
-    - edit_file: old_string/new_string → MCP edits[].oldText/.newText
-    - 写入类工具仅在 mid 及以上模式可用（low 禁止）
-    - path_validator: 可选回调 (tool_name, path) -> (bool, str)，用于路径安全校验
+    工具名规则：
+      - 裸名（read_file）→ 先查内置 handler，再查 MCP server
+      - mcp_xxx（mcp_puppeteer_navigate）→ 路由到 MCP server，调用 xxx
+      - mcp__server__xxx（旧格式）→ 兼容旧版 MCP 调用
     """
-    # ── 剥离 mcp__ 前缀（递归剥离，防止 AI 输出双重前缀）──
-    # 必须在内置工具检查之前剥离，因为 AI 可能误加 mcp__server__ 前缀
+    # ── 工具名解析 ──
+    # mcp_xxx → MCP 工具，去掉 mcp_ 后路由到 server
+    # 裸名 → 先查内置 handler，再查 MCP server（默认走 filesystem）
     raw_tool = tool_name
-    name = None
-    if tool_name.startswith("mcp__"):
-        _, server, raw_tool = tool_name.split("__", 2)
-        name = server
-        while raw_tool.startswith("mcp__"):
-            _, server, raw_tool = raw_tool.split("__", 2)
-            name = server
-
-    # ── 无前缀的裸工具名 → 在所有 MCP 服务器中查找 ──
-    if name is None:
+    mcp_server = name  # 保留调用者指定的 server 名
+    # mcp_xxx（单下划线）→ 新版 MCP 前缀，去掉 mcp_ 后路由到 server
+    if raw_tool.startswith("mcp_") and not raw_tool.startswith("mcp__"):
+        raw_tool = raw_tool[4:]
+        mcp_server = None
         try:
             _registry = get_registry()
             for _srv in _registry.server_names():
                 if _registry.get(f"mcp__{_srv}__{raw_tool}"):
-                    name = _srv
+                    mcp_server = _srv
                     break
         except Exception:
             pass
+    # mcp__server__xxx（旧格式）→ 取最后一段工具名
+    if raw_tool.startswith("mcp__"):
+        raw_tool = raw_tool.rsplit("__", 1)[-1]
 
     # ── 内置分析工具（不经过 MCP，直接 Python 执行）──
     # 用剥离后的 raw_tool 匹配
     _BUILTIN_HANDLERS = {
+        # ── 文件操作 ──
         "validate_edit": lambda p: _exec_validate_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
         "preview_edit": lambda p: _exec_preview_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
+        "get_file_info": lambda p: _exec_get_file_info(p.get("path", "")),
+        "read_file":    lambda p: _exec_read_file(p.get("path", ""), p.get("range", None)),
+        "write_file":   lambda p: _exec_write_file(p.get("path", ""), p.get("content", "")),
+        "edit_file":    lambda p: _exec_edit_file(p.get("path", ""), p.get("old_string", ""), p.get("new_string", "")),
+        "glob_search":  lambda p: _exec_glob_search(p.get("pattern", ""), p.get("path", None)),
+        "grep_search":  lambda p: _exec_grep_search(p.get("pattern", ""), p.get("path", None), p.get("glob", None),
+                                                     p.get("context", 0), p.get("-i", False), p.get("head_limit", None)),
+        # ── 搜索与发现 ──
+        "ToolSearch":   lambda p: _exec_tool_search(p.get("query", "")),
+        "Skill":        lambda p: _exec_skill(p.get("skill", ""), p.get("args", "")),
+        # ── 计划与任务 ──
+        "submit_plan":   lambda p: json.dumps({"plan": p.get("plan", ""), "steps": p.get("steps", [])}, ensure_ascii=False),
+        "mark_step_complete": lambda p: p.get("step_id", ""),
+        "TodoWrite":    lambda p: _exec_todo_write(p.get("todos", [])),
+        "EnterPlanMode": lambda p: _exec_enter_plan_mode(),
+        "ExitPlanMode":  lambda p: _exec_exit_plan_mode(),
+        # ── 配置 ──
+        "Config":       lambda p: _exec_config(p.get("action", "get"), p.get("key", ""), p.get("value", None)),
+        # ── 子代理与输出 ──
+        "Agent":        lambda p: _exec_agent(p.get("description", ""), p.get("prompt", ""), p.get("name", "")),
+        "StructuredOutput": lambda p: _exec_structured_output(p.get("format", "json"), p.get("data", "")),
+        "Sleep":        lambda p: _exec_sleep(int(p.get("seconds", 1))),
+        # ── Web ──
+        "WebFetch":     lambda p: _exec_web_fetch(p.get("url", ""), p.get("prompt", "")),
+        "WebSearch":    lambda p: _exec_web_search(p.get("query", ""), p.get("allowed_domains", None)),
+        # ── 情感（内部） ──
+        "set_mood":     lambda p: _exec_set_mood(p.get("dimension", ""), float(p.get("delta", 0))),
+        "update_people": lambda p: _exec_update_people(p.get("action", ""), p.get("name", ""), p.get("value", "")),
     }
     if raw_tool in _BUILTIN_HANDLERS:
         try:
@@ -4142,6 +5105,47 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
                 if _pm and not _raw_content.endswith("\n"):
                     params["content"] += "\n"
                 _mcp_debug(f"write_file 容错: path={params.get('path', '?')}, content_len={len(params.get('content', ''))}")
+
+    # ── 权限门控：根据 x_permission 级别决定是否需要用户确认 ──
+    # 从 build_native_tools() 查找当前工具的权限级别
+    _tool_permission = PERM_READONLY  # 默认只读安全
+    try:
+        _all_tools = build_native_tools()
+        for _t in _all_tools:
+            if _t.get("function", {}).get("name", "") == raw_tool:
+                _tool_permission = _t.get("x_permission", PERM_READONLY)
+                break
+    except Exception:
+        pass
+
+    if _tool_permission == PERM_DANGER_FULL:
+        # DangerFullAccess：显式用户批准
+        _lang = get_current_lang()
+        _prompt = (_lang == "chinese" and "🔴 工具 '{tool}' 需要危险权限，确认执行？(y/N): " or
+                   "🔴 Tool '{tool}' requires dangerous access, confirm? (y/N): ").format(tool=raw_tool)
+        try:
+            _confirm = input(f"  {_prompt}").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            console.print()
+            return False, "⛔ 用户取消了危险操作"
+        if _confirm not in ("y", "yes"):
+            return False, "⛔ 用户拒绝了危险操作"
+        console.print(f"  [dim]✓ 已授权[/]")
+
+    elif _tool_permission == PERM_WORKSPACE_WRITE and user_mode == "low":
+        # WorkspaceWrite + low 模式：轻确认
+        _lang = get_current_lang()
+        _prompt = (_lang == "chinese" and "✏️ 工具 '{tool}' 将修改工作区，确认？(Y/n): " or
+                   "✏️ Tool '{tool}' will modify workspace, confirm? (Y/n): ").format(tool=raw_tool)
+        try:
+            _confirm = input(f"  {_prompt}").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            console.print()
+            return False, "⛔ 用户取消了操作"
+        if _confirm == "n":
+            return False, "⛔ 用户拒绝了修改操作"
+        console.print(f"  [dim]✓ 已授权[/]")
+    # ReadOnly & WorkspaceWrite+mid/adv → 自动放行
 
     # ---- 安全限制：写入类工具仅 mid 及以上模式可用（low 禁止） ----
     write_tools = {"edit_file", "write_file", "create_file", "delete_file",
@@ -4461,6 +5465,17 @@ def handle_mcp_command(subcommand: str, args: List[str]) -> None:
         )
 
 
+# ── Shell 命令快速执行器（用于项目上下文采集）──
+def _run_shell_cmd(cmd: str, timeout: int = 10) -> str:
+    """执行 shell 命令并返回 stdout 文本。静默失败返回空字符串。"""
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True,
+                                text=True, timeout=timeout)
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
 # ========================================================================
 
 # -------------------------- 11. handle_ai 核心函数（SSE模式）-------------------------
@@ -4546,63 +5561,26 @@ def handle_ai(
     except Exception:
         pass
 
-    # ── 初始化 MCP 工具系统（Reasonix 风格：Registry + Schema 缓存 + Lazy 启动）──
-    _mcp_debug("── MCP 工具系统初始化开始 ──")
+    # ── 初始化内置工具系统 ──
+    # 默认零 MCP，只加载本地内置工具
+    # 只有用户主动安装了外部 MCP server（如 puppeteer/github）才会带 mcp_ 前缀
+    _mcp_debug("── 初始化内置工具 ──")
+    ai_tools_prompt = build_native_tools_prompt(current_lang)
+    native_tools = build_native_tools(user_home_dir)
+
+    # 如果用户显式启用了 MCP（安装了非 filesystem 的外部 server），再加载
     if _mcp_enabled:
-        # 入口处确保配置文件和 installed 标记存在（几毫秒 IO，避免后续静默失败）
         _migrate_mcp_config_if_needed(user_home_dir)
-        install_default_mcp_server(user_home_dir)
-
         registry = get_registry()
-        _mcp_debug(f"MCP enabled, registry tools count={registry.tool_count()}, has_filesystem={registry.has_server('filesystem')}, cache_keys={list(MCP_TOOLS_CACHE.keys())}")
-
-        # 1. 优先：Registry 中已有工具（预加载或前次缓存命中）
-        if registry.tool_count() > 0 and registry.has_server("filesystem"):
-            _mcp_debug("路径1: Registry 命中 → 直接使用")
-            ai_tools_prompt = build_native_tools_prompt(current_lang)
-            native_tools = build_native_tools(user_home_dir)
-
-        # 2. 次优：Schema 缓存命中 → 直接注册占位符，跳过握手（冷启动加速）
-        elif not MCP_TOOLS_CACHE.get("filesystem"):
-            _mcp_debug("路径2: Registry 未命中，检查 Schema 缓存...")
-            home = user_home_dir or USER_HOME_DIR
-            config = _load_mcp_config(home)
-            server_info = config.get("servers", {}).get("filesystem", {})
-            if server_info:
-                fp = MCPSchemaCache.fingerprint(server_info)
-                cached_tools = _get_schema_cache().get("filesystem", fp)
-                if cached_tools:
-                    _mcp_debug(f"路径2a: Schema 缓存命中 ({len(cached_tools)} tools)")
-                    registry.replace_server("filesystem", cached_tools)
-                    # 后台异步握手（下次使用时替换为真实 schema）
-                    _schedule_mcp_health_check(user_home_dir)
-                    ai_tools_prompt = build_native_tools_prompt(current_lang)
-                else:
-                    # 3. 兜底：同步连接 + 握手
-                    _mcp_debug("路径3: 缓存未命中，同步连接 MCP server...")
-                    if install_default_mcp_server(user_home_dir):
-                        _mcp_debug("install_default_mcp_server OK, calling connect_mcp_server...")
-                        connect_mcp_server("filesystem", user_home_dir)
-                        _mcp_debug("connect_mcp_server returned")
-                    ai_tools_prompt = build_native_tools_prompt(current_lang)
-            else:
-                _mcp_debug("路径2b: server_info 为空")
-                ai_tools_prompt = build_native_tools_prompt(current_lang)
-
-        # 4. 旧缓存命中
-        else:
-            _mcp_debug("路径4: 旧 MCP_TOOLS_CACHE 命中")
-            ai_tools_prompt = build_native_tools_prompt(current_lang)
-
-        # Build native tools array for function-calling API (from whatever path populated the registry)
-        native_tools = build_native_tools(user_home_dir)
-
-        # 后台健康检查（非阻塞）
+        # 只加载非 filesystem 的 MCP server（puppeteer/github/postgres 等）
+        for _srv_name in registry.server_names():
+            if _srv_name == "filesystem":
+                continue
+            _mcp_debug(f"检测到外部 MCP server: {_srv_name}")
+        # 后台异步连接已有 MCP server
         _schedule_mcp_health_check(user_home_dir)
-    else:
-        _mcp_debug("MCP disabled, skipping")
-        ai_tools_prompt = ""
-        native_tools = []
+        # 注意：不要清空 ai_tools_prompt 和 native_tools
+        # build_native_tools() 内部已通过 get_mcp_tools() 自动追加 MCP 工具
     _mcp_debug(f"── MCP 初始化完成, tools_prompt 长度={len(ai_tools_prompt)} ──")
     
     # ANSI 转义序列正则（颜色码、光标控制等）
@@ -4694,23 +5672,18 @@ def handle_ai(
         return True
 
     parse_result = parse_arguments(cmd_parts, lang_text, onyx_module)
-    if len(parse_result) == 10:
-        content_type, content, extra_info, auto_exec, new_key, chat_action, chat_param, mode, times, use_tui = parse_result
-    elif len(parse_result) == 9:
+    if len(parse_result) == 9:
         content_type, content, extra_info, auto_exec, new_key, chat_action, chat_param, mode, times = parse_result
-        use_tui = False
     elif len(parse_result) == 7:
         content_type, content, extra_info, auto_exec, new_key, chat_action, chat_param = parse_result
         mode = "normal"
         times = 1
-        use_tui = False
     else:
         content_type, content, extra_info, auto_exec, new_key = parse_result
         chat_action, chat_param = None, None
         mode = "normal"
         times = 1
-        use_tui = False
-    
+        
     if content_type == "mcp_command":
         # ai -mcp <install|list|remove> [args]
         handle_mcp_command(content, extra_info if isinstance(extra_info, list) else [])
@@ -4924,47 +5897,7 @@ def handle_ai(
             log_error(f"AI parameter error: {content}", request_id)
         return
 
-    # ── TUI 模式 ──
-    if use_tui:
-        # 进入 TUI 前先检查密钥
-        key = load_ai_key()
-        if not key:
-            return
-        if not verify_ai_key(key):
-            console.print(lang_text["license_verification_fail"].format("key invalid"), style="bold red")
-            return
-
-        from .ai_lib.tui import run_tui
-
-        # TUI 保持单一会话：整个 TUI 生命周期共享同一个 session_id，不创建新 chat
-        tui_session_id = str(uuid.uuid4())
-
-        def tui_question_callback(question_text: str, ctx: dict) -> str:
-            tui_mode = ctx.get("mode", "normal")
-            tools_prompt = build_native_tools_prompt(current_lang)
-            result = call_ai_api_sse(
-                question=question_text,
-                new_key=None,
-                debug_mode=debug_mode,
-                onyx_module=onyx_module,
-                mode=tui_mode,
-                times=1,
-                ai_tools_prompt=tools_prompt,
-                user_home_dir=user_home_dir,
-            )
-            if isinstance(result, dict):
-                if result.get("error"):
-                    return f"❌ {result['error']}"
-                return result.get("txt", "") or result.get("analysis", "") or "(AI 无响应)"
-            return str(result)
-
-        run_tui(
-            question_callback=tui_question_callback,
-            lang=current_lang,
-            initial_question=content if content else "",
-            initial_mode=mode,
-        )
-        return
+    # ── TUI 模式已移除（-tui 参数不再支持）──
 
     # Ctrl+C 打断思考：直接抛出 KeyboardInterrupt 向上传播
     import signal as _signal
@@ -4974,11 +5907,16 @@ def handle_ai(
 
     _original_sigint = _signal.signal(_signal.SIGINT, _on_interrupt)
 
+    # 重置中断标志（避免上次 Ctrl+C 残留导致本次立即中断）
+    global _AI_INTERRUPTED
+    _AI_INTERRUPTED = False
+
     current_session_id = request_id
     initial_question = content
     last_user_question = content  # 追踪最近一次用户输入，ESC 追问时更新
     continue_asking = True
     interaction_count = 0
+    _pending_plan = ""  # 来自 submit_plan 工具调用的计划文本（跨循环持久化）
     plan_confirmed = False  # Plan 模式：计划是否已获用户确认
     referenced_memory_uuid = None
     current_chat_name = get_current_chat_name(user_home_dir)
@@ -5004,6 +5942,10 @@ def handle_ai(
     current_times = 1
     executed_tools = []          # 已执行工具键（跨轮持久）
     _tool_results_cache = {}     # exec_key → output（供去重时回传缓存结果）
+    # ── 风暴检测 / 重复成功防护 ──
+    _MAX_TOOL_OUTPUT = 32 * 1024   # 单次工具结果最大字节数（~8K tokens），超长截断防上下文撑爆
+    _storm_counter = {}          # error_signature → count: 连续相同错误次数，>=3 时触发换策略
+    _repeat_success = {}         # exec_key → count: 同一操作连续成功次数，>=2 时拦截
 
     # ── 标准对话历史（messages 结构）──
     conversation_history: List[Dict] = []
@@ -5028,6 +5970,70 @@ def handle_ai(
     if _onyx_ai_prompt:
         _env_info += f"\n#最高指示（持久记忆）\n{_onyx_ai_prompt}\n"
 
+    # ── 项目上下文自动注入（git 状态 + 指令文件）──
+    _project_context = ""
+    try:
+        _git_root = os.getcwd()
+        # git status（简短）
+        _git_status = _run_shell_cmd("git status --short 2>/dev/null | head -30")
+        if _git_status:
+            _project_context += f"#Git 状态\n{_git_status}\n"
+            # git 当前分支
+            _git_branch = _run_shell_cmd("git rev-parse --abbrev-ref HEAD 2>/dev/null")
+            if _git_branch:
+                _project_context = f"分支: {_git_branch}\n" + _project_context
+            # git diff（前 30KB）
+            _git_diff = _run_shell_cmd("git diff --no-color 2>/dev/null | head -500")
+            if _git_diff and len(_git_diff) > 100:
+                _diff_str = _git_diff[:30000]
+                if len(_git_diff) > 30000:
+                    _diff_str += f"\n…[diff 过长，截断至 30000 字符，共 {len(_git_diff)} 字符]"
+                _project_context += f"#Git 变更\n{_diff_str}\n"
+            # 最近 5 条 commit
+            _git_log = _run_shell_cmd("git log --oneline -5 2>/dev/null")
+            if _git_log:
+                _project_context += f"#最近提交\n{_git_log}\n"
+        # 指令文件自动发现（CLAUDE.md / CLAW.md / AGENTS.md / .claw/rules/*）
+        _instruction_files = []
+        for _root in [_git_root] if _git_status else [os.getcwd()]:
+            for _fname in ["CLAUDE.md", "CLAW.md", "AGENTS.md", "CLAUDE.local.md"]:
+                _fpath = os.path.join(_root, _fname)
+                if os.path.exists(_fpath):
+                    _instruction_files.append(_fpath)
+            # .claw/ 目录
+            _claw_dir = os.path.join(_root, ".claw")
+            if os.path.isdir(_claw_dir):
+                for _fname in ["CLAUDE.md", "instructions.md"]:
+                    _fpath = os.path.join(_claw_dir, _fname)
+                    if os.path.exists(_fpath):
+                        _instruction_files.append(_fpath)
+                _rules_dir = os.path.join(_claw_dir, "rules")
+                if os.path.isdir(_rules_dir):
+                    for _rf in sorted(os.listdir(_rules_dir)):
+                        if _rf.endswith((".md", ".txt", ".mdc")):
+                            _instruction_files.append(os.path.join(_rules_dir, _rf))
+        # 读取指令文件内容（限制每个 4KB，总 12KB）
+        _total_inst_chars = 0
+        _inst_lines = []
+        for _fpath in _instruction_files:
+            if _total_inst_chars > 12000:
+                break
+            try:
+                with open(_fpath, "r", encoding="utf-8") as _f:
+                    _content = _f.read()[:4000]
+                _rel = os.path.relpath(_fpath, _git_root) if _git_root else _fpath
+                _inst_lines.append(f"### {_rel}\n{_content}")
+                _total_inst_chars += len(_content)
+            except Exception:
+                pass
+        if _inst_lines:
+            _project_context += "#项目指令\n" + "\n\n".join(_inst_lines) + "\n"
+    except Exception:
+        pass
+
+    if _project_context:
+        _env_info = _project_context + "\n" + _env_info
+
     # ── 加载核心系统提示词 agreement.md ──
     try:
         _agreement_paths = [
@@ -5050,6 +6056,7 @@ def handle_ai(
 
     while continue_asking:
         _tool_calls_processed_this_round = False
+        _commands_processed_this_round = False
         if _AI_INTERRUPTED:
             console.print(_mcp_t("\n⏹ 已中断", "\n⏹ Interrupted"), style="yellow")
             break
@@ -5077,21 +6084,58 @@ def handle_ai(
             )
         
         no_memory_text = lang_text.get("no_memory", "No historical memory" if current_lang == "english" else "无历史记忆")
-        # 记忆上下文注入：首次循环时合并到 initial_question（避免两条连续 user 消息）
-        if interaction_count == 1 and memory_section != no_memory_text:
-            _first_user_idx = next((i for i, m in enumerate(conversation_history) if m.get("role") == "user"), None)
-            if _first_user_idx is not None:
-                conversation_history[_first_user_idx]["content"] = (
-                    f"#聊天记忆\n{memory_section}\n\n---\n\n"
-                    f"{conversation_history[_first_user_idx]['content']}"
-                )
+        # 记忆上下文注入：每次循环都从磁盘加载 library 记忆
+        # 系统提示词（agreement/tools/mood）保持在最前面，记忆紧随其后
+        if memory_section != no_memory_text:
+            _memory_content = f"#聊天记忆\n{memory_section}"
+            # 查找是否已有记忆 system 消息，有则更新
+            _mem_idx = next((i for i, m in enumerate(conversation_history)
+                            if m.get("role") == "system" and m.get("content", "").startswith("#聊天记忆")), None)
+            if _mem_idx is not None:
+                conversation_history[_mem_idx]["content"] = _memory_content
+            else:
+                # 插入到第一个 system 消息（核心提示词）之后，保持其最前位置
+                _first_sys = next((i for i, m in enumerate(conversation_history)
+                                  if m.get("role") == "system" and not m.get("content", "").startswith("#聊天记忆")), None)
+                if _first_sys is not None:
+                    conversation_history.insert(_first_sys + 1, {"role": "system", "content": _memory_content})
+                else:
+                    conversation_history.insert(0, {"role": "system", "content": _memory_content})
+            
+            # 后续循环：只移除已在 library 里的用户提问，不删 system 消息
+            if interaction_count > 1:
+                _first_asst = next((i for i, m in enumerate(conversation_history)
+                                   if m.get("role") == "assistant"), None)
+                if _first_asst is not None:
+                    # 保留：所有 system 消息 + 第一个 assistant 及其之后的所有消息
+                    conversation_history = [m for i, m in enumerate(conversation_history)
+                                           if m.get("role") == "system" or i >= _first_asst]
+                    # 清理后如果无 user 消息，插入系统信号（告诉 AI 命令已执行、结果在 library 里）
+                    _has_user = any(m.get("role") == "user" for m in conversation_history)
+                    if not _has_user:
+                        if current_lang == "chinese":
+                            _continue_prompt = (
+                                "上一轮的命令已完成执行，执行结果已记录在上方 #聊天记忆 的 "
+                                "当前会话记忆(library) 部分。请根据执行结果判断任务是否完成："
+                                "若已完成则用 [ANSWER]yes 正常结束，若需继续则继续生成下一步命令。"
+                            )
+                        else:
+                            _continue_prompt = (
+                                "The previous round of commands has finished executing. "
+                                "Results are recorded in the #聊天记忆 Current Session Memory (library) section above. "
+                                "Please check the results and determine if the task is complete: "
+                                "if done, set [ANSWER]yes; if more work is needed, continue with next commands."
+                            )
+                        conversation_history.append({"role": "user", "content": _continue_prompt})
 
         # Plan 模式前缀：告知 AI 当前处于 plan 模式，禁止执行命令和文件修改
-        if mode == "plan":
+        # mode=="plan"（用户 ai plan 命令）或 _PLAN_MODE_ACTIVE（AI 调用 EnterPlanMode）
+        if mode == "plan" or _PLAN_MODE_ACTIVE:
             plan_warning = lang_text.get("plan_mode_warning",
                 "⚠️ 当前处于 PLAN 模式。你只能生成计划，不能执行任何命令或修改文件。"
                 "请使用 [plan]...[plan:done] 格式输出你的计划。"
-                "等用户确认后，才能进入执行阶段。")
+                "等用户确认后，才能进入执行阶段。"
+                "如果要退出 plan 模式，请调用 ExitPlanMode 工具。")
             conversation_history.append({"role": "system", "content": plan_warning})
         
         # 流式展示：Rich Live Panel — 实时更新 AI 回答
@@ -5509,7 +6553,8 @@ def handle_ai(
                     m = _re.match(r'^([^\[]+)', buf_match)
                     if m:
                         raw = m.group(1)
-                        clean = raw.lstrip('\r\n\0\t ')
+                        # 只移除控制字符（回车/换行/空字节），保留空格和制表符以保持缩进
+                        clean = raw.lstrip('\r\n\0')
                         if clean:
                             # 只保留安全部分：如果文本末尾可能是不完整的标记开始符，保守截断
                             to_take = clean
@@ -5517,7 +6562,7 @@ def handle_ai(
                             txt_content += to_take
                             continue
                         elif raw and raw != clean:
-                            # 只有控制字符/空白 → 丢弃它们
+                            # 只有控制字符 → 丢弃它们
                             stream_buffer = buf[match_offset + len(raw):]
                             continue
 
@@ -5563,6 +6608,24 @@ def handle_ai(
                 
                 # 使用SSE模式调用（带实时流式回调）
                 _mcp_debug(f"调用 call_ai_api_sse(messages={len(conversation_history)}条)")
+                # ── debug 模式：把 AI 真实看到的 conversation 写入 deb/{session_id}/round_N.txt ──
+                if debug_mode:
+                    _deb_session_dir = os.path.join(user_home_dir, ".ai_s", "deb", current_session_id)
+                    os.makedirs(_deb_session_dir, exist_ok=True)
+                    _conv_path = os.path.join(_deb_session_dir, f"round_{interaction_count}.txt")
+                    try:
+                        _lines = []
+                        for _idx, _msg in enumerate(conversation_history):
+                            _role = _msg.get("role", "?")
+                            _content = _msg.get("content", "") or ""
+                            _lines.append(f"╔══ [{_idx}] {_role.upper()} ══╗")
+                            _lines.append(_content.rstrip())
+                            _lines.append("")
+                        with open(_conv_path, "w", encoding="utf-8") as _cf:
+                            _cf.write("\n".join(_lines))
+                        _mcp_debug(f"conversation saved: {_conv_path} ({len(conversation_history)} msgs)")
+                    except Exception as _ce:
+                        _mcp_debug(f"conversation save failed: {_ce}")
                 try:
                     _reasoning_buffer = []
                     _content_started = False
@@ -5657,7 +6720,8 @@ def handle_ai(
         ai_ask = ai_result.get("ask", "") or ""
         tag = ai_result.get("tag", "") or ""
         memory_uuid = ai_result.get("memory", "") or ""
-        plan_text = ai_result.get("plan", "") or ""
+        # 优先用 [PLAN] 文本标记，其次用 submit_plan 工具结果
+        plan_text = ai_result.get("plan", "") or _pending_plan or ""
         tool_calls = ai_result.get("tool_calls", [])
         markup_blocks = ai_result.get("markup_blocks", [])
         sleep_value = ai_result.get("sleep")
@@ -5787,6 +6851,13 @@ def handle_ai(
             console.print(render_ai_panel(cleaned_txt.strip()))
         
         ai_commands = extract_ai_commands(ai_result)
+        # 硬限制：最多执行 10 条命令，超出的丢弃并通知 AI
+        if len(ai_commands) > 10:
+            _discarded = ai_commands[10:]
+            ai_commands = ai_commands[:10]
+            _warn = lang_text.get("cmd_limit", "⚠️ 命令超过 10 条限制，已截断前 10 条执行") if False else "⚠️ 命令超过 10 条限制，已截断前 10 条执行"
+            console.print(f"  [bold yellow]{_warn}[/]")
+            conversation_history.append({"role": "system", "content": f"[SYSTEM] {_warn}。多余的 {len(_discarded)} 条命令被丢弃，请下一轮继续。"})
         analysis_content = (ai_result.get("analysis", "") or "").strip()
         
         if ai_commands and not analysis_content:
@@ -5814,15 +6885,23 @@ def handle_ai(
                 parts.append(f"💰 cache {saved_pct:.0f}% hit")
             console.print(f"  [dim]{' · '.join(parts)}[/]")
         
-        # ---- Plan 确认流程 ----
+        # ---- Plan 确认流程（纯引导模式）----
         if plan_text and plan_text.strip():
-            # 确保 library 文件已创建（plan 流程可能提前 continue，跳过常规记录路径）
+            _plan_display = plan_text
+            try:
+                _plan_json = json.loads(plan_text)
+                if isinstance(_plan_json, dict):
+                    _plan_display = _plan_json.get("plan", plan_text)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
             _ensure_library_record()
-            plan_choice = confirm_plan(plan_text, lang_text)
+            plan_choice = confirm_plan(_plan_display, lang_text)
 
             if plan_choice == "discard":
                 console.print(lang_text.get("plan_discarded", "🗑️ 计划已摒弃，将通知 AI 重新规划"), style="bold yellow")
                 conversation_history.append({"role": "user", "content": "[用户摒弃了你的计划，请重新制定]"})
+                _pending_plan = ""
                 continue_asking = True
                 continue
 
@@ -5837,19 +6916,22 @@ def handle_ai(
                     conversation_history.append({"role": "user", "content": f"[用户对计划的指导意见]:\n{guide_text}\n\n请根据指导意见修改计划。"})
                 else:
                     conversation_history.append({"role": "user", "content": "[用户未提供具体意见，请简化或重新生成计划]"})
+                _pending_plan = ""
                 continue_asking = True
                 continue
 
             elif plan_choice == "confirm":
                 console.print(lang_text.get("plan_confirmed", "✅ 计划已确认，即将进入执行阶段"), style="bold green")
                 # 将确认后的计划内容追加到 AI 的上下文
-                conversation_history.append({"role": "user", "content": f"[用户已确认以下计划，请开始执行]:\n{plan_text}"})
-                plan_confirmed = True  # 解锁 MCP 工具和 shell 命令执行
+                conversation_history.append({"role": "user", "content": f"[用户已确认以下计划，请开始执行]:\n{_plan_display}"})
+                _pending_plan = ""
+                plan_confirmed = True
                 continue_asking = True
                 continue
 
         # Plan 模式安全限制：未确认计划前，拦截所有命令执行和工具调用
-        if mode == "plan" and not plan_confirmed:
+        # 既支持 mode=="plan"（用户输入 ai plan），也支持 _PLAN_MODE_ACTIVE（AI 调用 EnterPlanMode）
+        if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed:
             if ai_commands or tool_calls:
                 console.print(lang_text.get("plan_blocked",
                     "⛔ Plan 模式：AI 命令/工具调用已被拦截。请先确认计划。"), style="bold red")
@@ -5864,34 +6946,124 @@ def handle_ai(
         if markup_blocks:
             try:
                 _native_results = _process_native_blocks(markup_blocks, cwd=user_home_dir, user_mode=_current_user_mode)
-                _native_call_log = []  # 调用记录，完整写入 conversation
+                _native_call_log = []
                 for _nr in _native_results:
-                    status_icon = "✅" if _nr.success else "❌"
-                    console.print(f"   {status_icon} [{_nr.type}] {_nr.path}: {_nr.message}", style="dim")
-                    # 构建调用记录块
                     _op_type = _nr.type.upper()
                     _op_path = _nr.path
-                    if _nr.type == "view" and _nr.success:
-                        # VIEW: 带行号内容写入调用记录和磁盘记忆，方便 AI 定位行号
-                        view_content = _nr.content  # 带行号（如 "  8  │ import os"）
-                        _record = f"[{_op_type}] {_op_path}\n```\n{view_content}\n```"
-                        # tool_results 也用带行号版本，AI 立即能看到
-                        tool_results.append(f"```\n{view_content}\n```")
-                    elif _nr.success and _nr.content:
-                        _record = f"[{_op_type}] {_op_path}: {_nr.content}"
-                        tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.content}")
+                    icon = "✅" if _nr.success else "❌"
+                    _nr_type = _nr.type
+
+                    # ── 风暴检测：重复 VIEW/EDIT 同一文件 ──
+                    _nb_key = f"{_nr_type}:{_op_path}"
+                    if _nr.success:
+                        _repeat_success[_nb_key] = _repeat_success.get(_nb_key, 0) + 1
+                        _storm_counter.pop(_nb_key, None)
+                        if _repeat_success[_nb_key] >= 3 and _nr_type == "view":
+                            _storm_warn = _mcp_t(
+                                f"⚠️ 重复警告：已查看 {_op_path} 第 {_repeat_success[_nb_key]} 次，AI 应停止重复查看",
+                                f"⚠️ Repeat alert: viewed {_op_path} {_repeat_success[_nb_key]}x, AI should stop"
+                            )
+                            console.print(f"  [bold yellow]{_storm_warn}[/]")
+                            # 不阻断 VIEW（只读无害），只提示
+                    elif not _nr.success:
+                        _storm_counter[_nb_key] = _storm_counter.get(_nb_key, 0) + 1
+                        _repeat_success.pop(_nb_key, None)
+                        if _storm_counter[_nb_key] >= 3:
+                            _storm_warn = _mcp_t(
+                                f"⚠️ 风暴检测：对 {_op_path} 连续失败 {_storm_counter[_nb_key]} 次，AI 应更换策略",
+                                f"⚠️ Storm detected: {_op_path} failed {_storm_counter[_nb_key]}x, switch strategy"
+                            )
+                            console.print(f"  [bold red]{_storm_warn}[/]")
+                            conversation_history.append({"role": "system", "content": f"[STORM_WARNING] {_storm_warn}"})
+
+                    if _nr_type == "view" and _nr.success:
+                        view_content = _nr.content or ""
+                        lines = view_content.split("\n")
+                        console.print(f"  {icon} 📖 {_op_path}  ({len(lines)} 行)")
+                        # 显示前 10 行内容（精简）
+                        for line in lines[:10]:
+                            console.print(f"    {line}", style="dim")
+                        if len(lines) > 10:
+                            console.print(f"    ... 共 {len(lines)} 行", style="dim")
+                        # 截断超大 VIEW 结果，防止上下文撑爆
+                        if len(view_content) > _MAX_TOOL_OUTPUT:
+                            _trunc_info = f"\n\n…[截断 {len(view_content) - _MAX_TOOL_OUTPUT} 字节，共 {len(view_content)} 字节 — 缩小查看范围避免撑爆上下文]…\n\n"
+                            view_content = view_content[:_MAX_TOOL_OUTPUT // 2] + _trunc_info + view_content[-_MAX_TOOL_OUTPUT // 2:]
+                        tool_results.append(view_content)
+                        _record = f"[{_op_type}] {_op_path}\n{view_content}"
+
+                    elif _nr_type == "edit" and _nr.success:
+                        old_c = _nr.old_content or ""
+                        new_c = _nr.content or ""
+                        old_lines = old_c.split("\n")
+                        new_lines = new_c.split("\n")
+                        # 重复编辑防护：连续 3 次以上相同编辑 → 提示 AI 停止
+                        _edit_key = f"edit_success:{_op_path}:{hash(new_c) % 10000}"
+                        _edit_rep = _repeat_success.get(_edit_key, 0)
+                        if _edit_rep >= 3:
+                            _storm_warn = _mcp_t(
+                                f"⚠️ 重复编辑 {_op_path} 已达 {_edit_rep + 1} 次，内容未变化，AI 应停止",
+                                f"⚠️ Repeated edit on {_op_path} {_edit_rep + 1}x, content unchanged, AI should stop"
+                            )
+                            console.print(f"  [bold yellow]{_storm_warn}[/]")
+                        _repeat_success[_edit_key] = _edit_rep + 1
+                        # ── 彩色 diff 展示 ──
+                        console.print(f"  {icon} ✏️ 编辑 {_op_path}  [{len(old_lines)}→{len(new_lines)} 行]")
+                        try:
+                            _render_edit_diff(old_c, new_c)
+                        except Exception:
+                            # fallback: 简单显示
+                            console.print(f"    旧: {len(old_lines)} 行 → 新: {len(new_lines)} 行")
+                        tool_results.append(f"[EDIT] {_op_path}: {new_c}")
+                        _record = f"[{_op_type}] {_op_path}\n旧({len(old_lines)}行):\n{old_c}\n新({len(new_lines)}行):\n{new_c}"
+
+                    elif _nr_type in ("write", "append", "insert") and _nr.success:
+                        content = _nr.content or ""
+                        total_lines = len(content.split("\n"))
+                        action_label = {"write": "📝 写入", "append": "➕ 追加", "insert": "📌 插入"}.get(_nr_type, "✏️")
+                        preview = content[:100].replace("\n", "↵ ").strip()
+                        preview += "..." if len(content) > 100 else ""
+                        # 截断超大写入内容，防止上下文撑爆
+                        if len(content) > _MAX_TOOL_OUTPUT:
+                            content = content[:_MAX_TOOL_OUTPUT // 2] + f"\n\n…[截断 {len(content) - _MAX_TOOL_OUTPUT} 字节，共 {len(content)} 字节]…\n\n" + content[-_MAX_TOOL_OUTPUT // 2:]
+                        console.print(f"  {icon} {action_label} {_op_path}  ({total_lines} 行)")
+                        console.print(f"    {preview}", style="dim")
+                        tool_results.append(f"[{_op_type}] {_op_path}: {content}")
+                        _record = f"[{_op_type}] {_op_path} ({total_lines}行)\n{content}"
+
+                    elif _nr_type == "delete" and _nr.success:
+                        del_content = _nr.content or ""
+                        del_lines = del_content.split("\n")
+                        console.print(f"  {icon} 🗑️ 删除 {_op_path}  ({len(del_lines)} 行)")
+                        # 显示被删行（整行红色底色）
+                        for _dl_idx, _dl_line in enumerate(del_lines, 1):
+                            console.print((f"  {_dl_idx:>4} │ {_dl_line}").ljust(80), style="white on red")
+                        if len(del_lines) > 20:
+                            console.print(f"  [dim white]... 共 {len(del_lines)} 行[/]")
+                        tool_results.append(f"[DELETE] {_op_path}: 删除 {len(del_lines)} 行")
+                        _record = f"[{_op_type}] {_op_path}\n{del_content}"
+
                     elif _nr.success:
+                        console.print(f"  {icon} [{_op_type}] {_op_path}: {_nr.message}")
+                        tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.content or _nr.message}")
                         _record = f"[{_op_type}] {_op_path}: {_nr.message}"
-                        tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.message}")
                     else:
-                        _record = f"❌ [{_op_type}] {_op_path}: {_nr.message}"
+                        # 失败操作
+                        console.print(f"   {icon} [{_op_type}] {_op_path}: {_nr.message}", style="bold red")
                         tool_results.append(f"❌ [{_nr.type}] {_nr.path}: {_nr.message}")
+                        _record = f"❌ [{_op_type}] {_op_path}: {_nr.message}"
+
                     _native_call_log.append(_record)
-                # 保存调用记录，供后续写入 conversation_history
                 _native_call_log_text = "\n\n".join(_native_call_log)
             except Exception as _native_err:
                 console.print(f"   ❌ 原生文件操作异常: {_native_err}", style="bold red")
                 _native_call_log_text = f"❌ 原生文件操作异常: {_native_err}"
+
+        # ── 原生标记语言结果追加到 conversation_history（让 AI 立刻看到）──
+        if _native_call_log_text or (tool_results and not tool_calls):
+            _native_feedback = _native_call_log_text or "\n".join(tool_results)
+            if _native_feedback.strip():
+                conversation_history.append({"role": "system", "content": f"[NATIVE_RESULT]\n{_native_feedback.strip()}"})
 
         # 处理 AI 工具调用 ([tool:...] 格式)
         if tool_calls:
@@ -5908,23 +7080,55 @@ def handle_ai(
                     console.print(f"   → (缓存) {cached_output[:100]}...", style="dim")
                     continue
 
-                # 工具调用过程不显示给用户（内部执行，不刷屏）
+                # 显示绿色工具调用提示（去前缀）
+                _tool_display_name = tool_name
+                if _tool_display_name.startswith("mcp__"):
+                    _tool_display_name = _tool_display_name.rsplit("__", 1)[-1]
+                elif _tool_display_name.startswith("mcp_"):
+                    _tool_display_name = _tool_display_name[4:]
+                console.print(f"  [bold green]🔧 {_tool_display_name}[/]")
 
                 # 解析参数（JSON优先 → _parse_tool_params 回退）
                 if tool_params_str.strip().startswith("{"):
                     try:
                         params = json.loads(tool_params_str.strip())
                     except (json.JSONDecodeError, ValueError):
-                        _mcp_debug(f"JSON parse failed for {tool_name}, falling back")
-                        params = _parse_tool_params(tool_params_str, tool_body)
+                        # JSON 非法 → 反馈 schema 引导 AI 重发
+                        _err_schema = f"❌ JSON parse failed for {tool_name}. Arguments must be valid JSON."
+                        tool_results.append(_err_schema)
+                        console.print(f"   {_err_schema}", style="bold red")
+                        # 跳过本轮执行，下一轮 AI 看到错误信息后会修正参数
+                        executed_tools.append(f"{tool_name}:{tool_params_str}")
+                        continue
                 else:
                     params = _parse_tool_params(tool_params_str, tool_body)
 
+                # 先尝试内置 handler，走不通再走 MCP
                 ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
                                               path_validator=_mcp_path_validator)
+
+                # ── 风暴检测（MCP 工具调用）──
+                _tc_key = f"mcp:{tool_name}:{tool_params_str[:80]}"
+                if not ok:
+                    _storm_counter[_tc_key] = _storm_counter.get(_tc_key, 0) + 1
+                    _repeat_success.pop(_tc_key, None)
+                    if _storm_counter[_tc_key] >= 3:
+                        _storm_warn = _mcp_t(
+                            f"⚠️ 风暴检测：{tool_name} 连续失败 {_storm_counter[_tc_key]} 次，AI 应更换策略",
+                            f"⚠️ Storm detected: {tool_name} failed {_storm_counter[_tc_key]}x, AI should switch strategy"
+                        )
+                        console.print(f"  [bold red]{_storm_warn}[/]")
+                        conversation_history.append({"role": "system", "content": f"[STORM_WARNING] {_storm_warn}"})
+                else:
+                    _storm_counter.pop(_tc_key, None)
+
                 executed_tools.append(exec_key)
                 _tool_results_cache[exec_key] = output  # 缓存结果供后续去重复用
+
                 if ok:
+                    # 截断超大工具结果，防止上下文撑爆
+                    if len(output) > _MAX_TOOL_OUTPUT:
+                        output = output[:_MAX_TOOL_OUTPUT // 2] + f"\n\n…[truncated {len(output) - _MAX_TOOL_OUTPUT} bytes of {len(output)} total]…\n\n" + output[-_MAX_TOOL_OUTPUT // 2:]
                     tool_results.append(output)
                     # 灰字显示简短结果
                     short = output[:100] + ("..." if len(output) > 100 else "")
@@ -5933,6 +7137,14 @@ def handle_ai(
                     err_msg = f"❌ 工具执行失败: {output}"
                     tool_results.append(err_msg)
                     console.print(f"   {err_msg}", style="bold red")
+
+            # ── 提取 submit_plan / mark_step_complete 结果 ──
+            for _tc_idx, _tc in enumerate(tool_calls):
+                _tc_name = _tc.get("name", "")
+                if _tc_name.endswith("submit_plan"):
+                    if _tc_idx < len(tool_results) and tool_results[_tc_idx]:
+                        _pending_plan = tool_results[_tc_idx]
+                    break
 
             # ── 追加工具调用结果到 conversation_history ──
             # 无论来源是 MCP tool_calls 还是原生 markup_blocks，
@@ -5961,7 +7173,7 @@ def handle_ai(
                 _reasoning = ai_result.get("_reasoning", "")
                 _assistant_msg = {
                     "role": "assistant",
-                    "content": "",
+                    "content": None,  # DeepSeek thinking mode 要求 tool_call 时 content 为 null
                     "tool_calls": _tool_call_items,
                 }
                 if _reasoning:
@@ -6009,7 +7221,7 @@ def handle_ai(
                 _assistant_msg["reasoning_content"] = _reasoning
             conversation_history.append(_assistant_msg)
 
-        # ── 标记本轮已处理工具调用，用于 has_pending 判断 ──
+        # ── 标记本轮已处理工具调用（命令的标记在 cmd_results 之后设置）──
         _tool_calls_processed_this_round = bool(tool_calls)
         
         cmd_results = {}
@@ -6097,19 +7309,46 @@ def handle_ai(
                         cmd_type, _ = cache_result
                         is_tool_cmd = (cmd_type == "tools")
                     
+                    # ── 风暴检测：重复成功防护 ──
+                    _cmd_key = f"cmd:{cmd}"
+                    _repeat_count = _repeat_success.get(_cmd_key, 0)
+                    if _repeat_count >= 2:
+                        _storm_note = _mcp_t(
+                            f"⚠️ 拦截重复命令「{cmd}」— 已成功执行 {_repeat_count} 次，跳过",
+                            f"⚠️ Duplicate command blocked「{cmd}」— succeeded {_repeat_count}x, skipped"
+                        )
+                        console.print(f"  [bold yellow]{_storm_note}[/]")
+                        cmd_output.append(f"[BLOCKED] 重复命令，已跳过")
+                        cmd_results[cmd] = f"Blocked: repeated {_repeat_count}x"
+                        continue  # 跳到下一条命令
+
+                    captured_output = ""
+                    _output_line_count = 0
                     with capture_command_output() as (stdout_catcher, stderr_catcher):
                         stdout_catcher._ai_triggered = True  # AI 执行 → 限制显示
-                        if parse_and_execute:
-                            parse_and_execute(cmd)
+                        # 标记为 AI 执行模式（exe.py 据此启用超时弹窗）
+                        _exe_module = sys.modules.get('lib.terminal.exe')
+                        if _exe_module:
+                            _exe_module.AI_EXECUTION_MODE = True
+                        try:
+                            if parse_and_execute:
+                                parse_and_execute(cmd)
+                        finally:
+                            if _exe_module:
+                                _exe_module.AI_EXECUTION_MODE = False
                         
                         full_output = stdout_catcher.get_output() + "\n" + stderr_catcher.get_output()
                         captured_output = full_output.strip()
-
-                        # 执行完成后：AI 触发且超10行 → 补印灰色截断提示
-                        if stdout_catcher._ai_triggered and stdout_catcher._line_count > 10:
+                        _output_line_count = stdout_catcher._line_count
+                    
+                    # ── 在 capture 外面显示输出（capture 内 sys.stdout 被替换了）──
+                    if captured_output:
+                        if _output_line_count <= 10:
+                            console.print(captured_output, style="dim white")
+                        else:
                             trunc_note = _mcp_t(
-                                f'… 以下省略 {stdout_catcher._line_count - 10} 行（完整输出已保留）',
-                                f'… {stdout_catcher._line_count - 10} more lines omitted (full output retained)'
+                                f'… 以下省略 {_output_line_count - 10} 行（完整输出已保留）',
+                                f'… {_output_line_count - 10} more lines omitted (full output retained)'
                             )
                             console.print(f"[dim]{trunc_note}[/]")
                         
@@ -6154,6 +7393,33 @@ def handle_ai(
                 
                 cmd_results[cmd] = cmd_result
             
+                # ── 风暴检测：记录命令执行结果 ──
+                _cmd_key = f"cmd:{cmd}"
+                if "失败" in cmd_result or "error" in cmd_result.lower() or "exception" in cmd_result.lower():
+                    _storm_counter[_cmd_key] = _storm_counter.get(_cmd_key, 0) + 1
+                    _repeat_success.pop(_cmd_key, None)
+                    if _storm_counter[_cmd_key] >= 3:
+                        _storm_warn = _mcp_t(
+                            f"⚠️ 风暴检测：命令「{cmd}」连续失败 {_storm_counter[_cmd_key]} 次，AI 应更换策略",
+                            f"⚠️ Storm detected: cmd「{cmd}」failed {_storm_counter[_cmd_key]}x, AI should switch strategy"
+                        )
+                        console.print(f"  [bold red]{_storm_warn}[/]")
+                        conversation_history.append({"role": "system", "content": f"[STORM_WARNING] {_storm_warn}"})
+                else:
+                    _storm_counter.pop(_cmd_key, None)
+                    _repeat_success[_cmd_key] = _repeat_success.get(_cmd_key, 0) + 1
+            
+            # 标记本轮已处理的命令（基于实际执行结果）
+            _commands_processed_this_round = bool(cmd_results)
+            
+            # ── 命令执行结果立即喂回给 AI ──
+            if cmd_results:
+                _cmd_feedback_lines = []
+                for _cmd, _result in cmd_results.items():
+                    _cmd_feedback_lines.append(f"$ {_cmd}\n{_result}")
+                _cmd_feedback = "\n\n".join(_cmd_feedback_lines)
+                conversation_history.append({"role": "system", "content": f"[CMD_RESULT]\n{_cmd_feedback}"})
+            
             if not ai_ask.strip():
                 final_ai_result = ai_result.copy()
                 if user_refuse_reasons:
@@ -6171,6 +7437,14 @@ def handle_ai(
                         _ts = time.strftime('%Y-%m-%d %H:%M:%S')
                         _md = current_lang == "english"
                         new_content = f"\n\n### {'Interaction' if _md else '交互'} #{interaction_count} ({_ts})\n\n"
+                        # 记录本轮的用户提问（对话历史中最后一个 user 消息）
+                        _last_user_q = ""
+                        for _m in reversed(conversation_history):
+                            if _m.get("role") == "user":
+                                _last_user_q = _m.get("content", "")
+                                break
+                        if _last_user_q:
+                            new_content += f"- **{'User' if _md else '用户'}**: {_last_user_q[:200]}{'...' if len(_last_user_q) > 200 else ''}\n"
                         _resp = (final_ai_result.get('txt', '') or '').strip()
                         if _resp:
                             new_content += f"- **{'AI Response' if _md else 'AI回答'}**:\n  {_resp}\n"
@@ -6203,6 +7477,14 @@ def handle_ai(
                         _ts = time.strftime('%Y-%m-%d %H:%M:%S')
                         _md = current_lang == "english"
                         new_content = f"\n\n### {'Interaction' if _md else '交互'} #{interaction_count} ({_ts})\n\n"
+                        # 记录本轮的用户提问（对话历史中最后一个 user 消息）
+                        _last_user_q = ""
+                        for _m in reversed(conversation_history):
+                            if _m.get("role") == "user":
+                                _last_user_q = _m.get("content", "")
+                                break
+                        if _last_user_q:
+                            new_content += f"- **{'User' if _md else '用户'}**: {_last_user_q[:200]}{'...' if len(_last_user_q) > 200 else ''}\n"
                         _resp = (final_ai_result.get('txt', '') or '').strip()
                         if _resp:
                             new_content += f"- **{'AI Response' if _md else 'AI回答'}**:\n  {_resp}\n"
@@ -6215,8 +7497,8 @@ def handle_ai(
         if not ai_ask.strip():
             if tag:
                 update_message_tag(user_home_dir, current_chat_name, current_session_id, tag, class_level)
-            # answer=yes → ESC 门控（Enter 退出 / ESC 追问）
-            # answer=no  → 跳过门控，自动进入下一轮循环
+            # answer=yes → AI 主动表示完成；answer=no → AI 认为还需继续
+            # 但 answer 是可选信号，有挂起项时优先处理挂起项
 
         # Debug 面板：debug 模式下用 dim Panel 展示 SSE 原始响应
         debug_info = ai_result.get("_debug", "")
@@ -6234,11 +7516,13 @@ def handle_ai(
         # 规则：仅当响应中只有 txt/analysis 纯文本字段时才停止循环；
         #       但凡存在其他字段（memory/plan/ask/commands/本轮新工具调用），
         #       都需要回问 AI 以传递上下文反馈。
+        # 注意：markup_blocks 本身不能作为 pending 判断——AI 文本回复中可能提到
+        # "[VIEW:]" 等词导致解析器误提取。必须用实际执行结果 _native_call_log_text 来判断。
         has_pending = bool(
-            markup_blocks or              # AI 输出了标记块（VIEW/EDIT/WRITE）→ 需回传结果
-            memory_uuid or                # AI 引用了记忆 → 需回问让 AI 感知记忆已载入
-            ai_commands or
-            _tool_calls_processed_this_round or  # 本轮有刚执行的工具 → 给 AI 机会回应结果
+            _native_call_log_text.strip() or
+            memory_uuid or
+            _commands_processed_this_round or
+            _tool_calls_processed_this_round or
             ai_ask.strip() or
             plan_text.strip()
         )
@@ -6250,16 +7534,15 @@ def handle_ai(
         elif _in_repl:
             # REPL 模式 → 直接退出，由外层 REPL 接管
             continue_asking = False
-        else:
-            # 非 REPL 模式，无待执行 → 显示 ESC 门控
+        elif answer == "yes":
+            # AI 主动表示完成 → 显示 ESC 门控（Enter 退出 / ESC 追问）
             # ── 显示 token 量 ──
             _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
             if _pt:
                 console.print(f"  [dim]📊 上下文 ~{_pt} tokens（API 精确值）[/]")
             elif conversation_history:
-                # 根据对话历史实际长度估算
                 _total_chars = sum(len(m.get("content", "") or "") for m in conversation_history)
-                _est_tokens = _total_chars // 3 + 1500  # 字符→token 粗略 + 系统提示词基线
+                _est_tokens = _total_chars // 3 + 1500
                 console.print(f"  [dim]📊 上下文 ~{_est_tokens} tokens（估算）[/]")
             continue_asking = False
             esc_pressed = [False]
@@ -6303,6 +7586,16 @@ def handle_ai(
                     current_question = follow_up
                     conversation_history.append({"role": "user", "content": follow_up})
                     continue_asking = True
+        else:
+            # answer=no 且无待执行 → AI 想继续，自动循环，不显示 ESC 门控
+            _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
+            if _pt:
+                console.print(f"  [dim]📊 上下文 ~{_pt} tokens（API 精确值）[/]")
+            elif conversation_history:
+                _total_chars = sum(len(m.get("content", "") or "") for m in conversation_history)
+                _est_tokens = _total_chars // 3 + 1500
+                console.print(f"  [dim]📊 上下文 ~{_est_tokens} tokens（估算）[/]")
+            continue_asking = True
 
     # 恢复原始 SIGINT 处理器
     import signal as _signal

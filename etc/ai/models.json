@@ -7,7 +7,7 @@
     "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
     "default_model": "deepseek-v4-flash",
     "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
-    "thinking": {"type": "enabled"},
+    "thinking": {"type": "disabled"},
     "reasoning_effort": "high"
   },
   "openai": {

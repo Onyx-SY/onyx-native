@@ -203,6 +203,9 @@ _FILTERED_PREFIXES = ('__READY_', '__VAR_', '__FUNC_', '__CWD_')
 _current_pty_size = (24, 80)
 _shell_lock = threading.Lock()
 _persistent_shell: Optional['PersistentShell'] = None
+# AI 执行模式标志 — 由 ai_cmd.py 在执行命令前设为 True，执行后恢复
+# 用于给 AI 触发的命令加超时保护和用户弹窗
+AI_EXECUTION_MODE = False
 
 
 # ======================================================================
@@ -1299,12 +1302,15 @@ class PersistentShell:
                         log_error(f"Failed to write to shell: {e}")
                 return -1, full_raw_output
     
-            # Single select on both PTY and stdin — zero artificial blocking.
-            # SIGWINCH handler updates PTY size; no polling needed here.
+            # AI 执行超时保护：select 加 1s 超时，30s 弹窗询问用户
+            _exec_start = time.time()
+            _ai_warned = False
+            _ai_kill = False
+
             while True:
                 if not is_windows and self.master_fd is not None:
                     try:
-                        rlist, _, _ = select.select([self.master_fd, fd_stdin], [], [])
+                        rlist, _, _ = select.select([self.master_fd, fd_stdin], [], [], 1.0)
                     except (select.error, OSError):
                         continue
                     data = None
@@ -1325,6 +1331,17 @@ class PersistentShell:
                     # Windows: use reader thread queue
                     data = self._read_from_master(timeout=0.01)
                     stdin_data = None  # handled via msvcrt below
+
+                # ── AI 超时弹窗（不阻塞命令，不自动中断）──
+                if AI_EXECUTION_MODE and not found_start and not _ai_warned:
+                    _elapsed = time.time() - _exec_start
+                    if _elapsed > 30:
+                        _ai_warned = True
+                        sys.stderr.write(
+                            "\n\033[33m⏱ 该命令已执行超过 30 秒，可能未启动或已卡死。"
+                            " 输入 \033[1mk\033[22m 终止，或继续等待…\033[0m\n"
+                        )
+                        sys.stderr.flush()
 
                 # --- Process PTY output ---
                 if data is not None:
@@ -1389,12 +1406,27 @@ class PersistentShell:
                 # --- Process stdin input ---
                 if not is_windows:
                     if stdin_data is not None:
-                        # 所有输入字节原样转发到 PTY，PTY slave 的 line discipline
-                        # 天然处理 SIGINT(\x03)/SIGQUIT(\x1c)/EOF(\x04)。
-                        try:
-                            self._write_to_master(stdin_data)
-                        except OSError:
-                            pass
+                        # AI 超时弹窗后：用户输入 'k' 则终止命令
+                        if _ai_warned and not _ai_kill:
+                            if b'k' in stdin_data.lower():
+                                _ai_kill = True
+                                sys.stderr.write("\033[33m⏹ 用户选择终止命令\033[0m\n")
+                                sys.stderr.flush()
+                                self._write_to_master(b'\x03')  # Ctrl+C 送 PTY
+                                self._drain_output()
+                                self._clear_screen()
+                                break
+                            else:
+                                # 非 k 输入仍然转发
+                                try:
+                                    self._write_to_master(stdin_data)
+                                except OSError:
+                                    pass
+                        else:
+                            try:
+                                self._write_to_master(stdin_data)
+                            except OSError:
+                                pass
                         if DEBUG_ENABLED:
                             shell_log(stdin_data, 'STDIN')
                 else:
@@ -1403,6 +1435,18 @@ class PersistentShell:
                         import msvcrt
                         if msvcrt.kbhit():
                             user_data = msvcrt.getch()
+                            # AI 超时弹窗后拦截 'k'
+                            if _ai_warned and not _ai_kill and user_data.lower() == b'k':
+                                _ai_kill = True
+                                sys.stderr.write("\033[33m⏹ 用户选择终止命令\033[0m\n")
+                                sys.stderr.flush()
+                                try:
+                                    self._write_to_master(b'\x03')
+                                except OSError:
+                                    pass
+                                self._drain_output()
+                                self._clear_screen()
+                                break
                             try:
                                 self._write_to_master(user_data)
                             except OSError:

@@ -301,6 +301,29 @@ def _do_edit_by_range(block: dict, abs_path: str,
         return BlockResult(block, False, f"替换失败: {e}")
 
 
+def _check_indentation(content: str, path: str) -> Optional[str]:
+    """检查内容是否可能丢失了缩进（纯引导警告，不阻断写入）"""
+    if not content:
+        return None
+    lines = content.split("\n")
+    non_empty = [l for l in lines if l.strip()]
+    if len(non_empty) < 3:
+        return None
+    # 如果是 HTML/XML/代码文件但每行都顶格（无缩进），发出警告
+    _code_exts = {'.html', '.htm', '.xml', '.py', '.js', '.ts', '.jsx', '.tsx', '.css', '.scss', '.json', '.yaml', '.yml', '.java', '.cpp', '.c', '.h', '.hpp', '.go', '.rs', '.svelte', '.vue'}
+    _, ext = os.path.splitext(path)
+    if ext.lower() not in _code_exts:
+        return None
+    # 检查是否有任何缩进（空格或 tab 开头）
+    indented = sum(1 for l in non_empty if l[0] in (' ', '\t'))
+    if indented == 0 and len(non_empty) >= 3:
+        return (
+            "⚠️ 警告：写入内容无任何缩进（所有行均顶格），AI 可能丢失了格式。"
+            "请在 prompt 中提示 AI 保留缩进。"
+        )
+    return None
+
+
 def _do_write(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
     """执行 WRITE（覆盖写入/创建）操作"""
     content = block.get("content", "")
@@ -308,6 +331,11 @@ def _do_write(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
 
     # 确保目录存在
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+
+    # 缩进检查（仅警告，不阻断）
+    indent_warn = _check_indentation(content, abs_path)
+    if indent_warn:
+        pm.console.print(f"  [bold yellow]{indent_warn}[/]")
 
     panel, dim_panel = make_write_panel(block["path"], content, is_new=is_new)
 

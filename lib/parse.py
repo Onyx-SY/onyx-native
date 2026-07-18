@@ -589,7 +589,7 @@ def remove_comments(text: str, sys_type: str = 'bash') -> str:
     def is_in_heredoc_content(content: str, pos: int) -> bool:
         """检查位置是否在 here-doc 内容中"""
         # 简化实现：查找 << 标记
-        heredoc_pattern = r'<<\s*([A-Za-z0-9_]+)\s*\n(.*?)\n\s*\1'
+        heredoc_pattern = r'<<\s*[\'\"]?([A-Za-z0-9_]+)[\'\"]?\s*\n(.*?)\n\s*\1'
         matches = list(re.finditer(heredoc_pattern, content, re.DOTALL))
         for match in matches:
             if match.start() < pos < match.end():
@@ -1491,7 +1491,7 @@ def parse_redirects_from_command(cmd_str: str, sys_type: str = 'bash') -> Tuple[
     # === Here Document 处理（仅 Unix shell）===
     if sys_type not in ('cmd', 'powershell'):
         # 首先处理Here Document（完整模式：<<DELIM\ncontent\nDELIM）
-        here_doc_pattern = r'(?:^|\s+)<<\s*([A-Za-z0-9_]+)\s*\n(.*?)\n\s*\1\s*$'
+        here_doc_pattern = r'(?:^|\s+)<<\s*[\'\"]?([A-Za-z0-9_]+)[\'\"]?\s*\n(.*?)\n\s*\1\s*$'
         here_doc_matches = list(re.finditer(here_doc_pattern, cmd_str, re.DOTALL | re.MULTILINE))
         
         if here_doc_matches:
@@ -1505,7 +1505,7 @@ def parse_redirects_from_command(cmd_str: str, sys_type: str = 'bash') -> Tuple[
             cmd_str = cmd_str[:start] + cmd_str[end:]
         else:
             # 检查是否有未完成的Here Document（只有<<后面没有内容）
-            here_start_pattern = r'(?:^|\s+)<<\s*([A-Za-z0-9_]+)\s*$'
+            here_start_pattern = r'(?:^|\s+)<<\s*[\'\"]?([A-Za-z0-9_]+)[\'\"]?\s*$'
             match = re.search(here_start_pattern, cmd_str)
             if match:
                 delimiter = match.group(1)

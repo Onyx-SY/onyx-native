@@ -874,13 +874,6 @@ def get_virtual_path(physical_path: str) -> str:
 
 
 #=================判断命令是否是交互式===============
-def is_interactive_command(cmd: str) -> bool:
-    """判断命令是否为交互式命令（仅用于日志）"""
-    from lib.terminal.exe import is_interactive_command as _is_interactive
-    
-    # 加载用户自定义交互式命令
-    user_cmds = load_user_interactive_cmds()
-    return _is_interactive(cmd, user_cmds)
 
 def init_user_cmd_cli_file() -> None:
     """初始化用户交互式命令配置文件：user_home_dir/.user_cmd_cli.txt"""
@@ -3023,10 +3016,10 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
             log_warning(f"保存初始化计时失败: {str(e)}", request_id)
 
     try:
-        # 1. 反sudo检测
-        from lib.anti_sudo_check import anti_sudo_check
-        anti_sudo_check()
-        record_step("1.anti_sudo_check")
+        # 1. 清屏（仅交互模式）— 放在最前面，这样后续报错不会被洗掉
+        if not oneshot:
+            handle_clear(["clear"], request_id)
+        record_step("1.clear_screen")
 
         # 2. 权限检测与用户主目录初始化
         check_admin_permission()
@@ -3065,14 +3058,9 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
         init_user_mapping()
         record_step("10.init_user_mapping")
 
-        # 6. 清屏（仅交互模式）
-        if not oneshot:
-            handle_clear(["clear"], request_id)
-        record_step("11.handle_clear")
-
-        # 7. 初始化用户交互式命令配置
+        # 6. 初始化用户交互式命令配置
         init_user_cmd_cli_file()
-        record_step("12.init_user_cmd_cli_file")
+        record_step("7.init_user_cmd_cli_file")
 
         # 8. 管理员密码初始化
         if not init_admin_password():
@@ -3271,25 +3259,31 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
             handle_manage(["manage", "-q"], request_id)
         record_step("30.handle_manage")
 
-        record_step("31.init_oppath")
+        # 20.5 PTY 后台预热，用户输命令时 shell 已 ready
+        if not oneshot:
+            from lib.terminal.exe import warmup_persistent_shell
+            warmup_persistent_shell()
+        record_step("31.pty_warmup")
+
+        record_step("32.init_oppath")
 
         # 21. 加载自启命令
         load_autocmd()
-        record_step("32.load_autocmd")
+        record_step("33.load_autocmd")
         
         if not oneshot and AUTO_CMDS and global_config.get("user_config", {}).get("enable_autocmd", True):
             for cmd_info in AUTO_CMDS:
                 auto_req_id = str(uuid.uuid4())
                 log_info(f"执行自启命令 (ID: {cmd_info['id']}): {cmd_info['cmd']}", auto_req_id)
                 parse_and_execute(cmd_info["cmd"])
-        record_step("33.execute_autocmd")
+        record_step("34.execute_autocmd")
 
         # 22. RC 文件创建
         check_and_create_system_rc()
-        record_step("34.check_and_create_system_rc")
+        record_step("35.check_and_create_system_rc")
         
         check_and_create_user_rc()
-        record_step("35.check_and_create_user_rc")
+        record_step("36.check_and_create_user_rc")
         
         # ========== 保存计时结果 ==========
         save_init_timings()

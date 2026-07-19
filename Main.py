@@ -194,7 +194,7 @@ except:
     USER = os.environ.get("USER", os.environ.get("USERNAME", "default"))
 
 # ========== 日志相关配置 ==========
-LOG_BASE_DIR = os.path.join(ROOT_DIR, "onyxlog", "onyx", USER, "pre_start")
+LOG_BASE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "onyx", "logs", USER)
 os.makedirs(LOG_BASE_DIR, exist_ok=True)
 
 # 永久缓存文件路径
@@ -2199,8 +2199,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    anti_sudo_check_path = os.path.join(os.path.dirname(__file__), "lib", "anti_sudo_check.py")
-    if os.path.exists(anti_sudo_check_path):
-        from lib.anti_sudo_check import anti_sudo_check
-        anti_sudo_check()
+    # anti_sudo_check 已禁用（用户要求取消 sudo 检测）
     main()

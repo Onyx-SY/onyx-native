@@ -286,23 +286,33 @@ def get_shell_from_type() -> str:
     return '/bin/sh'
 
 
+_shell_cache: Optional[str] = None
+
 def get_shell() -> str:
     """Get available shell for current system (uses terminal type detection)"""
+    global _shell_cache
+    if _shell_cache:
+        return _shell_cache
+    
     if TERMINAL_TYPE_AVAILABLE:
-        return get_shell_from_type()
+        _shell_cache = get_shell_from_type()
+        return _shell_cache
     
     # Fallback logic
     if platform.system() == "Windows":
         for candidate in ["pwsh", "powershell", "cmd"]:
             if shutil.which(candidate):
                 debug_log(f"Windows fallback shell: {candidate}")
-                return candidate
-        return "cmd.exe"
+                _shell_cache = candidate
+                return _shell_cache
+        _shell_cache = "cmd.exe"
+        return _shell_cache
 
     env_shell = os.environ.get("SHELL")
     if env_shell and os.path.isfile(env_shell) and os.access(env_shell, os.X_OK):
         debug_log(f"Using SHELL env: {env_shell}")
-        return env_shell
+        _shell_cache = env_shell
+        return _shell_cache
 
     candidates = [
         "/bin/bash", "/usr/bin/bash",
@@ -314,15 +324,17 @@ def get_shell() -> str:
     for cand in candidates:
         if os.path.isfile(cand) and os.access(cand, os.X_OK):
             debug_log(f"Found shell: {cand}")
-            return cand
+            _shell_cache = cand
+            return _shell_cache
 
-    return "/bin/sh"
+    _shell_cache = "/bin/sh"
+    return _shell_cache
 
 
 # ======================================================================
 # Collect Caller Variables
 # ======================================================================
-def _collect_caller_vars(depth: int = 3) -> Dict[str, str]:
+def _collect_caller_vars(depth: int = 1) -> Dict[str, str]:
     """
     Collect local and global variables from call stack
 
@@ -706,6 +718,14 @@ class PersistentShell:
             # For WSL/bash on Windows
             shell_args = [self.shell, '--norc', '--noprofile']
 
+        # 预热 shell 二进制到系统缓存
+        try:
+            _shell_path = shutil.which(self.shell) or self.shell
+            with open(_shell_path, 'rb') as _f:
+                _f.read(4096)
+        except Exception:
+            pass
+
         try:
             from winpty import PtyProcess
             self._winpty_handle = PtyProcess.spawn(
@@ -755,6 +775,13 @@ class PersistentShell:
         try:
             fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
                         struct.pack('HHHH', rows, cols, 0, 0))
+        except Exception:
+            pass
+
+        # 预热 shell 二进制到 page cache，加速 os.execvpe()
+        try:
+            with open(self.shell, 'rb') as _f:
+                _f.read(4096)
         except Exception:
             pass
 
@@ -848,7 +875,7 @@ class PersistentShell:
             self._write_to_master(test_cmd.encode('utf-8'))
             start_time = time.time()
             while time.time() - start_time < 5.0:
-                data = self._read_from_master(timeout=0.05)
+                data = self._read_from_master(timeout=5.0)
                 if data:
                     text = data.decode('utf-8', errors='replace')
                     if ready_marker.strip() in text:
@@ -867,6 +894,11 @@ class PersistentShell:
         The marker is printed by the shell after EVERY command (including
         commands killed by SIGINT), enabling reliable end-of-command detection."""
         if self.master_fd is None and self._winpty_handle is None:
+            return
+
+        # PS1 已在 fork 时通过 env 传入 bash/sh/dash，跳过重复写入
+        if self.shell_name in ('bash', 'sh', 'dash'):
+            debug_log(f"Skip prompt setup for {self.shell_name}: PS1 already set via env")
             return
 
         debug_log(f"Setting up prompt for shell: {self.shell_name}, done_marker={self._done_marker}")
@@ -902,28 +934,24 @@ class PersistentShell:
             debug_log(f"Failed to setup prompt: {e}", 'error')
             pass
 
-    def _drain_output(self, max_iterations: int = 50):
+    def _drain_output(self, max_iterations: int = 8):
         """Consume all pending output (non-blocking)"""
         drained = 0
+        empty_count = 0
         for _ in range(max_iterations):
             data = self._read_from_master(timeout=0)
             if not data:
-                break
+                empty_count += 1
+                if empty_count >= 2:
+                    break
+                continue
+            empty_count = 0
             drained += len(data)
         if drained > 0:
             debug_log(f"Drained {drained} bytes of pending output")
 
     def _clear_screen(self):
-        """Clear screen using ANSI escape sequence"""
-        if self.master_fd is None and self._winpty_handle is None:
-            return
-        try:
-            clear_cmd = "\033[2J\033[H\033[3J"
-            self._write_to_master(clear_cmd.encode('utf-8'))
-            self._drain_output()
-        except OSError as e:
-            debug_log(f"Failed to clear screen: {e}", 'error')
-            pass
+        pass
 
     def _disable_echo(self):
         """抑制 shell 的 PS1/命令回显。不关 PTY ECHO（否则 input() 输入不可见）。"""
@@ -1866,6 +1894,19 @@ def cleanup_shell():
             _persistent_shell.cleanup()
             _persistent_shell = None
     close_debug_logging()
+
+
+def warmup_persistent_shell():
+    """Pre-create persistent shell in background during startup.
+    By the time the first command arrives, shell is likely ready."""
+    def _warmup():
+        try:
+            _get_persistent_shell()
+            debug_log("Persistent shell pre-created in background")
+        except Exception as e:
+            debug_log(f"Background shell warmup failed: {e}", 'error')
+    t = threading.Thread(target=_warmup, daemon=True)
+    t.start()
 
 
 def set_debug_enabled(enabled: bool):

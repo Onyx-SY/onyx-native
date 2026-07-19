@@ -139,7 +139,11 @@ def set_tool_permission(ctx: "AppContext", tool_dir: str, perm: int, request_id:
 
 def check_blocked_cmd(ctx: "AppContext", cmd: str, request_id: str) -> Tuple[bool, bool]:
     """高危命令拦截。返回 (是否拦截, 是否需要二次确认)"""
+    if not ctx._SANDBOX_ENABLED:
+        return False, False
     if not ctx.SANDBOX_CONFIG["enable"]:
+        return False, False
+    if ctx.OS_OR_TBS == "OS":
         return False, False
 
     from core.i18n import t, set_lang
@@ -181,6 +185,8 @@ def check_blocked_cmd(ctx: "AppContext", cmd: str, request_id: str) -> Tuple[boo
 
     for blocked in blocked_cmds:
         blocked_normalized = re_multi.sub(' ', blocked.strip().lower())
+        blocked_normalized = re_opt_slash.sub(r'\1 \2', blocked_normalized)
+        blocked_normalized = re_opt_star.sub(r'\1 \2', blocked_normalized)
         if cmd_normalized == blocked_normalized:
             return _handle_blocked_match(ctx, cmd, blocked, request_id, "base_block", "CMD_BLOCK", "CMD_CONFIRM", "CMD_CANCEL")
 
@@ -188,6 +194,8 @@ def check_blocked_cmd(ctx: "AppContext", cmd: str, request_id: str) -> Tuple[boo
     if ctx.sys_type == "SpecialLinux":
         for blocked in ctx.SANDBOX_CONFIG.get("special_blocked_cmds", []):
             blocked_normalized = re_multi.sub(' ', blocked.strip().lower())
+            blocked_normalized = re_opt_slash.sub(r'\1 \2', blocked_normalized)
+            blocked_normalized = re_opt_star.sub(r'\1 \2', blocked_normalized)
             if cmd_normalized == blocked_normalized:
                 return _handle_blocked_match(ctx, cmd, blocked, request_id, "special_block", "CMD_BLOCK", "CMD_CONFIRM", "CMD_CANCEL")
 

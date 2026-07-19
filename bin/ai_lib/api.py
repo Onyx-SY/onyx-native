@@ -1,0 +1,598 @@
+# -*- coding: utf-8 -*-
+"""
+Onyx AI API 调用模块 — SSE 流式调用、结果处理、记忆上下文
+
+从 bin/ai_cmd.py 提取，零功能变更。
+"""
+
+import os
+import json
+import time
+import platform
+from datetime import datetime
+from typing import Dict, List, Optional, Any, Callable, Tuple
+
+import requests
+from rich.console import Console
+console = Console()
+
+from .config import (
+    get_current_lang, get_prompt_text, load_key_conf,
+    _SUPPORTED_PLATFORMS, ROOT_DIR, USER,
+    mood_context, is_mood_enabled,
+)
+from .parsers import parse_sse_structured_response
+from .storage import (
+    load_chat_memory_for_context, get_previous_session_uuid,
+    load_memory_by_uuid, get_latest_ai_session,
+)
+from .mcp_state import _AI_INTERRUPTED, _MCP_DEBUG_START
+from .mcp_state import _mcp_debug as _mcp_debug_fn
+
+
+def call_ai_api_sse(question: str = "", type: Optional[str] = None,
+                    new_key: Optional[str] = None,
+                    debug_mode: bool = False, onyx_module=None,
+                    mode: str = "normal", times: int = 1,
+                    ai_tools_prompt: str = "",
+                    on_content: Optional[Callable[[str], None]] = None,
+                    on_tool_call: Optional[Callable[[str], None]] = None,
+                    on_reasoning: Optional[Callable[[str], None]] = None,
+                    user_home_dir: str = None,
+                    tools: Optional[List[Dict]] = None,
+                    messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
+    # 惰性导入避免循环引用
+    from .config import get_current_lang, get_prompt_text, load_key_conf
+
+    lang = get_current_lang()
+    prompts = get_prompt_text(lang)
+
+    # ── 加载直连配置 ──
+    conf = load_key_conf()
+    if not conf or not conf.get("api_key"):
+        return {"error": prompts.get("license_invalid_or_quota", "未配置 API 密钥，请重新运行 ai 命令"), "answer": "no", "ask": "", "txt": "", "analysis": ""}
+    plat_key = conf.get("platform", "deepseek")
+    api_key = conf["api_key"]
+    if plat_key == "custom":
+        plat_info = {
+            "name": "Custom",
+            "api_url": conf.get("api_url", "https://api.openai.com/v1/chat/completions"),
+            "stream_format": "openai",
+            "models": [conf.get("model", "gpt-4")],
+            "default_model": conf.get("model", "gpt-4"),
+            "params": {"temperature": 0.1, "max_tokens": 4096},
+        }
+    else:
+        plat_info = _SUPPORTED_PLATFORMS.get(plat_key, _SUPPORTED_PLATFORMS["deepseek"])
+    model = conf.get("model", "") or plat_info.get("default_model", "")
+    user_params = conf.get("params", {})
+
+    tool_list = []
+    if onyx_module and hasattr(onyx_module, "TOOL_INDEX_CACHE"):
+        try:
+            if isinstance(onyx_module.TOOL_INDEX_CACHE, dict) and onyx_module.TOOL_INDEX_CACHE:
+                tool_list = [
+                    f"- {os.path.basename(os.path.dirname(info.path))}"
+                    for info in onyx_module.TOOL_INDEX_CACHE.values()
+                    if hasattr(info, 'path') and info.path
+                ]
+                tool_list = sorted(set(tool_list))
+            else:
+                tool_list = ["- No available tools (tool cache is empty)" if lang == "english" else "- 无可用工具（工具缓存为空）"]
+        except Exception:
+            tool_list = ["- No available tools (failed to read)" if lang == "english" else "- 无可用工具（读取失败）"]
+    else:
+        tool_list = ["- No available tools (not initialized)" if lang == "english" else "- 无可用工具（未初始化）"]
+
+    def detect_system_env() -> Tuple[bool, str, str]:
+        try:
+            if platform.system() == "Windows":
+                return False, "Windows", "Windows"
+            if platform.system() == "Darwin":
+                return False, "macOS", "macOS"
+            if platform.system() == "Linux":
+                if os.environ.get('ANDROID_ROOT') or (os.environ.get('PREFIX') and '/com.termux' in os.environ.get('PREFIX', '')):
+                    return True, "Linux", "Termux"
+                if os.path.exists('/etc/kali_version') or 'kali' in platform.release().lower() or 'kali' in platform.version().lower():
+                    return False, "Linux", "Kali"
+                dist = ""
+                if hasattr(platform, 'linux_distribution'):
+                    dist = platform.linux_distribution()[0]
+                else:
+                    dist = platform.release().split('-')[0] if '-' in platform.release() else "Linux"
+                return False, "Linux", dist if dist else "Unknown Linux"
+            return False, platform.system(), "Unknown"
+        except Exception:
+            return False, platform.system(), "Unknown"
+
+    is_termux, sys_main_type, sys_sub_type = detect_system_env()
+    termux_type = sys_sub_type if is_termux else "Unknown"
+    prompt_items = ["- No available tools (tool cache is empty)" if lang == "english" else "- 无可用工具（工具缓存为空）",
+                    "- No available tools (import failed or not initialized)" if lang == "english" else "- 无可用工具（导入失败或未初始化）"]
+    tool_count = len(tool_list) if tool_list and tool_list[0] not in prompt_items else 0
+
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    system_label = "System" if lang == "english" else "系统"
+    env_label = "Environment" if lang == "english" else "环境"
+    user_label = "User" if lang == "english" else "用户"
+    permission_label = "Permission" if lang == "english" else "权限"
+    workdir_label = "Working directory" if lang == "english" else "工作目录"
+    language_label = "Language" if lang == "english" else "语言"
+    time_label = "Current time" if lang == "english" else "当前时间"
+    tools_label = "Available tools" if lang == "english" else "可用工具列表"
+    task_label = "Task" if lang == "english" else "任务"
+
+    permission_value = "root administrator" if USER == "root" else "regular user"
+    permission_value_cn = "root管理员" if USER == "root" else "普通用户"
+    current_shell = os.environ.get("SHELL", "unknown")
+    onyx_mode = "unknown"
+    if onyx_module and hasattr(onyx_module, "user_mode"):
+        onyx_mode = onyx_module.user_mode.current_mode
+
+    # 加载 .ai_s/onyx_ai.md（最高指示/持久记忆）
+    onyx_ai_prompt = ""
+    try:
+        _prompt_home = user_home_dir if user_home_dir else os.path.expanduser("~")
+        ai_prompt_file = os.path.join(_prompt_home, ".ai_s", "onyx_ai.md")
+        if os.path.exists(ai_prompt_file):
+            with open(ai_prompt_file, "r", encoding="utf-8") as _apf:
+                onyx_ai_prompt = _apf.read().strip()
+    except Exception:
+        pass
+
+    _stable_env = f"""{system_label}: {sys_main_type} - {sys_sub_type}
+{env_label}: {'Termux' if is_termux else 'PC'}
+{user_label}: {USER}
+Shell: {current_shell}
+Onyx Mode: {onyx_mode}
+{language_label}: {get_current_lang()}
+#可用工具（{tool_count}）
+{chr(10).join(tool_list)}
+{ai_tools_prompt}"""
+
+    _dynamic_suffix = f"""#当前时间: {current_time}
+#工作目录: {os.getcwd()}
+#持久记忆
+{onyx_ai_prompt if onyx_ai_prompt else '(暂无)'}
+{mood_context()}
+#{task_label}
+{question}"""
+
+    env_info = _stable_env + "\n" + _dynamic_suffix
+
+    # ── 加载系统提示词 etc/ai/agreement.md ──
+    system_prompt = ""
+    try:
+        _agreement_paths = [
+            os.path.join(ROOT_DIR, "onyx", "etc", "ai", "agreement.md"),
+            os.path.join("etc", "ai", "agreement.md"),
+        ]
+        for _ap in _agreement_paths:
+            if os.path.exists(_ap):
+                with open(_ap, "r", encoding="utf-8") as _af:
+                    system_prompt = _af.read()
+                break
+    except Exception:
+        pass
+
+    # ── 深情模式提示词（如果已激活） ──
+    _deep_aff_path = os.path.join(user_home_dir or os.path.expanduser("~"), ".ai_s", "deep_aff_prompt.txt")
+    if os.path.exists(_deep_aff_path):
+        try:
+            with open(_deep_aff_path, "r", encoding="utf-8") as _df:
+                _deep_aff = _df.read().strip()
+            if _deep_aff:
+                system_prompt = _deep_aff + "\n\n" + system_prompt
+        except Exception:
+            pass
+
+    # ── 条件加载情感模块提示词 etc/ai/mood.md ──
+    if is_mood_enabled():
+        try:
+            _mood_prompt_path = os.path.join(ROOT_DIR, "etc", "ai", "mood.md")
+            if os.path.exists(_mood_prompt_path):
+                with open(_mood_prompt_path, "r", encoding="utf-8") as _mf:
+                    system_prompt = (system_prompt or "") + "\n\n" + _mf.read()
+        except Exception:
+            pass
+
+    # ── 构建 messages ──
+    if messages is None:
+        _messages = []
+        if system_prompt:
+            _messages.append({"role": "system", "content": system_prompt})
+        _messages.append({"role": "user", "content": env_info})
+    else:
+        _messages = messages
+
+    headers = {
+        "Content-Type": "application/json",
+    }
+    headers["Accept"] = "text/event-stream"
+
+    if plat_key == "anthropic":
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    # ── 合并参数 ──
+    default_params = dict(plat_info.get("params", {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096}))
+    model_overrides = plat_info.get("model_params", {}).get(model, {})
+    p = {**default_params, **model_overrides, **user_params}
+
+    payload: dict
+    if plat_key == "anthropic":
+        system_content = ""
+        user_content = ""
+        for m in _messages:
+            if m["role"] == "system":
+                system_content = m["content"]
+            else:
+                user_content = m["content"]
+        payload = {
+            "model": model,
+            "max_tokens": p.get("max_tokens", 4096),
+            "system": system_content,
+            "messages": [{"role": "user", "content": user_content}],
+            "stream": True,
+        }
+    else:
+        payload = {
+            "model": model,
+            "messages": _messages,
+            "stream": True,
+            "max_tokens": p.get("max_tokens", 4096),
+        }
+        if p.get("temperature") is not None:
+            payload["temperature"] = p["temperature"]
+        if p.get("top_p") is not None:
+            payload["top_p"] = p["top_p"]
+
+    if plat_info.get("thinking"):
+        payload["thinking"] = plat_info["thinking"]
+    _effort = user_params.get("reasoning_effort") or plat_info.get("reasoning_effort")
+    if _effort:
+        payload["reasoning_effort"] = _effort
+
+    if tools:
+        payload["tools"] = tools
+
+    payload["stream_options"] = {"include_usage": True}
+
+    api_url = plat_info["api_url"]
+    stream_fmt = plat_info["stream_format"]
+
+    max_retries = 3
+    base_delay = 2
+    last_error = None
+
+    # 重置中断标志
+    _AI_INTERRUPTED = False
+
+    for retry in range(max_retries):
+        try:
+            _mcp_debug_fn(f"HTTP POST {api_url} (attempt {retry+1}/{max_retries})")
+            response = requests.post(
+                api_url, headers=headers, json=payload,
+                timeout=120, stream=True
+            )
+            _mcp_debug_fn(f"HTTP response: {response.status_code}")
+
+            if response.status_code == 400:
+                _detail = response.text[:500]
+                _mcp_debug_fn(f"HTTP 400 body: {_detail}")
+                return {"error": f"请求参数错误 (400): {_detail}", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            if response.status_code == 401:
+                return {"error": "API key 无效 (401)", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            if response.status_code == 402:
+                return {"error": "⚠️ API 余额不足 (402)，请充值后重试 | Insufficient balance, please top up", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            if response.status_code == 422:
+                detail = ""
+                try:
+                    detail = f": {response.json().get('message', response.text[:200])}"
+                except Exception:
+                    detail = f": {response.text[:200]}"
+                return {"error": f"请求参数错误 (422){detail}", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            if response.status_code == 429:
+                return {"error": "请求过于频繁 (429)，请稍后再试 | Rate limit reached, please retry later", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            if response.status_code in (500, 502, 503):
+                return {"error": f"AI 服务暂时不可用 ({response.status_code})，正在重试…", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            response.raise_for_status()
+
+            response.encoding = 'utf-8'
+            full_content = ""
+            debug_lines = []
+            _usage = {}
+            _tool_calls_acc: Dict[int, Dict] = {}
+            _reasoning_display: List[str] = []
+
+            if stream_fmt == "openai":
+                for line in response.iter_lines(decode_unicode=True):
+                    if _AI_INTERRUPTED:
+                        response.close()
+                        return {"txt": "", "analysis": "", "answer": "yes", "ask": "", "_interrupted": True}
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        if not isinstance(chunk, dict):
+                            continue
+                        if not chunk.get("choices"):
+                            usage_info = chunk.get("usage")
+                            if usage_info:
+                                _usage = usage_info
+                            continue
+                        choices = chunk.get("choices", [])
+                        if not choices or not isinstance(choices[0], dict):
+                            continue
+                        delta = choices[0].get("delta", {})
+                        if not isinstance(delta, dict):
+                            continue
+                        reasoning = delta.get("reasoning_content")
+                        if reasoning:
+                            _reasoning_display.append(reasoning)
+                            if on_reasoning:
+                                on_reasoning(reasoning)
+                        content = delta.get("content")
+                        if content:
+                            full_content += content
+                            if on_content:
+                                on_content(content)
+                        tc_delta = delta.get("tool_calls")
+                        if tc_delta and isinstance(tc_delta, list):
+                            for tc_chunk in tc_delta:
+                                if not isinstance(tc_chunk, dict):
+                                    continue
+                                tc_idx = tc_chunk.get("index", 0)
+                                _is_new = tc_idx not in _tool_calls_acc
+                                if _is_new:
+                                    _tool_calls_acc[tc_idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                                    _tc_name = tc_chunk.get("function", {}).get("name", "")
+                                    if _tc_name and on_tool_call:
+                                        on_tool_call(_tc_name)
+                                tcc = _tool_calls_acc[tc_idx]
+                                if tc_chunk.get("id"):
+                                    tcc["id"] = tc_chunk["id"]
+                                if tc_chunk.get("type"):
+                                    tcc["type"] = tc_chunk["type"]
+                                func_delta = tc_chunk.get("function", {})
+                                if func_delta.get("name"):
+                                    tcc["function"]["name"] = func_delta["name"]
+                                if func_delta.get("arguments"):
+                                    tcc["function"]["arguments"] += func_delta["arguments"]
+                    except json.JSONDecodeError:
+                        continue
+            else:
+                for line in response.iter_lines(decode_unicode=True):
+                    if _AI_INTERRUPTED:
+                        response.close()
+                        return {"txt": "", "analysis": "", "answer": "yes", "ask": "", "_interrupted": True}
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    try:
+                        chunk = json.loads(data_str)
+                        if not isinstance(chunk, dict):
+                            continue
+                        if chunk.get("type") == "content_block_delta":
+                            delta = chunk.get("delta", {})
+                            if not isinstance(delta, dict):
+                                continue
+                            text = delta.get("text", "")
+                            if text:
+                                full_content += text
+                                if on_content:
+                                    on_content(text)
+                        elif chunk.get("type") == "message_stop":
+                            break
+                    except json.JSONDecodeError:
+                        continue
+
+            raw_full = full_content
+            if full_content:
+                import re as _re
+                full_content = _re.sub(
+                    r'(?<!\n)(\[TXT\](?![:D])|\[TXT:DONE\]|\[ANALYSIS\](?![:D])|\[ANALYSIS:DONE\]|@@SHELL|>>>>>>>>>>|\[ANSWER\]|\[ASK\]|\[PLAN\]|\[PLAN:DONE\]|\[PROMPT\]|\[PROMPT:DONE\]|\[TAG\]|\[TAG:DONE\]|\[MEMORY\]|\[CLASS\]|\[SLEEP\])',
+                    r'\n\1', full_content
+                )
+
+            result = parse_sse_structured_response(full_content)
+
+            try:
+                from lib.native_fs.markup_parser import parse_markup as _parse_markup
+                result["markup_blocks"] = _parse_markup(raw_full if raw_full else full_content)
+            except Exception:
+                result["markup_blocks"] = []
+
+            if _tool_calls_acc:
+                native_tools = []
+                for idx in sorted(_tool_calls_acc.keys()):
+                    tc = _tool_calls_acc[idx]
+                    try:
+                        args = json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {}
+                    except (json.JSONDecodeError, ValueError):
+                        args = tc["function"]["arguments"]
+                    native_tools.append({
+                        "name": tc['function']['name'],
+                        "params_str": json.dumps(args) if isinstance(args, dict) else str(args),
+                        "_native": True,
+                    })
+                existing = result.get("tool_calls", [])
+                if not isinstance(existing, list):
+                    existing = []
+                result["tool_calls"] = existing + native_tools
+
+            if debug_mode:
+                import re as _re
+                deb_dir = os.path.join(user_home_dir or os.path.expanduser("~"), ".ai_s", "deb")
+                os.makedirs(deb_dir, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                raw_path = os.path.join(deb_dir, f"{ts}_raw.txt")
+                with open(raw_path, "w", encoding="utf-8") as _df:
+                    _df.write(f"── Raw API Response ({plat_key}, model={model}) ──\n")
+                    _df.write(raw_full)
+                    _df.write("\n── End Raw ──\n")
+                parsed_path = os.path.join(deb_dir, f"{ts}_parsed.json")
+                with open(parsed_path, "w", encoding="utf-8") as _df:
+                    json.dump(result, _df, ensure_ascii=False, indent=2)
+                debug_lines.append(f"── Raw ({plat_key}) ──")
+                debug_lines.append(raw_full[:2000])
+                debug_lines.append("── End Raw ──")
+                debug_lines.append(f"── 完整日志: {raw_path} ──")
+                debug_lines.append(f"── 解析结果: {parsed_path} ──")
+                debug_lines.append("── Parsed ──")
+                debug_lines.append(json.dumps(result, ensure_ascii=False, indent=2)[:2000])
+
+            if _usage:
+                result["_usage"] = _usage
+            if _reasoning_display:
+                result["_reasoning"] = "".join(_reasoning_display)
+            result["_debug"] = "\n".join(debug_lines) if debug_lines else ""
+            return result
+
+        except KeyboardInterrupt:
+            _AI_INTERRUPTED = True
+            try:
+                response.close()
+            except Exception:
+                pass
+            return {"txt": "", "analysis": "", "answer": "yes", "ask": "", "_interrupted": True}
+        except requests.exceptions.Timeout:
+            last_error = prompts["ai_request_timeout"]
+        except requests.exceptions.ConnectionError:
+            last_error = prompts["connection_failed"]
+        except requests.exceptions.RequestException as e:
+            last_error = prompts["request_failed"].format(str(e))
+        except Exception as e:
+            last_error = prompts["unknown_error"].format(str(e))
+
+        if retry < max_retries - 1:
+            delay = base_delay * (2 ** retry)
+            retry_msg = prompts.get("retrying", "Retrying ({}/{}) in {}s...").format(retry + 1, max_retries, delay)
+            console.print(retry_msg, style="dim")
+            time.sleep(delay)
+
+    return {"error": last_error or "Max retries exceeded", "analysis": "", "txt": "", "answer": "no", "ask": ""}
+
+
+def process_ai_result_fields(ai_result: Dict[str, Any]) -> Dict[str, Any]:
+    """处理AI返回的所有字段，确保默认值"""
+    result = ai_result.copy()
+    if "answer" not in result:
+        result["answer"] = "no"
+    if "ask" not in result:
+        result["ask"] = ""
+    if "tag" not in result:
+        result["tag"] = ""
+    if "memory" not in result:
+        result["memory"] = ""
+    if "analysis" not in result:
+        result["analysis"] = ""
+    if "txt" not in result:
+        result["txt"] = ""
+    if "plan" not in result:
+        result["plan"] = ""
+    if "tool_calls" not in result:
+        result["tool_calls"] = []
+    if "sleep" not in result:
+        result["sleep"] = None
+    if "class" not in result:
+        result["class"] = "1"
+    return result
+
+
+def extract_ai_commands(ai_result: Dict[str, Any]) -> List[str]:
+    """提取AI返回的命令"""
+    commands = []
+    for key, cmd in ai_result.items():
+        if key.startswith("cmd") and key[3:].isdigit() and cmd and str(cmd).strip():
+            commands.append(str(cmd).strip())
+    return commands
+
+
+def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
+                         referenced_memory_uuid: Optional[str], is_first_interaction: bool,
+                         mode: str = "normal") -> str:
+    """构建记忆上下文 — 分三段：历史摘要(UUID链) | 当前会话(ongoing) | 引用记忆"""
+    lang = get_current_lang()
+    is_en = lang == "english"
+    parts = []
+
+    if mode == "normal":
+        chat_memory = load_chat_memory_for_context(home_dir, chat_name)
+        uuid_chain = []
+        if chat_memory:
+            uuid_chain.append(chat_memory)
+
+        previous_uuid = get_previous_session_uuid(home_dir, chat_name, current_session_id, is_first_interaction)
+        if previous_uuid:
+            prev_memory = load_memory_by_uuid(home_dir, previous_uuid)
+            if prev_memory:
+                prev_block = (
+                    f"\n--- {{UUID链: {previous_uuid}}} ---\n"
+                    f"{prev_memory.strip()}"
+                ) if is_en else (
+                    f"\n--- {{UUID链: {previous_uuid}}} ---\n"
+                    f"{prev_memory.strip()}"
+                )
+                uuid_chain.append(prev_block)
+
+        if uuid_chain:
+            header = (
+                "═══════════════════════════════════════\n"
+                " UUID 链 — 历史参考（非当前对话，按 id/session 标记可精确引用）\n"
+                "═══════════════════════════════════════"
+            ) if is_en else (
+                "═══════════════════════════════════════\n"
+                " UUID 链 — 历史参考（非当前对话，每条带独立 id，可按 MEMORY 精确引用）\n"
+                "═══════════════════════════════════════"
+            )
+            parts.append(header + "\n" + "\n\n".join(uuid_chain))
+
+        existing_memory, _ = get_latest_ai_session(home_dir, current_session_id)
+        if existing_memory and existing_memory.strip():
+            header = (
+                "═══════════════════════════════════════\n"
+                f" 当前会话（ongoing）— library/{current_session_id}.txt （实时更新）\n"
+                "═══════════════════════════════════════"
+            ) if is_en else (
+                "═══════════════════════════════════════\n"
+                f" 当前会话（ongoing）— library/{current_session_id}.txt （实时更新）\n"
+                "═══════════════════════════════════════"
+            )
+            parts.append(header + "\n" + existing_memory.strip())
+
+        if referenced_memory_uuid:
+            ref_memory = load_memory_by_uuid(home_dir, referenced_memory_uuid)
+            if ref_memory:
+                header = (
+                    "═══════════════════════════════════════\n"
+                    f" 引用记忆 — [MEMORY:{referenced_memory_uuid}]\n"
+                    "═══════════════════════════════════════"
+                ) if is_en else (
+                    "═══════════════════════════════════════\n"
+                    f" 引用记忆 — [MEMORY:{referenced_memory_uuid}]\n"
+                    "═══════════════════════════════════════"
+                )
+                parts.append(header + "\n" + ref_memory.strip())
+
+    elif mode in ["adv_code", "adv_terminal"]:
+        existing_memory, _ = get_latest_ai_session(home_dir, current_session_id)
+        if existing_memory and existing_memory.strip():
+            header = (
+                "═══════════════════════════════════════\n"
+                f" Current Session (library/{current_session_id}.txt)\n"
+                "═══════════════════════════════════════"
+            ) if is_en else (
+                "═══════════════════════════════════════\n"
+                f" 当前会话 (library/{current_session_id}.txt)\n"
+                "═══════════════════════════════════════"
+            )
+            parts.append(header + "\n" + existing_memory.strip())
+
+    return "\n\n".join(parts) if parts else ("No historical memory" if is_en else "无历史记忆")

@@ -123,7 +123,8 @@ def read_config_file(path: str, default: Any = None) -> Any:
     init_config_dir()
     if not os.path.exists(path):
         default_val = DEFAULT_CONFIGS.get(path, default)
-        log_info(_get_msg(f"配置文件不存在，使用默认值：{os.path.basename(path)} = {default_val}", f"Config file not found, using default: {os.path.basename(path)} = {default_val}"), str(uuid.uuid4()))
+        log_info(f"配置文件不存在，使用默认值：{os.path.basename(path)} = {default_val} | Config file not found, using default: {os.path.basename(path)} = {default_val}", str(uuid.uuid4()))
+        _auto_create_config(path, default_val)
         return default_val
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -135,6 +136,17 @@ def read_config_file(path: str, default: Any = None) -> Any:
             return content
     except Exception:
         return default
+
+def _auto_create_config(path: str, default_val: Any) -> None:
+    """自动创建缺失的配置文件，写入默认值"""
+    try:
+        config_dir = os.path.dirname(path)
+        if not os.path.exists(config_dir):
+            os.makedirs(config_dir, mode=DEFAULT_DIR_MODE)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(str(default_val).lower())
+    except Exception:
+        pass
 
 def write_config_file(path: str, value: Any) -> bool:
     init_config_dir()

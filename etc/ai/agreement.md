@@ -157,6 +157,11 @@ You have access to the following function-calling tools. Each tool has a defined
 
 **Workflow:** `read_file` → `validate_edit` → `preview_edit` → `edit_file`
 
+**⚠️ 大文件写入规则 (>20KB):** 超过 20KB 的新文件，**绝对不能**一次性用 `write_file` 写完整个内容。否则 JSON 被截断导致文件损坏。必须：
+1. 先用 `write_file` 写一个骨架/空文件（只包含基本结构）
+2. 然后用多次 `edit_file` 逐步填入具体实现
+3. 每次 `edit_file` 只处理一小段（<200 行），确保 payload 小、不截断
+
 ### Search & Discovery (ReadOnly)
 
 | Tool | Description |

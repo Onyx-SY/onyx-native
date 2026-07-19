@@ -4,50 +4,182 @@
     "name": "深度求索DeepSeek",
     "api_url": "https://api.deepseek.com/v1/chat/completions",
     "stream_format": "openai",
-    "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
-    "default_model": "deepseek-v4-flash",
-    "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
-    "thinking": {"type": "disabled"},
+    "models": [
+      "deepseek-v4-pro",
+      "deepseek-v4-flash",
+      "deepseek-v4.5-lite",
+      "deepseek-v4.5-max",
+      "deepseek-reasoner-r1",
+      "deepseek-code-v2"
+    ],
+    "default_model": "deepseek-v4.5-max",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 8192
+    },
+    "thinking": {
+      "type": "enable"
+    },
     "reasoning_effort": "high"
   },
   "openai": {
     "name": "OpenAI",
     "api_url": "https://api.openai.com/v1/chat/completions",
     "stream_format": "openai",
-    "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-    "default_model": "gpt-5.5-instant",
-    "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 131072}
+    "models": [
+      "gpt-5.5",
+      "gpt-5.5-instant",
+      "gpt-5.5-pro",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.7-ultra",
+      "o4-mini",
+      "o4-preview"
+    ],
+    "default_model": "gpt-5.6-terra",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 131072
+    }
   },
   "anthropic": {
     "name": "Anthropic",
     "api_url": "https://api.anthropic.com/v1/messages",
     "stream_format": "anthropic",
-    "models": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"],
-    "default_model": "claude-sonnet-4-6",
-    "params": {"max_tokens": 65536}
+    "models": [
+      "claude-sonnet-4-6",
+      "claude-opus-4-8",
+      "claude-fable-5",
+      "claude-mythos-5",
+      "claude-opus-5",
+      "claude-sonnet-5-fast"
+    ],
+    "default_model": "claude-opus-5",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 65536
+    }
   },
   "kimi": {
     "name": "月之暗面Kimi",
     "api_url": "https://api.moonshot.cn/v1/chat/completions",
     "stream_format": "openai",
-    "models": ["moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k", "kimi-k2.6", "kimi-k2.7"],
-    "default_model": "moonshot-v1-128k",
-    "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192}
+    "models": [
+      "moonshot-v1-8k",
+      "moonshot-v1-32k",
+      "moonshot-v1-128k",
+      "moonshot-v1-1024k",
+      "kimi-k2.6",
+      "kimi-k2.7",
+      "kimi-k3.0-ultra"
+    ],
+    "default_model": "kimi-k3.0-ultra",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 131072
+    }
   },
   "glm": {
     "name": "智谱GLM",
     "api_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     "stream_format": "openai",
-    "models": ["glm-4-long", "glm-4-flash", "glm-4-air", "glm-4-plus", "glm-5", "glm-5.3"],
-    "default_model": "glm-4-air",
-    "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192}
+    "models": [
+      "glm-4-air",
+      "glm-4-plus",
+      "glm-4-flash",
+      "glm-4-long",
+      "glm-5",
+      "glm-5.3",
+      "glm-5.5-turbo",
+      "glm-5.5-max",
+      "glm-code"
+    ],
+    "default_model": "glm-5.5-max",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 8192
+    }
   },
   "qwen": {
     "name": "通义千问qwen",
     "api_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
     "stream_format": "openai",
-    "models": ["qwen-long", "qwen-turbo", "qwen3.5-plus", "qwen3.6-plus", "qwen3-max", "qwen3.7-max"],
-    "default_model": "qwen3.5-plus",
-    "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192}
+    "models": [
+      "qwen-turbo",
+      "qwen-long",
+      "qwen3.5-plus",
+      "qwen3.6-plus",
+      "qwen3-max",
+      "qwen3.7-max",
+      "qwen4-lite",
+      "qwen4-pro",
+      "qwen4-ultra",
+      "qwen-code-v2"
+    ],
+    "default_model": "qwen4-ultra",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 131072
+    }
+  },
+  "doubao": {
+    "name": "字节跳动豆包Doubao",
+    "api_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+    "stream_format": "openai",
+    "models": [
+      "doubao-lite-32k",
+      "doubao-pro-128k",
+      "doubao-ultra-256k",
+      "doubao-reasoner",
+      "doubao-code"
+    ],
+    "default_model": "doubao-ultra-256k",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 131072
+    }
+  },
+  "yi": {
+    "name": "零一万物Yi",
+    "api_url": "https://api.lingyiwanwu.com/v1/chat/completions",
+    "stream_format": "openai",
+    "models": [
+      "yi-lightning",
+      "yi-medium",
+      "yi-large",
+      "yi-vision-max"
+    ],
+    "default_model": "yi-large",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 8192
+    }
+  },
+  "llama": {
+    "name": "Meta Llama",
+    "api_url": "https://api.llama-api.com/chat/completions",
+    "stream_format": "openai",
+    "models": [
+      "llama3-8b",
+      "llama3-70b",
+      "llama3.1-405b",
+      "llama4-maverick",
+      "llama4-sage"
+    ],
+    "default_model": "llama4-sage",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 8192
+    }
   }
 }

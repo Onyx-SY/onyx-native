@@ -18,6 +18,15 @@
       ".pyc",
       ".so"
     ],
+    "macOS": [
+      ".sh",
+      ".bin",
+      ".run",
+      "",
+      ".py",
+      ".pyc",
+      ".so"
+    ],
     "Termux": [
       ".sh",
       ".bin",
@@ -42,6 +51,7 @@
   "launch_cmd": {
     "Windows": "start \"\"",
     "Linux/macOS": "./",
+    "macOS": "./",
     "Termux": "./",
     "SpecialLinux": "./"
   },

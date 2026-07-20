@@ -46,7 +46,7 @@ def load_tool_config(ctx: "AppContext", tool_dir: str) -> Dict[str, str]:
                         f.write(f"{prefix}{tool_config[key]}\n")
                 if "main" not in config_fields:
                     f.write(f"#main=\n")
-            if ctx.sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+            if ctx.sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
                 os.chmod(config_file, 0o644)
             log_info(f"工具配置文件创建：{config_file}", str(uuid.uuid4()))
         except Exception as e:
@@ -85,7 +85,7 @@ def get_tool_permission_from_dir(ctx: "AppContext", tool_dir: str) -> int:
         else:
             with open(perm_file, "w", encoding="utf-8") as f:
                 f.write("3")
-            if ctx.sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+            if ctx.sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
                 os.chmod(perm_file, 0o600)
             return 3
     except Exception as e:

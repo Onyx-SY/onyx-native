@@ -30,6 +30,19 @@ from .mcp_state import _AI_INTERRUPTED, _MCP_DEBUG_START
 from .mcp_state import _mcp_debug as _mcp_debug_fn
 
 
+def _convert_tools_for_anthropic(openai_tools: list) -> list:
+    """将 OpenAI function calling 格式转换为 Anthropic tool use 格式。"""
+    result = []
+    for t in openai_tools:
+        func = t.get("function", t)
+        result.append({
+            "name": func.get("name", ""),
+            "description": func.get("description", ""),
+            "input_schema": func.get("parameters", {}),
+        })
+    return result
+
+
 def call_ai_api_sse(question: str = "", type: Optional[str] = None,
                     new_key: Optional[str] = None,
                     debug_mode: bool = False, onyx_module=None,
@@ -113,18 +126,17 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
 
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M')
 
-    system_label = "System" if lang == "english" else "系统"
-    env_label = "Environment" if lang == "english" else "环境"
-    user_label = "User" if lang == "english" else "用户"
-    permission_label = "Permission" if lang == "english" else "权限"
-    workdir_label = "Working directory" if lang == "english" else "工作目录"
-    language_label = "Language" if lang == "english" else "语言"
-    time_label = "Current time" if lang == "english" else "当前时间"
-    tools_label = "Available tools" if lang == "english" else "可用工具列表"
-    task_label = "Task" if lang == "english" else "任务"
+    system_label = "System"
+    env_label = "Environment"
+    user_label = "User"
+    permission_label = "Permission"
+    workdir_label = "Working directory"
+    language_label = "Language"
+    time_label = "Current time"
+    tools_label = "Available tools"
+    task_label = "Task"
 
     permission_value = "root administrator" if USER == "root" else "regular user"
-    permission_value_cn = "root管理员" if USER == "root" else "普通用户"
     current_shell = os.environ.get("SHELL", "unknown")
     onyx_mode = "unknown"
     if onyx_module and hasattr(onyx_module, "user_mode"):
@@ -147,14 +159,14 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
 Shell: {current_shell}
 Onyx Mode: {onyx_mode}
 {language_label}: {get_current_lang()}
-#可用工具（{tool_count}）
+#Available tools ({tool_count})
 {chr(10).join(tool_list)}
 {ai_tools_prompt}"""
 
-    _dynamic_suffix = f"""#当前时间: {current_time}
-#工作目录: {os.getcwd()}
-#持久记忆
-{onyx_ai_prompt if onyx_ai_prompt else '(暂无)'}
+    _dynamic_suffix = f"""#Current time: {current_time}
+#Working directory: {os.getcwd()}
+#Persistent memory
+{onyx_ai_prompt if onyx_ai_prompt else '(none)'}
 {mood_context()}
 #{task_label}
 {question}"""
@@ -238,6 +250,12 @@ Onyx Mode: {onyx_mode}
             "messages": [{"role": "user", "content": user_content}],
             "stream": True,
         }
+        if p.get("temperature") is not None:
+            payload["temperature"] = p["temperature"]
+        if p.get("top_p") is not None:
+            payload["top_p"] = p["top_p"]
+        if tools:
+            payload["tools"] = _convert_tools_for_anthropic(tools)
     else:
         payload = {
             "model": model,
@@ -280,25 +298,37 @@ Onyx Mode: {onyx_mode}
             )
             _mcp_debug_fn(f"HTTP response: {response.status_code}")
 
-            if response.status_code == 400:
+            if response.status_code in (400, 422):
                 _detail = response.text[:500]
-                _mcp_debug_fn(f"HTTP 400 body: {_detail}")
-                return {"error": f"请求参数错误 (400): {_detail}", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+                _mcp_debug_fn(f"HTTP {response.status_code} body: {_detail}")
+                # 400/422 可能是临时状态问题，等待后重试
+                last_error = f"请求参数错误 ({response.status_code})"
+                if retry < max_retries - 1:
+                    _wait = base_delay * (retry + 1)
+                    _mcp_debug_fn(f"将在 {_wait}s 后重试 (attempt {retry+1}/{max_retries})")
+                    time.sleep(_wait)
+                    continue
+                return {"error": f"请求参数错误 ({response.status_code}): {_detail}", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code == 401:
                 return {"error": "API key 无效 (401)", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code == 402:
                 return {"error": "⚠️ API 余额不足 (402)，请充值后重试 | Insufficient balance, please top up", "answer": "no", "ask": "", "txt": "", "analysis": ""}
-            if response.status_code == 422:
-                detail = ""
-                try:
-                    detail = f": {response.json().get('message', response.text[:200])}"
-                except Exception:
-                    detail = f": {response.text[:200]}"
-                return {"error": f"请求参数错误 (422){detail}", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code == 429:
+                last_error = "请求过于频繁 (429)"
+                if retry < max_retries - 1:
+                    _wait = base_delay * (retry + 1) * 2
+                    _mcp_debug_fn(f"429 限流，等待 {_wait}s 后重试")
+                    time.sleep(_wait)
+                    continue
                 return {"error": "请求过于频繁 (429)，请稍后再试 | Rate limit reached, please retry later", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code in (500, 502, 503):
-                return {"error": f"AI 服务暂时不可用 ({response.status_code})，正在重试…", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+                last_error = f"AI 服务暂时不可用 ({response.status_code})"
+                if retry < max_retries - 1:
+                    _wait = base_delay * (retry + 1) * 3
+                    _mcp_debug_fn(f"{response.status_code} 服务不可用，等待 {_wait}s 后重试")
+                    time.sleep(_wait)
+                    continue
+                return {"error": f"AI 服务暂时不可用 ({response.status_code})，请稍后再试", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             response.raise_for_status()
 
             response.encoding = 'utf-8'
@@ -306,6 +336,7 @@ Onyx Mode: {onyx_mode}
             debug_lines = []
             _usage = {}
             _tool_calls_acc: Dict[int, Dict] = {}
+            _anthropic_tool_acc: Dict[int, Dict] = {}
             _reasoning_display: List[str] = []
 
             if stream_fmt == "openai":
@@ -368,6 +399,7 @@ Onyx Mode: {onyx_mode}
                     except json.JSONDecodeError:
                         continue
             else:
+                # Anthropic SSE 格式解析，支持 tool_use
                 for line in response.iter_lines(decode_unicode=True):
                     if _AI_INTERRUPTED:
                         response.close()
@@ -379,17 +411,59 @@ Onyx Mode: {onyx_mode}
                         chunk = json.loads(data_str)
                         if not isinstance(chunk, dict):
                             continue
-                        if chunk.get("type") == "content_block_delta":
+                        ctype = chunk.get("type", "")
+
+                        if ctype == "content_block_start":
+                            cb = chunk.get("content_block", {})
+                            if not isinstance(cb, dict):
+                                continue
+                            if cb.get("type") == "tool_use":
+                                idx = chunk.get("index", 0)
+                                _anthropic_tool_acc[idx] = {
+                                    "id": cb.get("id", ""),
+                                    "name": cb.get("name", ""),
+                                    "input_json": "",
+                                }
+                                if on_tool_call:
+                                    on_tool_call(cb.get("name", ""))
+                            elif cb.get("type") == "text":
+                                text = cb.get("text", "")
+                                if text:
+                                    full_content += text
+                                    if on_content:
+                                        on_content(text)
+
+                        elif ctype == "content_block_delta":
                             delta = chunk.get("delta", {})
                             if not isinstance(delta, dict):
                                 continue
-                            text = delta.get("text", "")
-                            if text:
-                                full_content += text
-                                if on_content:
-                                    on_content(text)
-                        elif chunk.get("type") == "message_stop":
+                            dtype = delta.get("type", "")
+                            if dtype == "text_delta":
+                                text = delta.get("text", "")
+                                if text:
+                                    full_content += text
+                                    if on_content:
+                                        on_content(text)
+                            elif dtype == "input_json_delta":
+                                idx = chunk.get("index", 0)
+                                partial = delta.get("partial_json", "")
+                                if idx in _anthropic_tool_acc:
+                                    _anthropic_tool_acc[idx]["input_json"] += partial
+
+                        elif ctype == "content_block_stop":
+                            pass
+
+                        elif ctype == "message_delta":
+                            _mdelta = chunk.get("delta", {})
+                            if isinstance(_mdelta, dict) and _mdelta.get("stop_reason") == "tool_use":
+                                pass  # 工具调用将在循环结束后处理
+                            usage_info = chunk.get("usage")
+                            if usage_info:
+                                _usage = usage_info
+
+                        elif ctype == "message_stop":
                             break
+
                     except json.JSONDecodeError:
                         continue
 
@@ -419,6 +493,25 @@ Onyx Mode: {onyx_mode}
                         args = tc["function"]["arguments"]
                     native_tools.append({
                         "name": tc['function']['name'],
+                        "params_str": json.dumps(args) if isinstance(args, dict) else str(args),
+                        "_native": True,
+                    })
+                existing = result.get("tool_calls", [])
+                if not isinstance(existing, list):
+                    existing = []
+                result["tool_calls"] = existing + native_tools
+
+            # 同样处理 Anthropic tool_use 格式的累积结果
+            if _anthropic_tool_acc:
+                native_tools = []
+                for idx in sorted(_anthropic_tool_acc.keys()):
+                    tc = _anthropic_tool_acc[idx]
+                    try:
+                        args = json.loads(tc["input_json"]) if tc["input_json"] else {}
+                    except (json.JSONDecodeError, ValueError):
+                        args = tc["input_json"]
+                    native_tools.append({
+                        "name": tc["name"],
                         "params_str": json.dumps(args) if isinstance(args, dict) else str(args),
                         "_native": True,
                     })

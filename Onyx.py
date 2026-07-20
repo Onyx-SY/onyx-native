@@ -890,7 +890,7 @@ def init_user_cmd_cli_file() -> None:
             with open(cli_file_path, "w", encoding="utf-8") as f:
                 f.write(default_cmds)
             # 设置文件权限（仅所有者可读写）
-            if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+            if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
                 os.chmod(cli_file_path, 0o600)
             log_info(f"初始化交互式命令配置文件：{cli_file_path}", user_info["session_id"])
         except Exception as e:
@@ -1300,7 +1300,7 @@ def detect_system() -> str:
     elif sys.platform.startswith("win32"):
         return "Windows"
     elif sys.platform.startswith("darwin"):
-        return "Linux/macOS"
+        return "macOS"
     else:
         if os.path.exists("/etc/os-release"):
             with open("/etc/os-release", "r") as f:
@@ -1338,7 +1338,7 @@ def init_sandbox_config() -> None:
     # 2. 配置文件不存在，根据系统类型决定行为
     sys_type_local = detect_system()
     is_root = False
-    if sys.platform.startswith("linux") or "termux" in sys.prefix.lower():
+    if sys.platform.startswith("linux") or sys.platform == "darwin" or "termux" in sys.prefix.lower():
         try:
             is_root = (os.geteuid() == 0)
         except:
@@ -1377,7 +1377,7 @@ def init_sandbox_config() -> None:
         try:
             with open(_SANDBOX_CONFIG_PATH, "w", encoding="utf-8") as f:
                 f.write("true")
-            if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+            if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
                 os.chmod(_SANDBOX_CONFIG_PATH, 0o644)
             log_info(f"沙箱配置已保存：{_SANDBOX_CONFIG_PATH} -> {_SANDBOX_ENABLED}", str(uuid.uuid4()))
         except Exception as e:
@@ -1414,7 +1414,7 @@ def init_sandbox_config() -> None:
     try:
         with open(_SANDBOX_CONFIG_PATH, "w", encoding="utf-8") as f:
             f.write("true" if _SANDBOX_ENABLED else "false")
-        if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+        if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
             os.chmod(_SANDBOX_CONFIG_PATH, 0o644)
         log_info(f"沙箱配置已保存：{_SANDBOX_CONFIG_PATH} -> {_SANDBOX_ENABLED}", str(uuid.uuid4()))
     except Exception as e:
@@ -1427,7 +1427,7 @@ def check_admin_permission() -> None:
     try:
         is_admin = False
         # 强制实时检测 root 身份（禁用缓存）
-        if sys.platform.startswith("linux") or "termux" in sys.prefix.lower():
+        if sys.platform.startswith("linux") or sys.platform == "darwin" or "termux" in sys.prefix.lower():
             # 直接调用 os.geteuid()，不依赖任何缓存
             is_admin = os.geteuid() == 0
         elif sys.platform.startswith("win32"):
@@ -2161,29 +2161,30 @@ def handle_exit(cmd_parts: List[str], request_id: str) -> None:
 
 
 
-def handle_run(cmd_parts: List[str], request_id: str) -> None:
-    """脚本执行命令（同步执行+无额外提示，调用独立模块）"""
-    from bin.run_cmd import handle_run_core
-    handle_run_core(
-        cmd_parts=cmd_parts,
-        request_id=request_id,
-        ROOT_DIR=ROOT_DIR,
-        USER_HOME_DIR=USER_HOME_DIR,
-        OS_OR_TBS=OS_OR_TBS,
-        sys_type=sys_type,
-        SUPPORTED_EXEC_SUFFIXES=SUPPORTED_EXEC_SUFFIXES,
-        executable_config=executable_config,
-        resolve_path=resolve_path,
-        get_virtual_path=get_virtual_path,
-        check_sandbox_path=check_sandbox_path,
-        validate_param_path=validate_param_path,
-        run_cmd_sync=run_cmd_sync,  # 改为同步执行函数
-        PYTHON_EXE=PYTHON_EXE,
-        log_info=log_info,
-        log_error=log_error,
-        Fore=Fore,
-        Style=Style
-    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -2448,7 +2449,7 @@ def save_autocmd() -> None:
         with open(AUTO_CMD_PATH, "w", encoding="utf-8") as f:
             json.dump(AUTO_CMDS, f, ensure_ascii=False, indent=2)
         # Linux类系统设置文件权限（仅所有者可读写）
-        if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+        if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
             os.chmod(AUTO_CMD_PATH, 0o600)
         log_info(f"保存开机自启命令：共{len(AUTO_CMDS)}条", user_info["session_id"])
     except Exception as e:
@@ -2490,7 +2491,6 @@ BUILTIN_COMMANDS: Dict[str, Callable[[List[str], str], None]] = {
     # 基础TBS命令
     "clear": handle_clear,
     "exit": handle_exit,
-    "run": handle_run,
     "refresh": lambda cmd_parts, req_id: executor.submit(build_tool_index, req_id) if executor else None,
     
     "activite": handle_activite,
@@ -2822,7 +2822,7 @@ def check_and_create_system_rc() -> None:
                 f.write("# Onyx System RC File\n")
                 
             # 设置文件权限
-            if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+            if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
                 os.chmod(rc_path, 0o644)
             
             log_info(f"创建系统级 onyxrc 文件：{rc_path}", user_info["session_id"])
@@ -2841,7 +2841,7 @@ def check_and_create_user_rc() -> None:
 
             
             # 设置文件权限
-            if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+            if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
                 os.chmod(rc_path, 0o600)
             
             log_info(f"创建用户级 .onyxrc 文件：{rc_path}", user_info["session_id"])
@@ -3008,7 +3008,7 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
             with open(timings_file, "w", encoding="utf-8") as f:
                 json.dump(timings_data, f, ensure_ascii=False, indent=2)
             
-            if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+            if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
                 os.chmod(timings_file, 0o600)
             
             log_info(f"初始化计时已保存: {timings_file} (总耗时: {total_elapsed*1000:.2f}ms)", request_id)
@@ -3259,31 +3259,25 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
             handle_manage(["manage", "-q"], request_id)
         record_step("30.handle_manage")
 
-        # 20.5 PTY 后台预热，用户输命令时 shell 已 ready
-        if not oneshot:
-            from lib.terminal.exe import warmup_persistent_shell
-            warmup_persistent_shell()
-        record_step("31.pty_warmup")
-
-        record_step("32.init_oppath")
+        record_step("31.init_oppath")
 
         # 21. 加载自启命令
         load_autocmd()
-        record_step("33.load_autocmd")
+        record_step("32.load_autocmd")
         
         if not oneshot and AUTO_CMDS and global_config.get("user_config", {}).get("enable_autocmd", True):
             for cmd_info in AUTO_CMDS:
                 auto_req_id = str(uuid.uuid4())
                 log_info(f"执行自启命令 (ID: {cmd_info['id']}): {cmd_info['cmd']}", auto_req_id)
                 parse_and_execute(cmd_info["cmd"])
-        record_step("34.execute_autocmd")
+        record_step("33.execute_autocmd")
 
         # 22. RC 文件创建
         check_and_create_system_rc()
-        record_step("35.check_and_create_system_rc")
+        record_step("34.check_and_create_system_rc")
         
         check_and_create_user_rc()
-        record_step("36.check_and_create_user_rc")
+        record_step("35.check_and_create_user_rc")
         
         # ========== 保存计时结果 ==========
         save_init_timings()

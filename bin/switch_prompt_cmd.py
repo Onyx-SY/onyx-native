@@ -45,7 +45,7 @@ def save_prompt_config(PROMPT_STORAGE_PATH: str, template_name: str, sys_type: s
         with open(PROMPT_STORAGE_PATH, "w", encoding="utf-8") as f:
             f.write(template_name)
         
-        if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+        if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
             os.chmod(PROMPT_STORAGE_PATH, 0o600)
         
         log_info(f"已保存提示符模板：{template_name}", request_id)

@@ -47,7 +47,7 @@ def save_autocmd_core(AUTO_CMD_PATH: str, AUTO_CMDS: List[Dict[str, Any]], sys_t
         with open(AUTO_CMD_PATH, "w", encoding="utf-8") as f:
             json.dump(AUTO_CMDS, f, ensure_ascii=False, indent=2)
         # Linux类系统设置文件权限（仅所有者可读写）
-        if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+        if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
             os.chmod(AUTO_CMD_PATH, 0o600)
         log_info(f"保存开机自启命令：共{len(AUTO_CMDS)}条", request_id)
     except Exception as e:

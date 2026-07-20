@@ -129,6 +129,22 @@ def _detect_terminal_type() -> str:
     except Exception:
         pass
     
+    # macOS 备用：通过 ps 获取父进程 shell 类型
+    if sys.platform == "darwin":
+        try:
+            import subprocess as _sp
+            result = _sp.run(
+                ["ps", "-o", "comm=", "-p", str(os.getppid())],
+                capture_output=True, text=True, timeout=3
+            )
+            parent_cmd = result.stdout.strip().lower()
+            parent_name = os.path.basename(parent_cmd) if "/" in parent_cmd else parent_cmd
+            if parent_name in ['bash', 'zsh', 'fish', 'sh', 'dash']:
+                if shutil.which(parent_name):
+                    return parent_name
+        except Exception:
+            pass
+    
     # 默认返回 sh
     return 'sh'
 

@@ -163,7 +163,7 @@ def handle_import_core(
             with open(user_mapping_path, "w", encoding="utf-8") as f:
                 json.dump(user_mapping, f, ensure_ascii=False, indent=2)
             # Linux类系统设置权限（仅所有者可读写）
-            if sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+            if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
                 os.chmod(user_mapping_path, 0o600)
             
             log_info(msg["log_create_file"].format(path=user_mapping_path), request_id)

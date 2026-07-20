@@ -19,8 +19,6 @@ import secrets
 from typing import List, Tuple, Optional, Dict, Any, Callable
 
 # ── 自研文件编辑系统 ──
-from lib.native_fs.markup_parser import parse_markup as _parse_markup
-from lib.native_fs import process_blocks as _process_native_blocks
 from datetime import datetime, timedelta
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import Completer, Completion
@@ -77,6 +75,29 @@ from .ai_lib.storage import (
     get_ai_session_library_dir, get_latest_ai_session,
     load_memory_by_uuid, record_ai_session,
 )
+
+# ── 任务管理系统 ──
+from lib.task_system import (
+    TaskRegistry, TeamRegistry, CronRegistry,
+    TaskPacket, TaskScope, TaskResource, TaskStatus,
+    validate_packet, packet_to_dict, dict_to_packet,
+)
+
+# ── LSP 客户端 ──
+from lib.lsp_client import LspManager, LspAction
+
+# ── 恢复配方 ──
+from lib.recovery_recipes import (
+    RecoveryContext, classify_failure, get_recovery_message, record_attempt,
+    FailureScenario, RecoveryAction,
+)
+from lib.approval_tokens import (
+    ApprovalTokenLedger, ApprovalScope,
+)
+
+# ── 记忆查询缓存（避免重复查询）──
+_MEMORY_QUERY_CACHE: dict[str, str] = {}
+_MEMORY_CACHE_MAX = 50
 
 # （解析函数已移至 bin/ai_lib/parsers.py）
 from .ai_lib.parsers import parse_sse_structured_response, _parse_ai_raw_response, _parse_legacy_shell
@@ -1049,14 +1070,9 @@ def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> 
         return ""
 
     lines = []
-    if lang == "chinese":
-        lines.append("## 非文件工具（MCP 兜底）")
-        lines.append("调用格式: [tool:<工具名>] 换行 JSON参数 换行 [tool:<工具名>:done]")
-        lines.append("参数必须是合法 JSON。")
-    else:
-        lines.append("## Non-file Tools (MCP Fallback)")
-        lines.append("Call format: [tool:<name>] newline JSON-args newline [tool:<name>:done]")
-        lines.append("Arguments MUST be valid JSON.")
+    lines.append("## Non-file Tools (Function Calling)")
+    lines.append("All tools use standard function calling (tool_calls). Do NOT use [tool:...] text format.")
+    lines.append("The tools are already in your API function calling list — call them directly.")
 
     lines.append("")
 
@@ -1071,121 +1087,55 @@ def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> 
         # 构建 JSON 参数说明
         param_entries = []
         for pname, pinfo in props.items():
-            req_mark = " (必填)" if pname in required else ""
+            req_mark = " (required)" if pname in required else ""
             ptype = pinfo.get("type", "string")
             pdesc = pinfo.get("description", "")
             param_entries.append(f'    "{pname}": {{{{ {ptype} }}}}{req_mark} — {pdesc}')
 
         lines.append(f"- **{full_name}**: {desc}")
         if param_entries:
-            if lang == "chinese":
-                lines.append("  JSON 参数:")
-            else:
-                lines.append("  JSON params:")
+            lines.append("  params:")
             lines.extend(param_entries)
 
-        # edit_file 特殊：SEARCH/REPLACE
-        if raw_name == "edit_file":
-            if lang == "chinese":
-                lines.append('  使用 SEARCH/REPLACE: "old_string" 精确匹配且唯一, "new_string" 替换文本')
-            else:
-                lines.append('  SEARCH/REPLACE: "old_string" exact+unique match, "new_string" replacement')
-
-        # 示例
-        if raw_name == "read_file":
-            lines.append(f'  示例: [tool:{full_name}]\n  {{"path": "/home/user/test.py"}}\n  [tool:{full_name}:done]')
-        elif raw_name == "write_file":
-            lines.append(f'  示例: [tool:{full_name}]\n  {{"path": "/home/u/out.txt", "content": "hello"}}\n  [tool:{full_name}:done]')
-        elif raw_name == "edit_file":
-            lines.append(f'  示例: [tool:{full_name}]\n  {{"path": "/a.py", "old_string": "return a+b", "new_string": "return a+b+1"}}\n  [tool:{full_name}:done]')
-        else:
-            lines.append(f'  示例: [tool:{full_name}]\n  {{"param": "value"}}\n  [tool:{full_name}:done]')
-
         lines.append("")
-
-    # ── 分块提示（原生标记语言场景）──
-    if lang == "chinese":
-        lines.append("📐 **大文件操作建议**")
-        lines.append("- 超过 200 行的文件，修改超过 70% 时直接用 `[WRITE:]` 全量重写")
-        lines.append("- 局部修改用 `[EDIT:path:N-M]` 行号替换，省 Token 且不出错")
-        lines.append("- 每个 `[EDIT:]` 的 SEARCH 块不超过 50 行")
-    else:
-        lines.append("📐 **Large File Tips**")
-        lines.append("- Over 200 lines & >70% change → use `[WRITE:]` to rewrite entirely")
-        lines.append("- Local changes → `[EDIT:path:N-M]` line-range replacement (cheaper, safer)")
-        lines.append("- Each `[EDIT:]` SEARCH block ≤ 50 lines")
-    lines.append("")
 
     result = "\n".join(lines)
     _mcp_debug_exit("build_mcp_tools_prompt", ok=len(tools) > 0, detail=f"{len(tools)} tools, {len(result)} chars")
     return result
 
 
-def build_native_tools_prompt(lang: str = "chinese") -> str:
-    """
-    构建注入给 AI 的工具说明。
-    文件操作使用 function calling（read_file/edit_file/write_file/validate_edit/preview_edit）
-    TXT/ANALYSIS/PLAN/ASK/@@SHELL 仍使用原生标记语言。
-    """
+def build_native_tools_prompt() -> str:
+    """Build AI tool guide — pure English, function calling only."""
     lines = []
-    if lang == "chinese":
-        lines.append("## 文件操作（Function Calling）")
-        lines.append("文件读写编辑使用标准 function calling 工具，通过 tool_calls 调用。")
-        lines.append("注意：工具名是 `read_file`/`edit_file`/`write_file`，不要加 `mcp_` 或 `mcp__filesystem__` 前缀。")
-        lines.append("")
-        lines.append("### 可用工具")
-        lines.append("- `get_file_info(path)` — 获取文件信息（大小/行数/修改时间）")
-        lines.append("- `read_file(path, range?)` — 读取文件，range='10-30' 指定行范围")
-        lines.append("- `edit_file(path, old_string, new_string)` — SEARCH/REPLACE 精确替换")
-        lines.append("- `write_file(path, content)` — 创建/覆盖文件")
-        lines.append("- `validate_edit(file_path, search, replace)` — 校验 SEARCH 存在且唯一")
-        lines.append("- `preview_edit(file_path, search, replace)` — 预览 diff")
-        lines.append("")
-        lines.append("### 操作原则")
-        lines.append("1. **先查后改**：先 `get_file_info` 了解文件概况，再 `read_file` 看具体内容")
-        lines.append("2. **优先用 edit_file**：局部修改用 `edit_file`，只有新建文件或超 70% 改动才用 `write_file`")
-        lines.append("3. **超过 20KB 的新文件：先骨架后血肉**：先用 `write_file` 创建骨架，再用多次 `edit_file` 逐步填入具体实现")
-        lines.append("4. **先校验再编辑**：每次 `edit_file` 前先调 `validate_edit` 校验")
-        lines.append("5. **唯一锚点**：`edit_file` 的 old_string 必须逐字节匹配且唯一")
-        lines.append("6. **Shell 优先**：ls/cat/grep/find 能用 `@@SHELL` 解决的就不用读文件")
-        lines.append("")
-        lines.append("### 计划工具")
-        lines.append("- `submit_plan(plan, steps?)` — 提交计划给用户确认，steps 是结构化步骤数组")
-        lines.append("- `mark_step_complete(step_id)` — 完成一步后标记进度")
-        lines.append("")
-        lines.append("> TXT/ANALYSIS/ASK/@@SHELL 仍使用原生标记语言")
-    else:
-        lines.append("## File Operations (Function Calling)")
-        lines.append("Use standard function calling tools for file read/write/edit.")
-        lines.append("")
-        lines.append("### Available Tools")
-        lines.append("- `get_file_info(path)` — Get file info (size/lines/mtime)")
-        lines.append("- `read_file(path, range?)` — Read file, range='10-30' for line range")
-        lines.append("- `edit_file(path, old_string, new_string)` — SEARCH/REPLACE edit")
-        lines.append("- `write_file(path, content)` — Create/overwrite file")
-        lines.append("- `validate_edit(file_path, search, replace)` — Validate SEARCH exists & unique")
-        lines.append("- `preview_edit(file_path, search, replace)` — Preview diff")
-        lines.append("")
-        lines.append("### Guidelines")
-        lines.append("1. **Check first**: `get_file_info` then `read_file` before editing")
-        lines.append("2. **Prefer edit_file**: local changes → `edit_file`; new file or >70% change → `write_file`")
-        lines.append("3. **Large file chunking**: for new files >20KB, create skeleton with `write_file` then fill with multiple `edit_file` calls")
-        lines.append("4. **Validate before edit**: Always call `validate_edit` before `edit_file`")
-        lines.append("5. **Unique anchor**: `edit_file` old_string must be byte-exact and unique")
-        lines.append("6. **Shell first**: use `@@SHELL` for ls/cat/grep/find when possible")
-        lines.append("")
-        lines.append("> TXT/ANALYSIS/PLAN/ASK/@@SHELL still use native markup language")
-
-        lines.append("### Guidelines")
-        lines.append("- Shell first: use ls/cat/grep/find when possible")
-        lines.append("- View first: `[VIEW:]` before editing")
-        lines.append("- Unique anchor: SEARCH text must be byte-exact and unique")
-        lines.append("- On SEARCH failure, system returns closest line numbers — fix whitespace and retry")
-        lines.append("- Color panels auto-show: green=new, red=deleted, blue=reading")
-        lines.append("")
-        lines.append("> File operations → Native markup (plain text, no JSON)")
-        lines.append("> Non-file operations → MCP protocol (fallback)")
-
+    lines.append("## File Operations (Function Calling)")
+    lines.append("Use standard function calling tools for file read/write/edit.")
+    lines.append("")
+    lines.append("### Available Tools")
+    lines.append("- `get_file_info(path)` — Get file info (size/lines/mtime)")
+    lines.append("- `read_file(path, range?)` — Read file, range='10-30' for line range")
+    lines.append("- `edit_file(path, old_string, new_string)` — SEARCH/REPLACE edit")
+    lines.append("- `write_file(path, content)` — Create/overwrite file")
+    lines.append("- `validate_edit(file_path, search, replace)` — Validate SEARCH exists and unique")
+    lines.append("- `preview_edit(file_path, search, replace)` — Preview diff")
+    lines.append("")
+    lines.append("### Guidelines")
+    lines.append("1. **Check first**: Call `get_file_info` then `read_file` before editing")
+    lines.append("2. **Prefer edit_file**: Local changes → `edit_file`; new file or >70% change → `write_file`")
+    lines.append("3. **Large file chunking**: Files >20KB: create skeleton with `write_file`, fill with multiple `edit_file` calls")
+    lines.append("4. **Validate before edit**: Always call `validate_edit` before `edit_file`")
+    lines.append("5. **Unique anchor**: `edit_file` old_string must be byte-exact and unique")
+    lines.append("6. **Shell first**: use `@@SHELL` for ls/cat/grep/find when possible")
+    lines.append("")
+    lines.append("### Planning Tools")
+    lines.append("- `submit_plan(plan, steps?)` — Submit plan for user approval; steps can be structured")
+    lines.append("- `mark_step_complete(step_id)` — Mark one step done after completion")
+    lines.append("- `TodoWrite(todos)` — Track in-session task list for multi-step work")
+    lines.append("")
+    lines.append("### Communication Tools")
+    lines.append("- `choose_ask(question, options)` — Present options to user when uncertain")
+    lines.append("- `Skill(name, args?)` — Load a reusable skill playbook (e.g. debug, task-workflow, refactor)")
+    lines.append("")
+    lines.append("> TXT/ANALYSIS/PLAN/ASK/@@SHELL still use native markup language")
     return "\n".join(lines)
 
 
@@ -1215,7 +1165,7 @@ def _make_tool(name: str, description: str, properties: dict, required: list,
 
 
 def build_native_tools(user_home_dir: str = None) -> List[Dict]:
-    """Build OpenAI-compatible tools array — Claw Code inspired full tool set.
+    """Build OpenAI-compatible tools array — full Onyx native tool set.
 
     Permission levels: ReadOnly (auto), WorkspaceWrite (light confirm), DangerFullAccess (approval).
     Each tool has exact JSON Schema parameters (type, enum, required, additionalProperties=False).
@@ -1375,6 +1325,22 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
             PERM_READONLY,  # 预览是安全的
         ),
         _make_tool(
+            "choose_ask",
+            '当你不确定用户意图时，提供几个选项让用户选择。用户也可以选择「以上都不是」然后自由输入。',
+            {
+                "question": {"type": "string", "description": "向用户提出的问题"},
+                "options": {
+                    "type": "array",
+                    "description": "选项列表（至少2个，最多6个）",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 6,
+                },
+            },
+            ["question", "options"],
+            PERM_READONLY,
+        ),
+        _make_tool(
             "submit_plan",
             "提交多步骤执行计划给用户确认。steps 是结构化步骤数组，plan 是纯文本描述（二选一）。确认后才能开始执行。复杂任务必须先用此工具提交计划。",
             {
@@ -1494,6 +1460,183 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ),
     ]
 
+    # ═══════════════════════════════════════════
+    # Task System — 任务管理（TaskPacket + 6态状态机 + 团队 + Cron）
+    # ═══════════════════════════════════════════
+    for _task_tool_def in [
+        ("TaskCreate",
+         "创建一个结构化任务。支持两种模式：1) 传 prompt 创建简单任务；2) 传 TaskPacket 字段（objective, scope, acceptance_criteria 等）创建完整任务包。返回任务 ID。",
+         {
+             "prompt": {"type": "string", "description": "任务描述（简单模式），或 TaskPacket.objective"},
+             "description": {"type": "string", "description": "可选任务说明"},
+             "scope": {"type": "string", "enum": ["workspace", "module", "single_file", "custom"],
+                       "description": "任务作用域（默认 workspace）"},
+             "scope_path": {"type": "string", "description": "作用域路径（module/single_file/custom 时需要）"},
+             "acceptance_criteria": {"type": "array", "items": {"type": "string"},
+                                      "description": "验收标准列表"},
+             "acceptance_tests": {"type": "array", "items": {"type": "string"},
+                                   "description": "验收测试命令列表"},
+             "verification_plan": {"type": "array", "items": {"type": "string"},
+                                    "description": "验证步骤"},
+             "resources": {"type": "array", "items": {"type": "object",
+                           "properties": {"kind": {"type": "string"}, "value": {"type": "string"}},
+                           "additionalProperties": False},
+                           "description": "允许访问的资源列表"},
+             "model": {"type": "string", "description": "指定模型"},
+             "provider": {"type": "string", "description": "模型提供商"},
+             "commit_policy": {"type": "string", "description": "提交策略"},
+             "branch_policy": {"type": "string", "description": "分支策略"},
+             "reporting_contract": {"type": "string", "description": "报告合同"},
+             "escalation_policy": {"type": "string", "description": "升级策略"},
+             "recovery_policy": {"type": "string", "description": "恢复策略"},
+         },
+         ["prompt"], PERM_WORKSPACE_WRITE),
+
+        ("TaskList",
+         "列出任务列表，可选按状态过滤。状态值：created, running, blocked, completed, failed, stopped。",
+         {"status_filter": {"type": "string", "description": "可选状态过滤"}},
+         [], PERM_WORKSPACE_WRITE),
+
+        ("TaskGet",
+         "查看单个任务的详细信息，包括消息记录和输出。",
+         {"task_id": {"type": "string", "description": "任务 ID"}},
+         ["task_id"], PERM_WORKSPACE_WRITE),
+
+        ("TaskUpdate",
+         "更新任务状态或追加消息。status 可选值：created, running, blocked, completed, failed, stopped。",
+         {"task_id": {"type": "string", "description": "任务 ID"},
+          "status": {"type": "string", "description": "新状态"},
+          "message": {"type": "string", "description": "可选追加的消息内容"}},
+         ["task_id"], PERM_WORKSPACE_WRITE),
+
+        ("TaskStop",
+         "终止一个任务。只能终止非终态（completed/failed/stopped）的任务。",
+         {"task_id": {"type": "string", "description": "任务 ID"}},
+         ["task_id"], PERM_WORKSPACE_WRITE),
+
+        ("TaskBoard",
+         "查看看板视图 — 按 active（created/running）/ blocked / finished 三栏展示所有任务及其心跳状态。",
+         {},
+         [], PERM_READONLY),
+
+        ("TaskRemove",
+         "从注册表中删除一个任务。不可恢复。",
+         {"task_id": {"type": "string", "description": "任务 ID"}},
+         ["task_id"], PERM_WORKSPACE_WRITE),
+
+        ("TeamCreate",
+         "创建一个团队，可选择关联的任务 ID 列表。",
+         {"name": {"type": "string", "description": "团队名称"},
+          "task_ids": {"type": "array", "items": {"type": "string"},
+                        "description": "可选关联任务 ID 列表"}},
+         ["name"], PERM_WORKSPACE_WRITE),
+
+        ("TeamList",
+         "列出所有团队。",
+         {}, [], PERM_READONLY),
+
+        ("TeamDelete",
+         "删除一个团队（软删除）。",
+         {"team_id": {"type": "string", "description": "团队 ID"}},
+         ["team_id"], PERM_WORKSPACE_WRITE),
+
+        ("CronCreate",
+         "创建一个定时任务条目。schedule 为 cron 表达式，如 '0 * * * *'（每小时）。",
+         {"schedule": {"type": "string", "description": "cron 表达式"},
+          "prompt": {"type": "string", "description": "定时执行的任务描述"},
+          "description": {"type": "string", "description": "可选说明"}},
+         ["schedule", "prompt"], PERM_WORKSPACE_WRITE),
+
+        ("CronList",
+         "列出所有定时任务，可选仅显示启用的。",
+         {"enabled_only": {"type": "boolean", "description": "是否只显示启用的条目（默认 false）"}},
+         [], PERM_READONLY),
+
+        ("CronDisable",
+         "禁用一个定时任务，停止其调度执行。",
+         {"cron_id": {"type": "string", "description": "定时任务 ID"}},
+         ["cron_id"], PERM_WORKSPACE_WRITE),
+
+        ("CronDelete",
+         "删除一个定时任务。",
+         {"cron_id": {"type": "string", "description": "定时任务 ID"}},
+         ["cron_id"], PERM_WORKSPACE_WRITE),
+    ]:
+        native.append(_make_tool(*_task_tool_def))
+
+    # ═══════════════════════════════════════════
+    # LSP — 语言服务器协议工具
+    # ═══════════════════════════════════════════
+
+    native.append(_make_tool(
+        "LspDiagnostics",
+        "获取文件的诊断信息（错误、警告等）。自动根据文件扩展名启动对应的语言服务器。",
+        {"path": {"type": "string", "description": "文件路径"}},
+        ["path"], PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "LspHover",
+        "获取光标处的悬停提示信息（类型签名、文档等）。",
+        {"path": {"type": "string", "description": "文件路径"},
+         "line": {"type": "integer", "description": "行号（从 1 开始）"},
+         "character": {"type": "integer", "description": "列号（从 0 开始）"}},
+        ["path", "line", "character"], PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "LspDefinition",
+        "跳转到符号定义的位置。返回文件路径、行号和预览。",
+        {"path": {"type": "string", "description": "文件路径"},
+         "line": {"type": "integer", "description": "行号"},
+         "character": {"type": "integer", "description": "列号"}},
+        ["path", "line", "character"], PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "LspReferences",
+        "查找符号的所有引用位置。返回引用列表（文件路径 + 行号）。",
+        {"path": {"type": "string", "description": "文件路径"},
+         "line": {"type": "integer", "description": "行号"},
+         "character": {"type": "integer", "description": "列号"}},
+        ["path", "line", "character"], PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "LspSymbols",
+        "获取文件中的所有符号（函数、类、变量等）。返回符号名、类型、位置。",
+        {"path": {"type": "string", "description": "文件路径"}},
+        ["path"], PERM_READONLY,
+    ))
+
+    # ═══════════════════════════════════════════
+    # Memory — 记忆查询工具（支持 range + context）
+    # ═══════════════════════════════════════════
+
+    native.append(_make_tool(
+        "MemoryRead",
+        "读取记忆文件内容，支持行号范围。记忆存储在 ~/.ai_s/chat/（对话记录）、~/.ai_s/library/（会话存档）、~/.ai_s/onyx_ai.md（持久提示）。查询结果会自动缓存，避免重复查询。",
+        {
+            "path": {"type": "string", "description": "记忆路径（如 chat/first, library/<uuid>, onyx_ai）"},
+            "range": {"type": "string", "description": "可选行号范围，如 '1-30' 或 '50'（单行）"},
+        },
+        ["path"], PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "MemorySearch",
+        "在记忆文件中搜索关键字，默认显示匹配行上下各 3 行。搜索结果自动缓存，避免重复查询。",
+        {
+            "pattern": {"type": "string", "description": "搜索关键字或正则"},
+            "path": {"type": "string", "description": "可选限制搜索范围（如 chat, library, onyx_ai）"},
+            "context": {"type": "integer", "description": "可选上下文行数，默认 3"},
+            "-i": {"type": "boolean", "description": "可选忽略大小写，默认 true"},
+        },
+        ["pattern"], PERM_READONLY,
+    ))
+
+    native.append(_make_tool(
+        "UndoLastEdit",
+        "撤销上一次文件编辑或写入操作。将文件恢复为修改前的内容。只能在有可撤销记录时使用。",
+        {},
+        [], PERM_WORKSPACE_WRITE,
+    ))
+
     # ── Include non-filesystem MCP tools (puppeteer/github/postgres etc.) ──
     mcp_tools = get_mcp_tools(user_home_dir=user_home_dir)
     if mcp_tools:
@@ -1520,6 +1663,61 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
                 "x_permission": PERM_DANGER_FULL,  # MCP 工具默认危险
             })
             seen_names.add(mcp_prefixed)
+
+    # ── 目录浏览工具 ──
+    native.append(_make_tool(
+        "ListDirectory",
+        "List files and directories in a path. Returns one entry per line, directories marked with /.",
+        {"path": {"type": "string", "description": "Directory path to list, defaults to current directory"}},
+        [],
+        PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "DirectoryTree",
+        "Recursively show directory tree structure. Dirs marked with /, max depth 2 by default.",
+        {
+            "path": {"type": "string", "description": "Root directory, defaults to current directory"},
+            "maxDepth": {"type": "integer", "description": "Max recursion depth, default 2, max 5"},
+        },
+        [],
+        PERM_READONLY,
+    ))
+
+    # ── Git 工具 ──
+    native.append(_make_tool(
+        "GitStatus",
+        "显示 Git 工作区状态（相当于 git status --short）。返回已修改/新增/删除的文件列表。",
+        {"path": {"type": "string", "description": "Git 仓库路径，默认当前目录"}},
+        [],
+        PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "GitDiff",
+        "显示 Git 未暂存的变更（相当于 git diff）。返回文件级别的 diff 内容。",
+        {
+            "path": {"type": "string", "description": "Git 仓库路径，默认当前目录"},
+            "staged": {"type": "boolean", "description": "是否显示已暂存变更（git diff --staged），默认 false"},
+        },
+        [],
+        PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "GitLog",
+        "查看 Git 提交历史（相当于 git log --oneline）。返回最近的提交记录。",
+        {
+            "path": {"type": "string", "description": "Git 仓库路径，默认当前目录"},
+            "count": {"type": "integer", "description": "显示条数，默认 10"},
+        },
+        [],
+        PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "GitBranch",
+        "查看 Git 分支信息（相当于 git branch -a）。返回所有本地和远程分支。",
+        {"path": {"type": "string", "description": "Git 仓库路径，默认当前目录"}},
+        [],
+        PERM_READONLY,
+    ))
 
     native.sort(key=lambda t: t.get("function", {}).get("name", ""))
     _mcp_debug_exit("build_native_tools", ok=len(native) > 0,
@@ -1594,7 +1792,22 @@ def _exec_read_file(file_path: str, range_str: str = None) -> str:
         if not os.path.exists(file_path):
             return f"❌ File not found: {file_path}"
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+            # 大文件分块读取，支持 Ctrl+C 中断
+            f.seek(0, 2)
+            file_size = f.tell()
+            f.seek(0)
+            if file_size < 1024 * 1024 * 4:  # 4MB 以下直接读
+                content = f.read()
+            else:
+                parts = []
+                while True:
+                    if _AI_INTERRUPTED:
+                        return "⏹ 用户中断"
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    parts.append(chunk)
+                content = "".join(parts)
         if range_str:
             try:
                 if "-" in range_str:
@@ -1614,27 +1827,40 @@ def _exec_read_file(file_path: str, range_str: str = None) -> str:
 
 
 def _exec_write_file(file_path: str, content: str) -> str:
-    """写入文件（全量覆盖）。"""
+    """写入文件（全量覆盖）。返回中包含 original_file 供撤销。"""
     try:
         os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-        # 检查内容是否相同，避免无效写入
+        old_content = ""
+        is_update = False
         if os.path.exists(file_path):
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                if f.read() == content:
-                    return f"⏭️ 内容未变化，跳过写入 {file_path}"
+                old_content = f.read()
+            if old_content == content:
+                return f"⏭️ 内容未变化，跳过写入 {file_path}"
+            is_update = True
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
         total_lines = content.count("\n") + (1 if content else 0)
-        return f"✅ 已写入 {file_path}（{total_lines} 行）"
+        # 保存到全局撤销记录
+        global _LAST_EDIT
+        if is_update:
+            _LAST_EDIT = {"path": file_path, "original": old_content, "action": "write"}
+        else:
+            _LAST_EDIT = {"path": file_path, "original": "", "action": "write"}
+        return json.dumps({
+            "result": f"✅ 已写入 {file_path}（{total_lines} 行）",
+            "original_file": old_content if is_update else None,
+            "file_path": file_path,
+        }, ensure_ascii=False)
     except Exception as e:
         return f"❌ write_file failed: {e}"
 
 
 def _exec_edit_file(file_path: str, old_string: str, new_string: str) -> str:
-    """SEARCH/REPLACE 精确替换。先读旧内容做 diff 展示，再执行编辑。"""
+    """SEARCH/REPLACE 精确替换。返回中包含 original_file 供撤销。"""
     try:
         from lib.edit_engine import apply_edit
-        # 读旧内容做 diff 预览
+        # 读旧内容做 diff 预览 + 保存原始内容
         old_content = ""
         try:
             if os.path.exists(file_path):
@@ -1651,10 +1877,17 @@ def _exec_edit_file(file_path: str, old_string: str, new_string: str) -> str:
                 pass
         ok, msg = apply_edit(file_path, old_string, new_string)
         if ok:
-            return f"✅ 编辑成功: {file_path}"
+            # 保存到全局撤销记录
+            global _LAST_EDIT
+            _LAST_EDIT = {"path": file_path, "original": old_content, "action": "edit"}
+            return json.dumps({
+                "result": f"✅ 编辑成功: {file_path}",
+                "original_file": old_content,
+                "file_path": file_path,
+            }, ensure_ascii=False)
         _err_lower = msg.lower()
         if "not found" in _err_lower or "not unique" in _err_lower:
-            return f"❌ {msg}\n提示：使用 validate_edit 先校验 SEARCH 文本，或用 [EDIT:path:N-M] 行号模式"
+            return f"❌ {msg}\n提示：使用 validate_edit 先校验 SEARCH 文本"
         return f"❌ {msg}"
     except Exception as e:
         return f"❌ edit_file failed: {e}"
@@ -1775,16 +2008,13 @@ def _find_skill_file(skill_name: str) -> Tuple[Optional[str], str]:
     查找路径（按优先级）:
       1. .onyx/skills/<name>/SKILL.md        ← Onyx 原生
       2. .onyx/commands/<name>.md
-      3. .claw/skills/<name>/SKILL.md         ← Claude Code 兼容
-      4. .claw/commands/<name>.md
-      5. .claude/skills/<name>/SKILL.md
-      6. .claude/commands/<name>.md
-      7. ~/.onyx/skills/<name>/SKILL.md
-      8. ~/.claw/skills/<name>/SKILL.md
-      9. ~/.claude/skills/<name>/SKILL.md
-     10. .reasonix/skills/<name>/SKILL.md
-     11. <name>.md (当前目录)
-     12. skills/<name>.md (当前目录)
+      3. .claude/skills/<name>/SKILL.md
+      4. .claude/commands/<name>.md
+      5. ~/.onyx/skills/<name>/SKILL.md
+      6. ~/.claude/skills/<name>/SKILL.md
+      7. .reasonix/skills/<name>/SKILL.md
+      8. <name>.md (当前目录)
+      9. skills/<name>.md (当前目录)
     """
     import glob as _glob
     _cwd = os.getcwd()
@@ -1795,8 +2025,6 @@ def _find_skill_file(skill_name: str) -> Tuple[Optional[str], str]:
         os.path.join(_cwd, ".onyx", "skills"),
         os.path.join(_cwd, ".onyx", "commands"),
         # ═══ Claude Code 兼容 ═══
-        os.path.join(_cwd, ".claw", "skills"),
-        os.path.join(_cwd, ".claw", "commands"),
         os.path.join(_cwd, ".claude", "skills"),
         os.path.join(_cwd, ".claude", "commands"),
         # ═══ 其他 ═══
@@ -1805,8 +2033,7 @@ def _find_skill_file(skill_name: str) -> Tuple[Optional[str], str]:
         # ═══ 用户 Home ═══
         os.path.join(_home, ".onyx", "skills"),
         os.path.join(_home, ".onyx", "commands"),
-        os.path.join(_home, ".claw", "skills"),
-        os.path.join(_home, ".claw", "commands"),
+
         os.path.join(_home, ".claude", "skills"),
         os.path.join(_home, ".claude", "commands"),
         os.path.join(_home, ".reasonix", "skills"),
@@ -1901,11 +2128,11 @@ def _parse_skill_name_from_file(filepath: str) -> Optional[str]:
 
 
 def _exec_skill(skill: str, args: str = "") -> str:
-    """加载并执行技能（Claw Code 兼容的 Skill.md 发现系统）。"""
+    """加载并执行技能（Onyx Skill.md 发现系统）。"""
     try:
         skill_path, error = _find_skill_file(skill)
         if not skill_path:
-            return f"⚠️ {error}\n\n支持的位置: .onyx/skills/<name>/SKILL.md, .claw/skills/<name>/SKILL.md, .claude/skills/<name>/SKILL.md, ~/.onyx/skills/<name>/SKILL.md"
+            return f"⚠️ {error}\n\n支持的位置: .onyx/skills/<name>/SKILL.md, .claude/skills/<name>/SKILL.md, ~/.onyx/skills/<name>/SKILL.md"
 
         with open(skill_path, "r", encoding="utf-8") as _f:
             content = _f.read()
@@ -2000,6 +2227,741 @@ def _exec_todo_write(todos: list) -> str:
         return f"❌ TodoWrite failed: {e}"
 
 
+# ═══════════════════════════════════════════════════════════
+# Task System — 任务管理器执行器
+# ═══════════════════════════════════════════════════════════
+
+def _exec_task_create(prompt: str, description: str = None,
+                      scope: str = None, scope_path: str = None,
+                      acceptance_criteria: list = None,
+                      acceptance_tests: list = None,
+                      verification_plan: list = None,
+                      resources: list = None,
+                      model: str = None, provider: str = None,
+                      commit_policy: str = None, branch_policy: str = None,
+                      reporting_contract: str = None,
+                      escalation_policy: str = None,
+                      recovery_policy: str = None) -> str:
+    """创建任务。简单模式只传 prompt；高级模式传 TaskPacket 字段。"""
+    try:
+        # 判断是否为高级模式（有 TaskPacket 专属字段）
+        if any([scope, acceptance_criteria, acceptance_tests,
+                verification_plan, branch_policy, commit_policy,
+                reporting_contract, escalation_policy]):
+            packet = TaskPacket(
+                objective=prompt,
+                scope=TaskScope(scope) if scope else TaskScope.WORKSPACE,
+                scope_path=scope_path,
+                acceptance_criteria=acceptance_criteria or [],
+                acceptance_tests=acceptance_tests or [],
+                verification_plan=verification_plan or [],
+                resources=[TaskResource(**r) if isinstance(r, dict) else r
+                           for r in (resources or [])],
+                model=model,
+                provider=provider,
+                commit_policy=commit_policy or "",
+                branch_policy=branch_policy or "",
+                reporting_contract=reporting_contract or "",
+                escalation_policy=escalation_policy or "",
+                recovery_policy=recovery_policy,
+            )
+            task = _TASK_REGISTRY.create_from_packet(packet)
+            return (
+                f"✅ 任务包已创建: `{task.task_id}`\n"
+                f"   目标: {task.prompt}\n"
+                f"   范围: {task.description or 'workspace'}\n"
+                f"   状态: {task.status.value}"
+            )
+        else:
+            task = _TASK_REGISTRY.create(prompt, description)
+            return f"✅ 任务已创建: `{task.task_id}`\n   描述: {task.prompt}"
+    except Exception as e:
+        return f"❌ TaskCreate 失败: {e}"
+
+
+def _exec_task_list(status_filter: str = None) -> str:
+    """列任务。"""
+    try:
+        tasks = _TASK_REGISTRY.list(status_filter)
+        if not tasks:
+            return "📭 暂无任务"
+        summary = _TASK_REGISTRY.summary()
+        lines = [f"📋 任务列表（共 {summary['total']} 项：" +
+                 f"🆕 {summary['created']} · 🔄 {summary['running']} · "
+                 f"⛔ {summary['blocked']} · ✅ {summary['completed']} · "
+                 f"❌ {summary['failed']} · ⏹ {summary['stopped']}）"]
+        status_icons = {
+            "created": "🆕", "running": "🔄", "blocked": "⛔",
+            "completed": "✅", "failed": "❌", "stopped": "⏹",
+        }
+        for t in tasks:
+            icon = status_icons.get(t.status.value, "📌")
+            desc = t.description or ""
+            lines.append(f"{icon} `{t.task_id}` {t.prompt} _{desc}_")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ TaskList 失败: {e}"
+
+
+def _exec_task_get(task_id: str) -> str:
+    """任务详情。"""
+    try:
+        task = _TASK_REGISTRY.get(task_id)
+        if not task:
+            return f"❌ 任务未找到: {task_id}"
+        lines = [
+            f"📌 任务详情: `{task.task_id}`",
+            f"   描述: {task.prompt}",
+            f"   状态: {task.status.value}",
+            f"   说明: {task.description or '-'}",
+            f"   创建于: {task.created_at:.1f}",
+            f"   更新于: {task.updated_at:.1f}",
+        ]
+        if task.task_packet:
+            p = task.task_packet
+            lines.append(f"   范围: {p.scope.value} ({p.scope_path or '-'})")
+            lines.append(f"   验收标准: {'; '.join(p.acceptance_criteria) if p.acceptance_criteria else '-'}")
+            lines.append(f"   验证计划: {'; '.join(p.verification_plan) if p.verification_plan else '-'}")
+        if task.team_id:
+            lines.append(f"   团队: {task.team_id}")
+        if task.messages:
+            lines.append(f"   消息 ({len(task.messages)} 条):")
+            for m in task.messages[-5:]:  # 最近 5 条
+                lines.append(f"     [{m.role}] {m.content[:80]}")
+        if task.output:
+            lines.append(f"   输出 ({len(task.output)} 字符)")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ TaskGet 失败: {e}"
+
+
+def _exec_task_update(task_id: str, status: str = None,
+                      message: str = None) -> str:
+    """更新任务。"""
+    try:
+        parts = []
+        if status:
+            _TASK_REGISTRY.set_status(task_id, status)
+            parts.append(f"状态 → {status}")
+        if message:
+            _TASK_REGISTRY.update(task_id, message)
+            parts.append("已追加消息")
+        if not parts:
+            return "⚠️ 未指定更新内容"
+        return f"✅ 任务 `{task_id}` 已更新（{'，'.join(parts)}）"
+    except KeyError as e:
+        return f"❌ {e}"
+    except ValueError as e:
+        return f"❌ {e}"
+    except Exception as e:
+        return f"❌ TaskUpdate 失败: {e}"
+
+
+def _exec_task_stop(task_id: str) -> str:
+    """终止任务。"""
+    try:
+        task = _TASK_REGISTRY.stop(task_id)
+        return f"⏹ 任务 `{task_id}` 已终止（状态: {task.status.value}）"
+    except KeyError as e:
+        return f"❌ {e}"
+    except ValueError as e:
+        return f"❌ {e}"
+    except Exception as e:
+        return f"❌ TaskStop 失败: {e}"
+
+
+def _exec_task_board() -> str:
+    """看板视图。"""
+    try:
+        board = _TASK_REGISTRY.lane_board()
+        lines = [f"📊 任务看板（生成于 {board.generated_at:.1f}）"]
+        status_icons = {
+            "created": "🆕", "running": "🔄", "blocked": "⛔",
+            "completed": "✅", "failed": "❌", "stopped": "⏹",
+        }
+
+        lines.append(f"\n── 🔄 Active（{len(board.active)}）──")
+        for e in board.active:
+            icon = status_icons.get(e.status.value, "📌")
+            freshness = f" [{e.freshness.value}]" if e.freshness != "unknown" else ""
+            lines.append(f"  {icon} `{e.task_id}` {e.prompt}{freshness}")
+
+        lines.append(f"\n── ⛔ Blocked（{len(board.blocked)}）──")
+        for e in board.blocked:
+            lines.append(f"  ⛔ `{e.task_id}` {e.prompt}")
+
+        lines.append(f"\n── ✅ Finished（{len(board.finished)}）──")
+        for e in board.finished:
+            icon = status_icons.get(e.status.value, "📌")
+            lines.append(f"  {icon} `{e.task_id}` {e.prompt}")
+
+        if not any([board.active, board.blocked, board.finished]):
+            lines.append("\n📭 暂无任务")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ TaskBoard 失败: {e}"
+
+
+def _exec_task_remove(task_id: str) -> str:
+    """删除任务。"""
+    try:
+        task = _TASK_REGISTRY.remove(task_id)
+        if task:
+            return f"🗑 任务 `{task_id}`（{task.prompt}）已删除"
+        return f"❌ 任务未找到: {task_id}"
+    except Exception as e:
+        return f"❌ TaskRemove 失败: {e}"
+
+
+# ── 团队管理 ──
+
+def _exec_team_create(name: str, task_ids: list = None) -> str:
+    try:
+        team = _TEAM_REGISTRY.create(name, task_ids or [])
+        return f"✅ 团队已创建: `{team.team_id}`（{team.name}，{len(team.task_ids)} 个任务）"
+    except Exception as e:
+        return f"❌ TeamCreate 失败: {e}"
+
+
+def _exec_team_list() -> str:
+    try:
+        teams = _TEAM_REGISTRY.list()
+        if not teams:
+            return "📭 暂无团队"
+        lines = [f"📋 团队列表（共 {len(teams)} 个）"]
+        for t in teams:
+            status_icon = {"created": "🆕", "running": "🔄",
+                           "completed": "✅", "deleted": "🗑"}.get(t.status.value, "📌")
+            lines.append(f"  {status_icon} `{t.team_id}` {t.name}（{len(t.task_ids)} 个任务）")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ TeamList 失败: {e}"
+
+
+def _exec_team_delete(team_id: str) -> str:
+    try:
+        team = _TEAM_REGISTRY.delete(team_id)
+        return f"🗑 团队 `{team_id}`（{team.name}）已删除"
+    except Exception as e:
+        return f"❌ TeamDelete 失败: {e}"
+
+
+# ── 定时任务 ──
+
+def _exec_cron_create(schedule: str, prompt: str, description: str = None) -> str:
+    try:
+        cron = _CRON_REGISTRY.create(schedule, prompt, description)
+        return f"✅ 定时任务已创建: `{cron.cron_id}`（{cron.schedule}）"
+    except Exception as e:
+        return f"❌ CronCreate 失败: {e}"
+
+
+def _exec_cron_list(enabled_only: bool = False) -> str:
+    try:
+        entries = _CRON_REGISTRY.list(enabled_only)
+        if not entries:
+            return "📭 暂无定时任务"
+        lines = [f"📋 定时任务（共 {len(entries)} 项）"]
+        for e in entries:
+            status = "✅" if e.enabled else "⏸"
+            runs = f"（已执行 {e.run_count} 次）" if e.run_count else ""
+            lines.append(f"  {status} `{e.cron_id}` {e.schedule} → {e.prompt} {runs}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ CronList 失败: {e}"
+
+
+def _exec_cron_disable(cron_id: str) -> str:
+    try:
+        _CRON_REGISTRY.disable(cron_id)
+        return f"⏸ 定时任务 `{cron_id}` 已禁用"
+    except Exception as e:
+        return f"❌ CronDisable 失败: {e}"
+
+
+def _exec_cron_delete(cron_id: str) -> str:
+    try:
+        entry = _CRON_REGISTRY.delete(cron_id)
+        return f"🗑 定时任务 `{cron_id}`（{entry.prompt}）已删除"
+    except Exception as e:
+        return f"❌ CronDelete 失败: {e}"
+
+
+# ═══════════════════════════════════════════════════════════
+# LSP — 语言服务器协议执行器
+# ═══════════════════════════════════════════════════════════
+
+def _resolve_memory_path(path: str) -> str:
+    """将记忆路径简写解析为完整文件路径。"""
+    home = os.path.expanduser("~")
+    base = os.path.join(home, ".ai_s")
+    if path.startswith("chat/"):
+        return os.path.join(base, "chat", path[5:] + ".json")
+    if path.startswith("library/"):
+        return os.path.join(base, "library", path[8:] + ".txt")
+    if path == "onyx_ai":
+        return os.path.join(base, "onyx_ai.md")
+    if path == "mood":
+        return os.path.join(base, "mood.json")
+    # 完整路径直接返回
+    if os.path.isabs(path):
+        return path
+    return os.path.join(base, path)
+
+
+def _cache_query(key: str, result: str) -> str:
+    """缓存查询结果。"""
+    global _MEMORY_QUERY_CACHE
+    if len(_MEMORY_QUERY_CACHE) >= _MEMORY_CACHE_MAX:
+        # 淘汰最旧的
+        old_key = next(iter(_MEMORY_QUERY_CACHE))
+        _MEMORY_QUERY_CACHE.pop(old_key, None)
+    _MEMORY_QUERY_CACHE[key] = result
+    return result
+
+
+def _exec_lsp_diagnostics(path: str) -> str:
+    try:
+        client = _LSP_MANAGER.get_client(path)
+        if not client:
+            return f"⚠️ 未找到 {path} 对应的语言服务器"
+        client.did_open(path)
+        return f"✅ 已打开 {path}，诊断信息将在语言服务器返回后可用"
+    except Exception as e:
+        return f"❌ LspDiagnostics 失败: {e}"
+
+
+def _exec_lsp_hover(path: str, line: int, character: int) -> str:
+    try:
+        client = _LSP_MANAGER.get_client(path)
+        if not client:
+            return f"⚠️ 未找到 {path} 对应的语言服务器"
+        result = client.hover(path, line - 1, character)
+        if not result:
+            return f"ℹ️ `{path}:{line}:{character}` 无悬停信息"
+        output = f"📖 悬停提示: `{path}:{line}:{character}`\n\n{result.content}"
+        if result.language:
+            output += f"\n\n语言: {result.language}"
+        return output
+    except Exception as e:
+        return f"❌ LspHover 失败: {e}"
+
+
+def _exec_lsp_definition(path: str, line: int, character: int) -> str:
+    try:
+        client = _LSP_MANAGER.get_client(path)
+        if not client:
+            return f"⚠️ 未找到 {path} 对应的语言服务器"
+        locations = client.definition(path, line - 1, character)
+        if not locations:
+            return f"ℹ️ `{path}:{line}:{character}` 未找到定义"
+        lines = [f"🎯 定义位置（共 {len(locations)} 处）:"]
+        for loc in locations:
+            preview = f" — {loc.preview}" if loc.preview else ""
+            lines.append(f"  📄 `{loc.path}:{loc.line}:{loc.character}`{preview}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ LspDefinition 失败: {e}"
+
+
+def _exec_lsp_references(path: str, line: int, character: int) -> str:
+    try:
+        client = _LSP_MANAGER.get_client(path)
+        if not client:
+            return f"⚠️ 未找到 {path} 对应的语言服务器"
+        refs = client.references(path, line - 1, character)
+        if not refs:
+            return f"ℹ️ `{path}:{line}:{character}` 未找到引用"
+        lines = [f"🔍 引用位置（共 {len(refs)} 处）:"]
+        for ref in refs:
+            lines.append(f"  📄 `{ref.path}:{ref.line}:{ref.character}`")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ LspReferences 失败: {e}"
+
+
+def _exec_lsp_symbols(path: str) -> str:
+    try:
+        client = _LSP_MANAGER.get_client(path)
+        if not client:
+            return f"⚠️ 未找到 {path} 对应的语言服务器"
+        symbols = client.symbols(path)
+        if not symbols:
+            return f"ℹ️ `{path}` 未找到符号"
+        lines = [f"📋 符号表: `{path}`（共 {len(symbols)} 个）"]
+        kind_icons = {
+            "function": "ƒ", "method": "ƒ", "class": "◈", "interface": "◇",
+            "module": "📦", "variable": "■", "constant": "🔶", "property": "◈",
+            "enum": "📋", "namespace": "📁",
+        }
+        for sym in symbols:
+            icon = kind_icons.get(sym.kind, "•")
+            lines.append(f"  {icon} `{sym.name}` ({sym.kind}) at line {sym.line}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ LspSymbols 失败: {e}"
+
+
+# ═══════════════════════════════════════════════════════════
+# Memory — 记忆查询执行器
+# ═══════════════════════════════════════════════════════════
+
+def _exec_memory_read(path: str, range_str: str = None) -> str:
+    """读取记忆文件，支持行号范围。"""
+    try:
+        file_path = _resolve_memory_path(path)
+        if not os.path.exists(file_path):
+            return f"❌ 记忆文件不存在: {path}（实际路径: {file_path}）"
+
+        # 检查缓存
+        cache_key = f"read:{file_path}:{range_str or 'full'}"
+        if cache_key in _MEMORY_QUERY_CACHE:
+            return _MEMORY_QUERY_CACHE[cache_key] + "\n\n_（缓存结果）_"
+
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+
+        if range_str:
+            try:
+                if "-" in range_str:
+                    start, end = map(int, range_str.split("-", 1))
+                    lines = content.split("\n")
+                    lines = lines[max(0, start-1):end]
+                    content = "\n".join(lines)
+                else:
+                    line_no = int(range_str)
+                    lines = content.split("\n")
+                    content = lines[min(line_no-1, len(lines)-1)]
+            except (ValueError, IndexError):
+                pass
+
+        total_lines = content.count("\n") + (1 if content else 0)
+        result = f"📄 {path}（{total_lines} 行）\n\n{content}"
+        return _cache_query(cache_key, result)
+    except Exception as e:
+        return f"❌ MemoryRead 失败: {e}"
+
+
+def _get_file_uuid(file_path: str) -> str:
+    """从记忆文件路径提取 UUID。"""
+    base = os.path.basename(file_path)
+    name, ext = os.path.splitext(base)
+    if ext == ".txt":
+        return name  # library 文件：文件名就是 UUID
+    elif ext == ".json":
+        # chat 文件：尝试提取 session_uuid
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for m in data.get("messages", []):
+                suuid = m.get("session_uuid", "")
+                if suuid:
+                    return suuid
+        except Exception:
+            pass
+        return f"chat/{name}"
+    return base
+
+
+def _exec_memory_search(pattern: str, path: str = None, context: int = 3,
+                        case_insensitive: bool = True) -> str:
+    """在记忆文件中搜索，默认上下 3 行，结果按 UUID 分组标注。"""
+    try:
+        home = os.path.expanduser("~")
+        base = os.path.join(home, ".ai_s")
+
+        search_dir = base
+        if path == "chat":
+            search_dir = os.path.join(base, "chat")
+        elif path == "library":
+            search_dir = os.path.join(base, "library")
+
+        if not os.path.exists(search_dir):
+            return f"❌ 记忆目录不存在: {search_dir}"
+
+        cache_key = f"search:{pattern}:{path or 'all'}:{context}:{case_insensitive}"
+        if cache_key in _MEMORY_QUERY_CACHE:
+            return _MEMORY_QUERY_CACHE[cache_key] + "\n\n_（缓存结果）_"
+
+        import subprocess as _sp
+        cmd = ["grep", "-rn"]
+        if case_insensitive:
+            cmd.append("-i")
+        if context and context > 0:
+            cmd.extend(["-C", str(context)])
+        cmd.extend(["--", pattern, search_dir])
+
+        proc = _sp.run(cmd, capture_output=True, text=True, timeout=30)
+        raw = proc.stdout.strip()
+        if not raw:
+            return f"ℹ️ 在记忆文件中未找到匹配 '{pattern}' 的内容"
+
+        # 按文件分组：遍历每一行，track 当前文件
+        # grep -C n 输出:
+        #   file:line:content     ← 匹配行
+        #   file-line:context     ← 上下文（- 不是 :）
+        #   --
+        groups: dict[str, list[str]] = {}
+        file_order: list[str] = []
+        current_file = None
+        current_block: list[str] = []
+
+        def _flush_block():
+            nonlocal current_file, current_block
+            if current_file and current_block:
+                if current_file not in groups:
+                    groups[current_file] = []
+                    file_order.append(current_file)
+                groups[current_file].extend(current_block)
+            current_block = []
+
+        for line in raw.split("\n"):
+            if line == "--":
+                _flush_block()
+                current_file = None
+                continue
+            if not line:
+                continue
+
+            # 判断是否是匹配行：filepath:digits:content
+            idx = line.find(":")
+            if idx <= 0:
+                current_block.append(line)
+                continue
+            maybe_path = line[:idx]
+            rest = line[idx+1:]
+            idx2 = rest.find(":")
+            if idx2 <= 0:
+                current_block.append(line)
+                continue
+            maybe_lineno = rest[:idx2]
+            if not maybe_lineno.isdigit():
+                current_block.append(line)
+                continue
+
+            # 新的匹配行，切换到对应文件
+            if maybe_path != current_file:
+                _flush_block()
+                current_file = maybe_path
+            current_block.append(line)
+
+        _flush_block()
+
+        # 构建带 UUID 标注的输出
+        out = []
+        first = True
+        for fpath in file_order:
+            lines = groups[fpath]
+            uuid = _get_file_uuid(fpath)
+            if not first:
+                out.append("─" * 40)
+            first = False
+            out.append(f"📌 UUID: `{uuid}`")
+            out.append(f"   路径: {fpath}")
+            if fpath.endswith(".txt"):
+                out.append(f"   💡 MemoryRead(\"library/{uuid}\") 查看完整会话")
+            elif fpath.endswith(".json") and not uuid.startswith("chat/"):
+                out.append(f"   💡 MemoryRead(\"library/{uuid}\") 查看完整会话")
+            out.append("")
+            out.extend(lines)
+            out.append("")
+
+        formatted = "\n".join(out)
+        if len(formatted) > 20000:
+            formatted = formatted[:20000] + "\n\n...（结果过长，已截断）"
+
+        header = (f"🔍 记忆搜索: '{pattern}'"
+                  f"\n   范围: {path or '全部'}"
+                  f"\n   上下文: ±{context} 行"
+                  f"\n   匹配文件: {len(groups)}")
+        return _cache_query(cache_key, f"{header}\n\n{formatted}")
+    except _sp.TimeoutExpired:
+        return f"❌ 记忆搜索超时（30 秒）"
+    except Exception as e:
+        return f"❌ MemorySearch 失败: {e}"
+
+
+def _exec_undo_last_edit() -> str:
+    """撤销上一次文件编辑或写入操作。"""
+    try:
+        global _LAST_EDIT
+        if not _LAST_EDIT or not _LAST_EDIT.get("path"):
+            return "❌ 没有可撤销的编辑记录"
+        path = _LAST_EDIT["path"]
+        original = _LAST_EDIT["original"]
+        action = _LAST_EDIT.get("action", "edit")
+        if not original:
+            # 新建文件，删除它
+            if os.path.exists(path):
+                os.remove(path)
+                _LAST_EDIT = {}
+                return f"🗑 已撤销: 删除新建文件 {path}（原文件不存在）"
+            else:
+                return f"ℹ️ 文件 {path} 已不存在，无需撤销"
+        # 写回原始内容
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(original)
+        _LAST_EDIT = {}
+        return f"↩️ 已撤销: {path} 已恢复为修改前的内容"
+    except Exception as e:
+        return f"❌ UndoLastEdit 失败: {e}"
+
+
+# ──────────────────── 目录浏览工具执行器 ────────────────────
+
+def _exec_list_directory(path: str = "") -> str:
+    """列出目录内容。"""
+    try:
+        import os
+        cwd = path or os.getcwd()
+        if not os.path.isdir(cwd):
+            return f"❌ 路径不存在或不是目录: {cwd}"
+        entries = os.listdir(cwd)
+        if not entries:
+            return "(空目录)"
+        lines = []
+        for e in sorted(entries):
+            full = os.path.join(cwd, e)
+            if os.path.isdir(full):
+                lines.append(f"{e}/")
+            else:
+                lines.append(e)
+        return "```\n" + "\n".join(lines) + "\n```"
+    except PermissionError:
+        return f"❌ 无权限读取目录"
+    except Exception as e:
+        return f"❌ ListDirectory 错误: {e}"
+
+
+def _exec_directory_tree(path: str = "", max_depth: int = 2) -> str:
+    """递归显示目录树。"""
+    try:
+        import os
+        cwd = path or os.getcwd()
+        if not os.path.isdir(cwd):
+            return f"❌ 路径不存在或不是目录: {cwd}"
+        max_depth = max(1, min(max_depth, 5))
+        lines = []
+        root_name = os.path.basename(cwd) or cwd
+        lines.append(root_name + "/")
+        def _walk(dir_path, prefix, depth):
+            if depth > max_depth:
+                return
+            try:
+                entries = sorted(os.listdir(dir_path))
+            except PermissionError:
+                lines.append(prefix + "  [权限不足]")
+                return
+            for i, e in enumerate(entries):
+                is_last = (i == len(entries) - 1)
+                connector = "└── " if is_last else "├── "
+                full = os.path.join(dir_path, e)
+                if os.path.isdir(full):
+                    lines.append(prefix + connector + e + "/")
+                    sub_prefix = prefix + ("    " if is_last else "│   ")
+                    _walk(full, sub_prefix, depth + 1)
+                else:
+                    lines.append(prefix + connector + e)
+        _walk(cwd, "", 1)
+        return "```\n" + "\n".join(lines) + "\n```"
+    except PermissionError:
+        return f"❌ 无权限读取目录"
+    except Exception as e:
+        return f"❌ DirectoryTree 错误: {e}"
+
+
+# ──────────────────── Git 工具执行器 ────────────────────
+
+def _exec_git_status(path: str = "") -> str:
+    """执行 git status --short。"""
+    try:
+        import subprocess
+        cwd = path or os.getcwd()
+        result = subprocess.run(["git", "status", "--short"],
+                                capture_output=True, text=True, timeout=10, cwd=cwd)
+        if result.returncode != 0:
+            return f"❌ git status 失败（可能不是 Git 仓库）:\n{result.stderr.strip()}"
+        if not result.stdout.strip():
+            return "✅ 工作区干净，无改动"
+        files = result.stdout.strip().split("\n")
+        summary = f"📊 {len(files)} 个文件已修改\n"
+        return summary + "```\n" + result.stdout.strip() + "\n```"
+    except FileNotFoundError:
+        return "❌ git 未安装"
+    except subprocess.TimeoutExpired:
+        return "❌ git status 超时"
+    except Exception as e:
+        return f"❌ git status 错误: {e}"
+
+
+def _exec_git_diff(path: str = "", staged: bool = False) -> str:
+    """执行 git diff。"""
+    try:
+        import subprocess
+        cwd = path or os.getcwd()
+        cmd = ["git", "diff", "--no-color"]
+        if staged:
+            cmd.append("--staged")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, cwd=cwd)
+        if result.returncode != 0:
+            return f"❌ git diff 失败:\n{result.stderr.strip()}"
+        if not result.stdout.strip():
+            return "✅ 无未暂存的变更" if not staged else "✅ 无已暂存的变更"
+        output = result.stdout.strip()
+        # 截断超大 diff
+        if len(output) > 10000:
+            output = output[:5000] + f"\n\n…[diff 过长，截断至 5000 字符，共 {len(output)} 字符]…\n\n" + output[-5000:]
+        return "```diff\n" + output + "\n```"
+    except FileNotFoundError:
+        return "❌ git 未安装"
+    except subprocess.TimeoutExpired:
+        return "❌ git diff 超时"
+    except Exception as e:
+        return f"❌ git diff 错误: {e}"
+
+
+def _exec_git_log(path: str = "", count: int = 10) -> str:
+    """执行 git log --oneline。"""
+    try:
+        import subprocess
+        cwd = path or os.getcwd()
+        count = max(1, min(count, 50))
+        result = subprocess.run(
+            ["git", "log", f"--max-count={count}", "--oneline", "--decorate"],
+            capture_output=True, text=True, timeout=10, cwd=cwd)
+        if result.returncode != 0:
+            return f"❌ git log 失败（可能不是 Git 仓库）:\n{result.stderr.strip()}"
+        if not result.stdout.strip():
+            return "ℹ️ 无提交记录"
+        return "```\n" + result.stdout.strip() + "\n```"
+    except FileNotFoundError:
+        return "❌ git 未安装"
+    except subprocess.TimeoutExpired:
+        return "❌ git log 超时"
+    except Exception as e:
+        return f"❌ git log 错误: {e}"
+
+
+def _exec_git_branch(path: str = "") -> str:
+    """执行 git branch -a。"""
+    try:
+        import subprocess
+        cwd = path or os.getcwd()
+        result = subprocess.run(["git", "branch", "-a"],
+                                capture_output=True, text=True, timeout=10, cwd=cwd)
+        if result.returncode != 0:
+            return f"❌ git branch 失败（可能不是 Git 仓库）:\n{result.stderr.strip()}"
+        if not result.stdout.strip():
+            return "ℹ️ 无分支信息"
+        return "```\n" + result.stdout.strip() + "\n```"
+    except FileNotFoundError:
+        return "❌ git 未安装"
+    except subprocess.TimeoutExpired:
+        return "❌ git branch 超时"
+    except Exception as e:
+        return f"❌ git branch 错误: {e}"
+
+
 def _exec_enter_plan_mode() -> str:
     """进入计划模式。通过修改全局标记实现。"""
     try:
@@ -2018,6 +2980,38 @@ def _exec_exit_plan_mode() -> str:
         return "✅ 已退出 Plan 模式，恢复正常执行模式。"
     except Exception as e:
         return f"❌ ExitPlanMode failed: {e}"
+
+
+def _exec_choose_ask(question: str, options: list) -> str:
+    """向用户展示选项菜单，最后一个选项固定为"以上都不是"，选择后进入自由输入。"""
+    try:
+        from .ai_lib.ui import select_option, text_input as _text_input
+
+        if not options or not isinstance(options, list):
+            options = [_mcp_t("是", "Yes"), _mcp_t("否", "No")]
+
+        # 固定添加"以上都不是"选项
+        none_label = _mcp_t("以上都不是，我自己输入", "None of the above, I'll type")
+        all_options = list(options) + [none_label]
+
+        selected = select_option(
+            message=question,
+            options=all_options,
+            default=all_options[0],
+        )
+
+        if selected == none_label:
+            # 自由输入
+            free_text = _text_input(_mcp_t("💬 请输入你的回答", "💬 Your answer:")).strip()
+            if free_text:
+                return f"__FREE_TEXT__:{free_text}"
+            return _mcp_t("⏹ 用户未输入", "⏹ No input from user")
+        return selected
+
+    except (KeyboardInterrupt, EOFError):
+        return _mcp_t("⏹ 用户取消", "⏹ Cancelled by user")
+    except Exception as e:
+        return f"❌ choose_ask failed: {e}"
 
 
 def _exec_config(action: str, key: str, value: str = None) -> str:
@@ -2130,6 +3124,21 @@ def _exec_web_search(query: str, allowed_domains: list = None) -> str:
 # 计划系统已简化为纯引导模式（不再跟踪步骤状态）
 _PLAN_MODE_ACTIVE = False  # 全局 plan 模式标记
 
+# ── 任务管理系统全局注册表 ──
+_TASK_STORAGE_DIR = os.path.join(os.path.expanduser("~"), ".ai_s", "tasks")
+_TASK_REGISTRY = TaskRegistry(_TASK_STORAGE_DIR)
+_TEAM_REGISTRY = TeamRegistry(_TASK_STORAGE_DIR)
+_CRON_REGISTRY = CronRegistry(_TASK_STORAGE_DIR)
+
+# ── 最后编辑记录（供 UndoLastEdit 使用）──
+_LAST_EDIT: dict = {}  # {"path": str, "original": str, "action": "edit"|"write"}
+
+# ── LSP 客户端管理器 ──
+_LSP_MANAGER = LspManager()
+
+# ── 恢复配方 & 审批令牌 ──
+_RECOVERY_CTX = RecoveryContext()
+_APPROVAL_LEDGER = ApprovalTokenLedger()
 
 # 线程局部存储
 import threading as _threading_mod
@@ -2191,6 +3200,8 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "TodoWrite":    lambda p: _exec_todo_write(p.get("todos", [])),
         "EnterPlanMode": lambda p: _exec_enter_plan_mode(),
         "ExitPlanMode":  lambda p: _exec_exit_plan_mode(),
+        # ── 用户选择提问 ──
+        "choose_ask":    lambda p: _exec_choose_ask(p.get("question", ""), p.get("options", [])),
         # ── 配置 ──
         "Config":       lambda p: _exec_config(p.get("action", "get"), p.get("key", ""), p.get("value", None)),
         # ── 子代理与输出 ──
@@ -2203,6 +3214,56 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         # ── 情感（内部） ──
         "set_mood":     lambda p: _exec_set_mood(p.get("dimension", ""), float(p.get("delta", 0))),
         "update_people": lambda p: _exec_update_people(p.get("action", ""), p.get("name", ""), p.get("value", "")),
+
+        # ── 任务系统 ──
+        "TaskCreate":   lambda p: _exec_task_create(
+            p.get("prompt", ""), p.get("description"),
+            p.get("scope"), p.get("scope_path"),
+            p.get("acceptance_criteria"), p.get("acceptance_tests"),
+            p.get("verification_plan"), p.get("resources"),
+            p.get("model"), p.get("provider"),
+            p.get("commit_policy"), p.get("branch_policy"),
+            p.get("reporting_contract"), p.get("escalation_policy"),
+            p.get("recovery_policy")),
+        "TaskList":     lambda p: _exec_task_list(p.get("status_filter")),
+        "TaskGet":      lambda p: _exec_task_get(p.get("task_id", "")),
+        "TaskUpdate":   lambda p: _exec_task_update(
+            p.get("task_id", ""), p.get("status"), p.get("message")),
+        "TaskStop":     lambda p: _exec_task_stop(p.get("task_id", "")),
+        "TaskBoard":    lambda p: _exec_task_board(),
+        "TaskRemove":   lambda p: _exec_task_remove(p.get("task_id", "")),
+        "TeamCreate":   lambda p: _exec_team_create(p.get("name", ""), p.get("task_ids")),
+        "TeamList":     lambda p: _exec_team_list(),
+        "TeamDelete":   lambda p: _exec_team_delete(p.get("team_id", "")),
+        "CronCreate":   lambda p: _exec_cron_create(
+            p.get("schedule", ""), p.get("prompt", ""), p.get("description")),
+        "CronList":     lambda p: _exec_cron_list(p.get("enabled_only", False)),
+        "CronDisable":  lambda p: _exec_cron_disable(p.get("cron_id", "")),
+        "CronDelete":   lambda p: _exec_cron_delete(p.get("cron_id", "")),
+
+        # ── LSP 语言服务 ──
+        "LspDiagnostics": lambda p: _exec_lsp_diagnostics(p.get("path", "")),
+        "LspHover":       lambda p: _exec_lsp_hover(p.get("path", ""), int(p.get("line", 1)), int(p.get("character", 0))),
+        "LspDefinition":  lambda p: _exec_lsp_definition(p.get("path", ""), int(p.get("line", 1)), int(p.get("character", 0))),
+        "LspReferences":  lambda p: _exec_lsp_references(p.get("path", ""), int(p.get("line", 1)), int(p.get("character", 0))),
+        "LspSymbols":     lambda p: _exec_lsp_symbols(p.get("path", "")),
+
+        # ── 记忆查询 ──
+        "MemoryRead":     lambda p: _exec_memory_read(p.get("path", ""), p.get("range")),
+        "MemorySearch":   lambda p: _exec_memory_search(
+            p.get("pattern", ""), p.get("path"), int(p.get("context", 3)),
+            p.get("-i", True)),
+        "UndoLastEdit":   lambda p: _exec_undo_last_edit(),
+
+        # ── 目录浏览工具 ──
+        "ListDirectory": lambda p: _exec_list_directory(p.get("path", "")),
+        "DirectoryTree":  lambda p: _exec_directory_tree(p.get("path", ""), int(p.get("maxDepth", 2))),
+
+        # ── Git 工具 ──
+        "GitStatus":  lambda p: _exec_git_status(p.get("path", "")),
+        "GitDiff":    lambda p: _exec_git_diff(p.get("path", ""), p.get("staged", False)),
+        "GitLog":     lambda p: _exec_git_log(p.get("path", ""), int(p.get("count", 10))),
+        "GitBranch":  lambda p: _exec_git_branch(p.get("path", "")),
     }
     if raw_tool in _BUILTIN_HANDLERS:
         try:
@@ -2247,7 +3308,7 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         pass
 
     if _tool_permission == PERM_DANGER_FULL:
-        # DangerFullAccess：显式用户批准
+        # DangerFullAccess：显式用户批准 + 审批令牌
         _lang = get_current_lang()
         _prompt = (_lang == "chinese" and "🔴 工具 '{tool}' 需要危险权限，确认执行？(y/N): " or
                    "🔴 Tool '{tool}' requires dangerous access, confirm? (y/N): ").format(tool=raw_tool)
@@ -2258,7 +3319,13 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
             return False, "⛔ 用户取消了危险操作"
         if _confirm not in ("y", "yes"):
             return False, "⛔ 用户拒绝了危险操作"
-        console.print(f"  [dim]✓ 已授权[/]")
+        # 创建审批令牌
+        _scope = ApprovalScope(action=raw_tool, policy="dangerous_write")
+        _token_grant = _APPROVAL_LEDGER.create(
+            scope=_scope, approving_actor="user",
+            approved_executor="ai", max_uses=1, ttl_seconds=60,
+        )
+        console.print(f"  [dim]✓ 已授权（令牌: {_token_grant.token[:12]}...）[/]")
 
     elif _tool_permission == PERM_WORKSPACE_WRITE and user_mode == "low":
         # WorkspaceWrite + low 模式：轻确认
@@ -2382,7 +3449,8 @@ def parse_mcp_tool_calls(text: str) -> List[Dict[str, str]]:
     """
     calls = []
     # 新格式: [tool:mcp__server__tool]\n{json}\n[tool:mcp__server__tool:done]
-    pattern_new = r'\[tool:(mcp__\S+)\]\n(\{.*?\})\n\[tool:\1:done\]'
+    # 注意: 用 (.+?) 而非 (\{.*?\})，因为 JSON 内容中的 } 会导致非贪婪匹配提前截断
+    pattern_new = r'\[tool:(mcp__\S+)\]\n(.+?)\n\[tool:\1:done\]'
     for m in re.findall(pattern_new, text, re.DOTALL):
         full_name = m[0]
         json_body = m[1].strip()
@@ -2693,7 +3761,7 @@ def handle_ai(
     # 默认零 MCP，只加载本地内置工具
     # 只有用户主动安装了外部 MCP server（如 puppeteer/github）才会带 mcp_ 前缀
     _mcp_debug("── 初始化内置工具 ──")
-    ai_tools_prompt = build_native_tools_prompt(current_lang)
+    ai_tools_prompt = build_native_tools_prompt()
     native_tools = build_native_tools(user_home_dir)
 
     # 如果用户显式启用了 MCP（安装了非 filesystem 的外部 server），再加载
@@ -3031,6 +4099,8 @@ def handle_ai(
     import signal as _signal
 
     def _on_interrupt(signum, frame):
+        global _AI_INTERRUPTED
+        _AI_INTERRUPTED = True
         raise KeyboardInterrupt("User interrupted")
 
     _original_sigint = _signal.signal(_signal.SIGINT, _on_interrupt)
@@ -3071,16 +4141,17 @@ def handle_ai(
     # ── 风暴检测（只拦连续失败，不拦重复成功）──
     _MAX_TOOL_OUTPUT = 32 * 1024   # 单次工具结果最大字节数，超长截断防上下文撑爆
     _storm_counter = {}          # error_signature → count: 连续相同错误次数，>=3 时触发换策略
+    _repeat_success = {}         # 操作签名 → 成功次数：>=3 时触发重复警告
 
     # ── 标准对话历史（messages 结构）──
     conversation_history: List[Dict] = []
     import platform as _pf
     _env_info = (
-        f"系统: {_pf.system()} - {_pf.release()}\n"
-        f"用户: {os.environ.get('USER', '?')}\n"
-        f"工作目录: {os.getcwd()}\n"
-        f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        f"#AI工具说明\n{ai_tools_prompt}\n"
+        f"System: {_pf.system()} - {_pf.release()}\n"
+        f"User: {os.environ.get('USER', '?')}\n"
+        f"Working directory: {os.getcwd()}\n"
+        f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"#AI tools\n{ai_tools_prompt}\n"
         f"{mood_context()}\n"
     )
     # 读取 onyx_ai.md 最高指示
@@ -3118,21 +4189,21 @@ def handle_ai(
             _git_log = _run_shell_cmd("git log --oneline -5 2>/dev/null")
             if _git_log:
                 _project_context += f"#最近提交\n{_git_log}\n"
-        # 指令文件自动发现（CLAUDE.md / CLAW.md / AGENTS.md / .claw/rules/*）
+        # 指令文件自动发现（CLAUDE.md / AGENTS.md / .onyx/rules/*）
         _instruction_files = []
         for _root in [_git_root] if _git_status else [os.getcwd()]:
-            for _fname in ["CLAUDE.md", "CLAW.md", "AGENTS.md", "CLAUDE.local.md"]:
+            for _fname in ["CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"]:
                 _fpath = os.path.join(_root, _fname)
                 if os.path.exists(_fpath):
                     _instruction_files.append(_fpath)
-            # .claw/ 目录
-            _claw_dir = os.path.join(_root, ".claw")
-            if os.path.isdir(_claw_dir):
+            # .onyx/ 目录
+            _onyx_dir = os.path.join(_root, ".onyx")
+            if os.path.isdir(_onyx_dir):
                 for _fname in ["CLAUDE.md", "instructions.md"]:
-                    _fpath = os.path.join(_claw_dir, _fname)
+                    _fpath = os.path.join(_onyx_dir, _fname)
                     if os.path.exists(_fpath):
                         _instruction_files.append(_fpath)
-                _rules_dir = os.path.join(_claw_dir, "rules")
+                _rules_dir = os.path.join(_onyx_dir, "rules")
                 if os.path.isdir(_rules_dir):
                     for _rf in sorted(os.listdir(_rules_dir)):
                         if _rf.endswith((".md", ".txt", ".mdc")):
@@ -3642,7 +4713,8 @@ def handle_ai(
                     continue
 
                 # ── [tool:name]\n{json}\n[tool:name:done] 新格式 ──
-                m = _re.search(r'\[tool:(\S+)\]\n(\{.*?\})\n\[tool:\1:done\]', buf, _re.DOTALL)
+                # 注意: 用 (.+?) 而非 (\{.*?\})，因为 JSON 内容中的 } 会导致非贪婪匹配提前截断
+                m = _re.search(r'\[tool:(\S+)\]\n(.+?)\n\[tool:\1:done\]', buf, _re.DOTALL)
                 if m:
                     tool_name = m.group(1)
                     params_str = m.group(2).strip()
@@ -3766,6 +4838,13 @@ def handle_ai(
                     def _on_tool_call(tool_name: str) -> None:
                         """流式检测到工具调用时立即更新面板"""
                         # 不展示工具调用信息给用户，保持界面清爽
+                    # Plan 模式：未确认前只暴露计划相关工具，禁止 AI 探索/执行
+                    if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed:
+                        _plan_only = {"submit_plan", "mark_step_complete", "ExitPlanMode", "choose_ask"}
+                        _active_tools = [t for t in native_tools
+                                         if t.get("function", {}).get("name") in _plan_only]
+                    else:
+                        _active_tools = native_tools
                     api_raw_result = call_ai_api_sse(
                         question="", 
                         messages=conversation_history,
@@ -3779,7 +4858,7 @@ def handle_ai(
                     on_tool_call=_on_tool_call,
                     on_reasoning=_on_reasoning,
                     user_home_dir=user_home_dir,
-                    tools=native_tools,
+                    tools=_active_tools,
                     )
                     _mcp_debug(f"call_ai_api_sse 返回: {'interrupted' if (api_raw_result or {}).get('_interrupted') else 'OK' if api_raw_result else 'None'}")
                 except Exception as _api_exc:
@@ -3844,7 +4923,6 @@ def handle_ai(
         # 优先用 [PLAN] 文本标记，其次用 submit_plan 工具结果
         plan_text = ai_result.get("plan", "") or _pending_plan or ""
         tool_calls = ai_result.get("tool_calls", [])
-        markup_blocks = ai_result.get("markup_blocks", [])
         sleep_value = ai_result.get("sleep")
         class_level = ai_result.get("class", "1")
         
@@ -3940,7 +5018,7 @@ def handle_ai(
                 continue_asking = True
                 
                 if interaction_count == 1:
-                    record_ai_session(user_home_dir, current_session_id, initial_question, ai_result, user_answer, {}, referenced_memory_uuid or "", native_results=_native_call_log_text)
+                    record_ai_session(user_home_dir, current_session_id, initial_question, ai_result, user_answer, {}, referenced_memory_uuid or "", native_results="")
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
@@ -4056,142 +5134,41 @@ def handle_ai(
             if ai_commands or tool_calls:
                 console.print(lang_text.get("plan_blocked",
                     "⛔ Plan 模式：AI 命令/工具调用已被拦截。请先确认计划。"), style="bold red")
+                # 告诉 AI 为什么被拦 + 应该怎么做
+                conversation_history.append({
+                    "role": "system",
+                    "content": _mcp_t(
+                        "[Plan 模式] 你的命令/工具调用已被拦截，因为你尚未提交计划。"
+                        "请使用 submit_plan 工具或 [PLAN]...[PLAN:DONE] 格式提交你的计划。"
+                        "用户会审核并确认后，才能进入执行阶段。",
+                        "[Plan mode] Your commands/tools were blocked because you haven't submitted a plan yet."
+                        " Please use submit_plan tool or [PLAN]...[PLAN:DONE] format to submit your plan."
+                        " The user will review and confirm before execution is allowed."
+                    )
+                })
             ai_commands = []
             tool_calls = []
         
-        # ── 工具结果收集器（同时服务 markup 和 MCP 工具）──
+        # ── 工具结果收集器（仅 function calling）──
         tool_results = []
-        _native_call_log_text = ""
 
-        # ── 处理自研标记语言块 [VIEW:]/[EDIT:]/[WRITE:]/[APPEND:]/[INSERT:]/[DELETE:] ──
-        if markup_blocks:
-            try:
-                _native_results = _process_native_blocks(markup_blocks, cwd=user_home_dir, user_mode=_current_user_mode)
-                _native_call_log = []
-                for _nr in _native_results:
-                    _op_type = _nr.type.upper()
-                    _op_path = _nr.path
-                    icon = "✅" if _nr.success else "❌"
-                    _nr_type = _nr.type
-
-                    # ── 风暴检测：重复 VIEW/EDIT 同一文件 ──
-                    _nb_key = f"{_nr_type}:{_op_path}"
-                    if _nr.success:
-                        _repeat_success[_nb_key] = _repeat_success.get(_nb_key, 0) + 1
-                        _storm_counter.pop(_nb_key, None)
-                        if _repeat_success[_nb_key] >= 3 and _nr_type == "view":
-                            _storm_warn = _mcp_t(
-                                f"⚠️ 重复警告：已查看 {_op_path} 第 {_repeat_success[_nb_key]} 次，AI 应停止重复查看",
-                                f"⚠️ Repeat alert: viewed {_op_path} {_repeat_success[_nb_key]}x, AI should stop"
-                            )
-                            console.print(f"  [bold yellow]{_storm_warn}[/]")
-                            # 不阻断 VIEW（只读无害），只提示
-                    elif not _nr.success:
-                        _storm_counter[_nb_key] = _storm_counter.get(_nb_key, 0) + 1
-                        _repeat_success.pop(_nb_key, None)
-                        if _storm_counter[_nb_key] >= 3:
-                            _storm_warn = _mcp_t(
-                                f"⚠️ 风暴检测：对 {_op_path} 连续失败 {_storm_counter[_nb_key]} 次，AI 应更换策略",
-                                f"⚠️ Storm detected: {_op_path} failed {_storm_counter[_nb_key]}x, switch strategy"
-                            )
-                            console.print(f"  [bold red]{_storm_warn}[/]")
-                            conversation_history.append({"role": "system", "content": f"[STORM_WARNING] {_storm_warn}"})
-
-                    if _nr_type == "view" and _nr.success:
-                        view_content = _nr.content or ""
-                        lines = view_content.split("\n")
-                        console.print(f"  {icon} 📖 {_op_path}  ({len(lines)} 行)")
-                        # 显示前 10 行内容（精简）
-                        for line in lines[:10]:
-                            console.print(f"    {line}", style="dim")
-                        if len(lines) > 10:
-                            console.print(f"    ... 共 {len(lines)} 行", style="dim")
-                        # 截断超大 VIEW 结果，防止上下文撑爆
-                        if len(view_content) > _MAX_TOOL_OUTPUT:
-                            _trunc_info = f"\n\n…[截断 {len(view_content) - _MAX_TOOL_OUTPUT} 字节，共 {len(view_content)} 字节 — 缩小查看范围避免撑爆上下文]…\n\n"
-                            view_content = view_content[:_MAX_TOOL_OUTPUT // 2] + _trunc_info + view_content[-_MAX_TOOL_OUTPUT // 2:]
-                        tool_results.append(view_content)
-                        _record = f"[{_op_type}] {_op_path}\n{view_content}"
-
-                    elif _nr_type == "edit" and _nr.success:
-                        old_c = _nr.old_content or ""
-                        new_c = _nr.content or ""
-                        old_lines = old_c.split("\n")
-                        new_lines = new_c.split("\n")
-                        # 重复编辑防护：连续 3 次以上相同编辑 → 提示 AI 停止
-                        _edit_key = f"edit_success:{_op_path}:{hash(new_c) % 10000}"
-                        _edit_rep = _repeat_success.get(_edit_key, 0)
-                        if _edit_rep >= 3:
-                            _storm_warn = _mcp_t(
-                                f"⚠️ 重复编辑 {_op_path} 已达 {_edit_rep + 1} 次，内容未变化，AI 应停止",
-                                f"⚠️ Repeated edit on {_op_path} {_edit_rep + 1}x, content unchanged, AI should stop"
-                            )
-                            console.print(f"  [bold yellow]{_storm_warn}[/]")
-                        _repeat_success[_edit_key] = _edit_rep + 1
-                        # ── 彩色 diff 展示 ──
-                        console.print(f"  {icon} ✏️ 编辑 {_op_path}  [{len(old_lines)}→{len(new_lines)} 行]")
-                        try:
-                            _render_edit_diff(old_c, new_c)
-                        except Exception:
-                            # fallback: 简单显示
-                            console.print(f"    旧: {len(old_lines)} 行 → 新: {len(new_lines)} 行")
-                        tool_results.append(f"[EDIT] {_op_path}: {new_c}")
-                        _record = f"[{_op_type}] {_op_path}\n旧({len(old_lines)}行):\n{old_c}\n新({len(new_lines)}行):\n{new_c}"
-
-                    elif _nr_type in ("write", "append", "insert") and _nr.success:
-                        content = _nr.content or ""
-                        total_lines = len(content.split("\n"))
-                        action_label = {"write": "📝 写入", "append": "➕ 追加", "insert": "📌 插入"}.get(_nr_type, "✏️")
-                        preview = content[:100].replace("\n", "↵ ").strip()
-                        preview += "..." if len(content) > 100 else ""
-                        # 截断超大写入内容，防止上下文撑爆
-                        if len(content) > _MAX_TOOL_OUTPUT:
-                            content = content[:_MAX_TOOL_OUTPUT // 2] + f"\n\n…[截断 {len(content) - _MAX_TOOL_OUTPUT} 字节，共 {len(content)} 字节]…\n\n" + content[-_MAX_TOOL_OUTPUT // 2:]
-                        console.print(f"  {icon} {action_label} {_op_path}  ({total_lines} 行)")
-                        console.print(f"    {preview}", style="dim")
-                        tool_results.append(f"[{_op_type}] {_op_path}: {content}")
-                        _record = f"[{_op_type}] {_op_path} ({total_lines}行)\n{content}"
-
-                    elif _nr_type == "delete" and _nr.success:
-                        del_content = _nr.content or ""
-                        del_lines = del_content.split("\n")
-                        console.print(f"  {icon} 🗑️ 删除 {_op_path}  ({len(del_lines)} 行)")
-                        # 显示被删行（整行红色底色）
-                        for _dl_idx, _dl_line in enumerate(del_lines, 1):
-                            console.print((f"  {_dl_idx:>4} │ {_dl_line}").ljust(80), style="white on red")
-                        if len(del_lines) > 20:
-                            console.print(f"  [dim white]... 共 {len(del_lines)} 行[/]")
-                        tool_results.append(f"[DELETE] {_op_path}: 删除 {len(del_lines)} 行")
-                        _record = f"[{_op_type}] {_op_path}\n{del_content}"
-
-                    elif _nr.success:
-                        console.print(f"  {icon} [{_op_type}] {_op_path}: {_nr.message}")
-                        tool_results.append(f"[{_nr.type}] {_nr.path}: {_nr.content or _nr.message}")
-                        _record = f"[{_op_type}] {_op_path}: {_nr.message}"
-                    else:
-                        # 失败操作
-                        console.print(f"   {icon} [{_op_type}] {_op_path}: {_nr.message}", style="bold red")
-                        tool_results.append(f"❌ [{_nr.type}] {_nr.path}: {_nr.message}")
-                        _record = f"❌ [{_op_type}] {_op_path}: {_nr.message}"
-
-                    _native_call_log.append(_record)
-                _native_call_log_text = "\n\n".join(_native_call_log)
-            except Exception as _native_err:
-                console.print(f"   ❌ 原生文件操作异常: {_native_err}", style="bold red")
-                _native_call_log_text = f"❌ 原生文件操作异常: {_native_err}"
-
-        # ── 原生标记语言结果追加到 conversation_history（让 AI 立刻看到）──
-        if _native_call_log_text or (tool_results and not tool_calls):
-            _native_feedback = _native_call_log_text or "\n".join(tool_results)
+        # ── 工具结果追加到 conversation_history（让 AI 立刻看到）──
+        if tool_results and not tool_calls:
+            _native_feedback = "\n".join(tool_results)
             if _native_feedback.strip():
                 conversation_history.append({"role": "system", "content": f"[NATIVE_RESULT]\n{_native_feedback.strip()}"})
 
         # 处理 AI 工具调用 ([tool:...] 格式)
         if tool_calls:
-            for tc in tool_calls:
+            try:
+                tc = tool_calls[0]
                 tool_name = tc.get("name", "")
                 tool_params_str = tc.get("params_str", "")
                 tool_body = tc.get("body", "")
+
+                # ── 中断检查：如果 Ctrl+C 已按下，跳过工具执行 ──
+                if _AI_INTERRUPTED:
+                    raise KeyboardInterrupt("User interrupted")
 
                 # 每次工具调用都重新执行（去掉缓存去重，避免 get_file_info 等读操作返回过期结果）
                 # 显示绿色工具调用提示（去前缀）
@@ -4200,35 +5177,88 @@ def handle_ai(
                     _tool_display_name = _tool_display_name.rsplit("__", 1)[-1]
                 elif _tool_display_name.startswith("mcp_"):
                     _tool_display_name = _tool_display_name[4:]
-                console.print(f"  [bold green]🔧 {_tool_display_name}[/]")
-
                 # 解析参数（JSON优先 → _parse_tool_params 回退）
                 if tool_params_str.strip().startswith("{"):
                     try:
                         params = json.loads(tool_params_str.strip())
                     except (json.JSONDecodeError, ValueError):
                         # JSON 非法 → 反馈 schema 引导 AI 重发
-                        _err_schema = f"❌ JSON parse failed for {tool_name}. Arguments must be valid JSON."
+                        # 查找该工具期望的参数 schema
+                        _tool_schema_hint = ""
+                        try:
+                            for _t in build_native_tools():
+                                if _t.get("function", {}).get("name", "") == tool_name:
+                                    _props = _t["function"]["parameters"].get("properties", {})
+                                    _req = _t["function"]["parameters"].get("required", [])
+                                    _hint_items = []
+                                    for _pk, _pv in _props.items():
+                                        _req_flag = "(必填)" if _pk in _req else "(可选)"
+                                        _p_type = _pv.get("type", "string")
+                                        _hint_items.append(f"  \"{_pk}\": <{_p_type}> {_req_flag}")
+                                    if _hint_items:
+                                        _tool_schema_hint = "\n期望参数:\n" + "\n".join(_hint_items)
+                                    break
+                        except Exception:
+                            pass
+                        _err_schema = f"❌ JSON parse failed for {tool_name}. Arguments must be valid JSON. 原因可能是内容过长被截断，或者字符串中含有未转义的大括号 {{{{}}}}/}}}}。请缩短 content 后重试，或检查 JSON 格式。{_tool_schema_hint}"
                         tool_results.append(_err_schema)
                         console.print(f"   {_err_schema}", style="bold red")
-                        # 跳过本轮执行，下一轮 AI 看到错误信息后会修正参数
                         continue
                 else:
                     params = _parse_tool_params(tool_params_str, tool_body)
 
-                # 先尝试内置 handler，走不通再走 MCP
-                ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
-                                              path_validator=_mcp_path_validator)
+                # 显示工具调用 + 关键参数（path、pattern 等）
+                _param_preview = ""
+                for _key in ("path", "pattern", "task_id", "cron_id", "team_id", "query", "url", "name", "prompt"):
+                    _val = params.get(_key, "")
+                    if _val:
+                        _short_val = str(_val)[:80]
+                        _param_preview = f" {_key}={_short_val}"
+                        break
+                _is_builtin = tool_name in (
+                    "read_file","write_file","edit_file","get_file_info",
+                    "glob_search","grep_search","validate_edit","preview_edit",
+                    "ToolSearch","Skill","TodoWrite","Sleep","StructuredOutput",
+                    "submit_plan","mark_step_complete","EnterPlanMode","ExitPlanMode",
+                    "choose_ask","Config","Agent","WebFetch","WebSearch",
+                    "TaskCreate","TaskList","TaskGet","TaskUpdate","TaskStop",
+                    "TaskBoard","TaskRemove","TeamCreate","TeamList","TeamDelete",
+                    "CronCreate","CronList","CronDisable","CronDelete",
+                    "LspDiagnostics","LspHover","LspDefinition","LspReferences","LspSymbols",
+                    "MemoryRead","MemorySearch","UndoLastEdit",
+                )
+                _tag = "" if _is_builtin else " [MCP]"
+                console.print(f"  [bold green]🔧 {_tool_display_name}{_tag}[/]{_param_preview}")
 
-                # ── 风暴检测（MCP 工具调用）──
+                # 流式执行：用 Status spinner 展示工具运行过程
+                from rich.status import Status as _RichStatus
+                _status = _RichStatus(f"  [dim]⏳ {_tool_display_name} 运行中…[/]", spinner="dots", console=console)
+                _status.start()
+                try:
+                    # 先尝试内置 handler，走不通再走 MCP
+                    ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
+                                                  path_validator=_mcp_path_validator)
+                finally:
+                    _status.stop()
+
+                # ── 风暴检测 + 恢复配方 ──
                 _tc_key = f"mcp:{tool_name}:{tool_params_str[:80]}"
                 if not ok:
                     _storm_counter[_tc_key] = _storm_counter.get(_tc_key, 0) + 1
                     _repeat_success.pop(_tc_key, None)
-                    if _storm_counter[_tc_key] >= 3:
+                    _fail_count = _storm_counter[_tc_key]
+                    if _fail_count >= 2:
+                        # 分类故障 + 生成恢复建议
+                        _scenario = classify_failure(tool_name, output)
+                        _recovery_msg = get_recovery_message(_scenario, _RECOVERY_CTX)
+                        if _recovery_msg:
+                            conversation_history.append({"role": "system", "content": _recovery_msg})
+                            console.print(f"  [bold yellow]🔁 {_recovery_msg}[/]")
+                            record_attempt(_RECOVERY_CTX, _scenario, RecoveryAction.SWITCH_STRATEGY, False)
+                    if _fail_count >= 3:
                         _storm_warn = _mcp_t(
-                            f"⚠️ 风暴检测：{tool_name} 连续失败 {_storm_counter[_tc_key]} 次，AI 应更换策略",
-                            f"⚠️ Storm detected: {tool_name} failed {_storm_counter[_tc_key]}x, AI should switch strategy"
+                            f"⚠️ 风暴检测：{tool_name} 连续失败 {_fail_count} 次，AI 应更换策略",
+                            f"⚠️ Storm detected: {tool_name} failed {_fail_count}x, AI should switch strategy"
                         )
                         console.print(f"  [bold red]{_storm_warn}[/]")
                         conversation_history.append({"role": "system", "content": f"[STORM_WARNING] {_storm_warn}"})
@@ -4248,6 +5278,22 @@ def handle_ai(
                     tool_results.append(err_msg)
                     console.print(f"   {err_msg}", style="bold red")
 
+            except KeyboardInterrupt:
+                # Ctrl+C 强制打断工具执行
+                _AI_INTERRUPTED = True
+                console.print("\n  [bold red]⏹ 用户中断工具执行[/]")
+                # 终止所有 MCP 子进程
+                for _proc in MCP_SERVER_PROCESSES.values():
+                    try:
+                        _proc.terminate()
+                    except Exception:
+                        pass
+                # 补齐 tool_results 长度，确保与 tool_calls 一一对应
+                # 避免 "assistant 有 tool_calls 但缺少 tool 消息" 的 API 错误
+                while len(tool_results) < len(tool_calls):
+                    tool_results.append("⏹ 用户中断，该工具未执行")
+                continue_asking = False
+
             # ── 提取 submit_plan / mark_step_complete 结果 ──
             for _tc_idx, _tc in enumerate(tool_calls):
                 _tc_name = _tc.get("name", "")
@@ -4257,7 +5303,7 @@ def handle_ai(
                     break
 
             # ── 追加工具调用结果到 conversation_history ──
-            # 无论来源是 MCP tool_calls 还是原生 markup_blocks，
+            # 无论来源是 MCP tool_calls，
             # 结果必须回传给 AI，否则 AI 不知道自己操作已生效，会反复重试
             if tool_calls:
                 # 标准 OpenAI/DeepSeek 工具调用格式：
@@ -4290,7 +5336,11 @@ def handle_ai(
                     _assistant_msg["reasoning_content"] = _reasoning
                 conversation_history.append(_assistant_msg)
                 # tool role 结果消息
-                for i, res in enumerate(tool_results):
+                # 安全垫：确保 tool_results 长度与 tool_calls 一致，避免 API 报错
+                _tool_results_safe = list(tool_results)
+                while len(_tool_results_safe) < len(tc_ids):
+                    _tool_results_safe.append("⚠️ 该工具未执行（结果丢失）")
+                for i, res in enumerate(_tool_results_safe):
                     conversation_history.append({
                         "role": "tool",
                         "tool_call_id": tc_ids[i],
@@ -4358,6 +5408,14 @@ def handle_ai(
                             log_info(f"Dangerous command rejected by user: {cmd}, reason: {refuse_reason}", current_session_id)
                         refuse_prefix = "❌ User rejected dangerous command" if current_lang == "english" else "❌ 用户拒绝执行危险命令"
                         user_refuse_reasons.append(f"{refuse_prefix} [{cmd_name}]: {cmd}\n   Rejection reason: {refuse_reason}" if current_lang == "english" else f"❌ 用户拒绝执行危险命令 [{cmd_name}]: {cmd}\n   拒绝原因: {refuse_reason}")
+                        # 告知 AI 用户拒绝了它的命令
+                        conversation_history.append({
+                            "role": "system",
+                            "content": _mcp_t(
+                                f"[用户拒绝了你的命令: {cmd[:200]}] 原因: {refuse_reason}。请换一种方式。",
+                                f"[User rejected your command: {cmd[:200]}] Reason: {refuse_reason}. Please try a different approach."
+                            )
+                        })
                 
                 safe_commands = [cmd for cmd in ai_commands if not is_dangerous_command(cmd, dangerous_commands)[0]]
                 ai_commands = confirmed_commands + safe_commands
@@ -4371,6 +5429,14 @@ def handle_ai(
                         if log_info:
                             log_info(f"Adv_code mode rejected command with forbidden syntax: {cmd}", current_session_id)
                         console.print(f"⚠️ {refuse_reason}", style="bold yellow")
+                        # 告知 AI 命令因语法被拒
+                        conversation_history.append({
+                            "role": "system",
+                            "content": _mcp_t(
+                                f"[你的命令包含被禁止的语法，已被拦截: {cmd[:200]}]",
+                                f"[Your command contains forbidden syntax and was blocked: {cmd[:200]}]"
+                            )
+                        })
                     else:
                         allowed_cmds.append(cmd)
                 ai_commands = allowed_cmds
@@ -4495,6 +5561,12 @@ def handle_ai(
                 if "失败" in cmd_result or "error" in cmd_result.lower() or "exception" in cmd_result.lower():
                     _storm_counter[_cmd_key] = _storm_counter.get(_cmd_key, 0) + 1
                     _repeat_success.pop(_cmd_key, None)
+                    if _storm_counter[_cmd_key] >= 2:
+                        # 恢复配方：命令连续失败
+                        _scenario = classify_failure("bash", cmd)
+                        _recovery_msg = get_recovery_message(_scenario, _RECOVERY_CTX)
+                        if _recovery_msg:
+                            conversation_history.append({"role": "system", "content": _recovery_msg})
                     if _storm_counter[_cmd_key] >= 3:
                         _storm_warn = _mcp_t(
                             f"⚠️ 风暴检测：命令「{cmd}」连续失败 {_storm_counter[_cmd_key]} 次，AI 应更换策略",
@@ -4527,7 +5599,7 @@ def handle_ai(
                         final_ai_result["txt"] = refuse_summary
                 
                 if interaction_count == 1:
-                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "", native_results=_native_call_log_text)
+                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "", native_results="")
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
@@ -4567,7 +5639,7 @@ def handle_ai(
                         final_ai_result["txt"] = refuse_summary
                 
                 if interaction_count == 1:
-                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "", native_results=_native_call_log_text)
+                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "", native_results="")
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
@@ -4613,15 +5685,13 @@ def handle_ai(
         # 规则：仅当响应中只有 txt/analysis 纯文本字段时才停止循环；
         #       但凡存在其他字段（memory/plan/ask/commands/本轮新工具调用），
         #       都需要回问 AI 以传递上下文反馈。
-        # 注意：markup_blocks 本身不能作为 pending 判断——AI 文本回复中可能提到
-        # "[VIEW:]" 等词导致解析器误提取。必须用实际执行结果 _native_call_log_text 来判断。
         has_pending = bool(
-            _native_call_log_text.strip() or
             memory_uuid or
             _commands_processed_this_round or
             _tool_calls_processed_this_round or
             ai_ask.strip() or
-            plan_text.strip()
+            plan_text.strip() or
+            user_refuse_reasons  # 有被拒绝的命令 → 让 AI 看到反馈后重新尝试
         )
 
         if has_pending and not was_interrupted:

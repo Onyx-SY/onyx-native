@@ -1320,11 +1320,535 @@ def get_command_cache(user_home_dir: str = "", cmd_config_path: str = "", com_cm
         _CMD_CACHE = CommandCache(user_home_dir, cmd_config_path, com_cmd_config_path)
     return _CMD_CACHE
 
-# ===================== 命令行语法高亮器 =====================
+# ===================== AST 语法分词器 =====================
+class ShellAstTokenizer:
+    """
+    基于状态机的 Shell 命令 AST 分词器
+    单遍扫描，将 shell 命令字符串拆分为 (style, text) 语义令牌序列
+    
+    支持:
+    - 命令头识别（valid_commands 校验）→ command / command_invalid
+    - 短选项 -x / 长选项 --xxx → option
+    - 路径检测（含 ~ 展开、虚拟根路径）→ path / path_invalid
+    - 变量 $VAR / ${VAR} / $((算术)) → variable
+    - 命令替换 $(...) / `...` → subshell (内部递归分词)
+    - 重定向 > < >> << 2> 2>&1 &> → separator
+    - 管道 | / 逻辑符 && || / 分隔符 ; → separator
+    - 引号字符串（单/双引号、转义、嵌套双引号变量）→ string
+    - 注释 #... → comment
+    - KEY=value 赋值 → assignment
+    - 文件描述符数字（2> 中的 2）→ number
+    """
+    
+    __slots__ = ('valid_commands', 'virtual_root')
+    
+    def __init__(self, valid_commands: set = None, virtual_root: str = ""):
+        self.valid_commands = valid_commands or set()
+        self.virtual_root = virtual_root
+
+    def tokenize(self, text: str) -> List[Tuple[str, str]]:
+        """主入口：返回 [(style, text), ...] 列表"""
+        tokens = []
+        i = 0
+        n = len(text)
+        
+        while i < n:
+            # 跳过空白
+            if text[i].isspace():
+                j = i
+                while j < n and text[j].isspace():
+                    j += 1
+                tokens.append(('', text[i:j]))
+                i = j
+                continue
+            
+            # 注释
+            if text[i] == '#':
+                j = i
+                while j < n and text[j] != '\n':
+                    j += 1
+                tokens.append(('ansiwhite italic', text[i:j]))
+                i = j
+                continue
+            
+            # 重定向操作符
+            redir_len = self._match_redirect(text, i, n)
+            if redir_len:
+                tokens.append((COLORS['separator'], text[i:i+redir_len]))
+                i += redir_len
+                continue
+            
+            # 管道 / 逻辑操作符 / 分隔符
+            sep_len = self._match_separator(text, i, n)
+            if sep_len:
+                tokens.append((COLORS['separator'], text[i:i+sep_len]))
+                i += sep_len
+                continue
+            
+            # 子shell / 大括号组
+            if text[i] in '()':
+                # 找到匹配的括号，递归分词其内部
+                end = self._find_matching_paren(text, i, n)
+                if end > i:
+                    # 左括号
+                    tokens.append((COLORS['separator'], '('))
+                    # 递归分词内部（如果是 $(...) 则 $ 已被前面的变量规则吃掉）
+                    inner = self.tokenize(text[i+1:end])
+                    tokens.extend(inner)
+                    # 右括号
+                    tokens.append((COLORS['separator'], ')'))
+                    i = end + 1
+                    continue
+                else:
+                    tokens.append((COLORS['separator'], text[i]))
+                    i += 1
+                    continue
+            
+            # 花括号展开/组 {a,b} 或代码块
+            if text[i] == '{':
+                j = i + 1
+                depth = 1
+                while j < n and depth > 0:
+                    if text[j] == '{':
+                        depth += 1
+                    elif text[j] == '}':
+                        depth -= 1
+                    j += 1
+                tokens.append((COLORS['separator'], text[i:j]))
+                i = j
+                continue
+            
+            if text[i] == '}':
+                tokens.append((COLORS['separator'], text[i]))
+                i += 1
+                continue
+            
+            # 引号字符串
+            if text[i] in ('"', "'"):
+                q_tokens = self._tokenize_quoted_string(text, i, n)
+                tokens.extend(q_tokens)
+                # 计算移动了多少字符
+                consumed = sum(len(t[1]) for t in q_tokens)
+                i += consumed
+                continue
+            
+            # 反引号命令替换
+            if text[i] == '`':
+                end = text.find('`', i + 1)
+                if end == -1:
+                    tokens.append((COLORS['variable'], text[i:]))
+                    i = n
+                    continue
+                inner_tokens = self.tokenize(text[i+1:end])
+                tokens.append((COLORS['variable'], '`'))
+                tokens.extend(inner_tokens)
+                tokens.append((COLORS['variable'], '`'))
+                i = end + 1
+                continue
+            
+            # 普通词法单元：读取一个完整的 word
+            word_start = i
+            word_end = self._read_word(text, i, n)
+            
+            if word_end <= word_start:
+                i += 1
+                continue
+            
+            word = text[word_start:word_end]
+            
+            # 判断 word 类型
+            word_tokens = self._classify_word(word, text, word_start, word_end, n)
+            tokens.extend(word_tokens)
+            i = word_end
+        
+        return tokens
+    
+    # ── 匹配辅助 ──
+    
+    def _match_redirect(self, text: str, i: int, n: int) -> int:
+        """检查是否是重定向操作符，返回匹配长度"""
+        # 文件描述符数字 + 重定向（2>, 1>, 2>>, 2>&1 等）
+        if i + 1 < n and text[i].isdigit():
+            # 检查后面是否跟着重定向符
+            if text[i+1] == '>':
+                if i + 2 < n and text[i+2] == '>':
+                    return 3  # 2>>
+                elif i + 2 < n and text[i+2] == '&':
+                    if i + 3 < n and text[i+3] == '1':
+                        return 4  # 2>&1 (或 2>&-)
+                    return 3  # 2>&
+                return 2  # 2>
+            return 0
+        
+        # &>  (bash 专用，等价于 2>&1 的简化)
+        if i + 1 < n and text[i] == '&' and text[i+1] == '>':
+            return 2
+        
+        # >| (强制覆盖，bash)
+        if i + 1 < n and text[i] == '>' and text[i+1] == '|':
+            return 2
+        
+        # >>
+        if i + 1 < n and text[i:i+2] == '>>':
+            return 2
+        
+        # >
+        if text[i] == '>':
+            return 1
+        
+        # <<- (heredoc with tab stripping)
+        if i + 2 < n and text[i:i+3] == '<<-':
+            return 3
+        
+        # <<
+        if i + 1 < n and text[i:i+2] == '<<':
+            return 2
+        
+        # <
+        if text[i] == '<':
+            return 1
+        
+        return 0
+    
+    def _match_separator(self, text: str, i: int, n: int) -> int:
+        """检查是否是管道/逻辑符/分隔符，返回匹配长度"""
+        if i + 1 < n:
+            pair = text[i:i+2]
+            if pair in ('&&', '||', ';;', ';&'):
+                return 2
+        
+        if text[i] in ('|', ';', '&'):
+            return 1
+        
+        return 0
+    
+    def _find_matching_paren(self, text: str, i: int, n: int) -> int:
+        """找到匹配的右括号位置（处理嵌套）"""
+        if i >= n or text[i] not in '([':
+            return -1
+        
+        open_char = text[i]
+        close_char = ')' if open_char == '(' else ']'
+        
+        depth = 1
+        j = i + 1
+        in_single = False
+        in_double = False
+        
+        while j < n and depth > 0:
+            c = text[j]
+            
+            if in_single:
+                if c == "'":
+                    in_single = False
+                j += 1
+                continue
+            
+            if in_double:
+                if c == '\\':
+                    j += 2
+                    continue
+                if c == '"':
+                    in_double = False
+                j += 1
+                continue
+            
+            if c == "'":
+                in_single = True
+            elif c == '"':
+                in_double = True
+            elif c == '\\':
+                j += 1  # skip escaped char
+            elif c in '([':
+                depth += 1
+            elif c in ')]':
+                depth -= 1
+                if depth == 0 and c != close_char:
+                    return -1  # mismatched
+            elif c == '$' and j + 1 < n and text[j+1] == '(':
+                depth += 1
+                j += 1  # skip (
+            
+            j += 1
+        
+        if depth == 0:
+            return j - 1
+        return -1
+    
+    def _read_word(self, text: str, i: int, n: int) -> int:
+        """
+        读取一个完整的 shell word（考虑引号、转义、变量展开）
+        返回 word 的结束位置（不含尾随空白）
+        """
+        j = i
+        in_single = False
+        in_double = False
+        
+        while j < n:
+            c = text[j]
+            
+            if in_single:
+                if c == "'":
+                    in_single = False
+                j += 1
+                continue
+            
+            if in_double:
+                if c == '\\' and j + 1 < n:
+                    j += 2  # skip escaped char in double quotes
+                    continue
+                if c == '"':
+                    in_double = False
+                elif c == '$' and j + 1 < n and text[j+1] == '(':
+                    # $() inside double quotes — skip to matching )
+                    paren_depth = 1
+                    k = j + 2
+                    while k < n and paren_depth > 0:
+                        if text[k] == '(':
+                            paren_depth += 1
+                        elif text[k] == ')':
+                            paren_depth -= 1
+                        k += 1
+                    j = k
+                    continue
+                elif c == '`':
+                    end = text.find('`', j + 1)
+                    if end != -1:
+                        j = end + 1
+                        continue
+                j += 1
+                continue
+            
+            # Not in quotes
+            if c.isspace() or c in '|;&<>()[]{}#`':
+                break
+            if c == '\\' and j + 1 < n:
+                j += 2  # skip escaped char
+                continue
+            if c in ('"', "'"):
+                # Enter quote
+                if c == "'":
+                    in_single = True
+                else:
+                    in_double = True
+                j += 1
+                continue
+            
+            j += 1
+        
+        return j
+    
+    def _tokenize_quoted_string(self, text: str, i: int, n: int) -> List[Tuple[str, str]]:
+        """分词引号字符串（含内部变量展开）"""
+        tokens = []
+        quote = text[i]  # ' or "
+        j = i + 1
+        
+        if quote == "'":
+            # 单引号：完全字面量
+            end = text.find("'", j)
+            if end == -1:
+                # 未闭合
+                tokens.append(('ansired bold', text[i:]))
+                return tokens
+            # 包含引号标记
+            tokens.append((COLORS['string'], text[i:end+1]))
+            return tokens
+        
+        # 双引号：可能含变量 $VAR / $(...) / `...`
+        tokens.append((COLORS['string'], '"'))
+        k = j
+        
+        while k < n:
+            c = text[k]
+            if c == '"':
+                tokens.append((COLORS['string'], '"'))
+                k += 1
+                break
+            elif c == '\\' and k + 1 < n:
+                # 转义序列
+                tokens.append((COLORS['string'], text[k:k+2]))
+                k += 2
+            elif c == '$':
+                # 变量或命令替换
+                var_tokens = self._tokenize_variable(text, k, n)
+                tokens.extend(var_tokens)
+                k += sum(len(t[1]) for t in var_tokens)
+            elif c == '`':
+                end = text.find('`', k + 1)
+                if end == -1:
+                    tokens.append((COLORS['variable'], text[k:]))
+                    k = n
+                else:
+                    tokens.append((COLORS['variable'], '`'))
+                    inner = self.tokenize(text[k+1:end])
+                    tokens.extend(inner)
+                    tokens.append((COLORS['variable'], '`'))
+                    k = end + 1
+            else:
+                # 普通字符
+                tokens.append((COLORS['string'], c))
+                k += 1
+        
+        return tokens
+    
+    def _tokenize_variable(self, text: str, i: int, n: int) -> List[Tuple[str, str]]:
+        """分词变量展开 $VAR / ${VAR} / $(...) / $((...))"""
+        if i >= n or text[i] != '$':
+            return [(COLORS['string'], '$')]
+        
+        # $((算术))
+        if i + 2 < n and text[i:i+3] == '((':
+            end = text.find('))', i + 3)
+            if end != -1:
+                return [(COLORS['variable'], text[i:end+2])]
+            return [(COLORS['variable'], text[i:])]
+        
+        # $(命令替换)
+        if i + 1 < n and text[i+1] == '(':
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if text[j] == '(':
+                    depth += 1
+                elif text[j] == ')':
+                    depth -= 1
+                elif text[j] == "'":
+                    sq_end = text.find("'", j + 1)
+                    j = sq_end if sq_end != -1 else n
+                    continue
+                elif text[j] == '"':
+                    dq_end = text.find('"', j + 1)
+                    j = dq_end if dq_end != -1 else n
+                    continue
+                j += 1
+            if depth == 0:
+                # $ 和 ( 用 variable 颜色，内部递归分词
+                inner_start = i + 2
+                inner_end = j - 1
+                inner = self.tokenize(text[inner_start:inner_end]) if inner_end > inner_start else []
+                result = [(COLORS['variable'], '$'), (COLORS['separator'], '(')]
+                result.extend(inner)
+                result.append((COLORS['separator'], ')'))
+                return result
+            return [(COLORS['variable'], text[i:])]
+        
+        # ${变量}
+        if i + 1 < n and text[i+1] == '{':
+            end = text.find('}', i + 2)
+            if end != -1:
+                # ${VAR:-default} 等扩展
+                return [(COLORS['variable'], text[i:end+1])]
+            return [(COLORS['variable'], text[i:])]
+        
+        # $变量名
+        j = i + 1
+        if j < n and text[j].isalpha():
+            while j < n and (text[j].isalnum() or text[j] == '_'):
+                j += 1
+            return [(COLORS['variable'], text[i:j])]
+        
+        # $? $! $# $$ $* $@ $0-$9 等特殊变量
+        if j < n and text[j] in '?!$#*-@0123456789':
+            return [(COLORS['variable'], text[i:j+1])]
+        
+        return [(COLORS['variable'], '$')]
+    
+    def _classify_word(self, word: str, text: str, start: int, end: int, n: int) -> List[Tuple[str, str]]:
+        """
+        对完整的 word 进行分类
+        支持: command, option, path, assignment, string, variable
+        """
+        # 检测是否为 KEY=value 赋值（首词或非首词均可）
+        eq_pos = word.find('=')
+        if eq_pos > 0:
+            key = word[:eq_pos]
+            # 必须是有效标识符
+            if key.isidentifier():
+                return [('ansiyellow', word)]
+        
+        # 检测变量引用 $VAR
+        if word.startswith('$') and len(word) > 1:
+            return [(COLORS['variable'], word)]
+        
+        # 检测选项 -x / --xxx
+        if word.startswith('-'):
+            return [(COLORS['option'], word)]
+        
+        # 检测路径
+        if self._looks_like_path(word):
+            return self._tokenize_path(word)
+        
+        # 检查是否是已知命令（根据位置，调用者处理首词逻辑）
+        # 这里无法确定是否首词，所以返回通用分类
+        if word in self.valid_commands:
+            return [(COLORS['command'], word)]
+        
+        # 回退：string
+        return [(COLORS['string'], word)]
+    
+    def _tokenize_path(self, word: str) -> List[Tuple[str, str]]:
+        """路径分词（含存在性检测）"""
+        try:
+            expanded = PathResolver.expand_path(word, self.virtual_root)
+            if self.virtual_root and word.startswith('/'):
+                expanded = PathResolver.normalize(word, self.virtual_root)
+            if _PATH_EXISTENCE_CACHE.exists(expanded):
+                return [(COLORS['path'], word)]
+            else:
+                return [(COLORS['path_invalid'], word)]
+        except Exception:
+            return [(COLORS['path_invalid'], word)]
+    
+    def _looks_like_path(self, text: str) -> bool:
+        """路径检测"""
+        if text in ('.', '..'):
+            return True
+        if text.startswith('~') and (len(text) == 1 or text[1] == '/'):
+            return True
+        if '/' in text:
+            return True
+        # Windows C:\ 风格
+        if len(text) > 1 and text[1] == ':' and text[0].isalpha():
+            return True
+        # Windows UNC \\server\share
+        if text.startswith('\\\\'):
+            return True
+        # 反斜杠路径（仅当不含转义序列特征时）
+        if '\\' in text:
+            # 排除纯转义序列：\$ \` \" \' \\ \n \t 等
+            if text.startswith('\\') and len(text) >= 2:
+                c = text[1]
+                if c in '$`"\'\\' or c in 'nrt0a':
+                    return False
+            # Windows 路径如 dir\file 或 C:\ 以外的 \path
+            if not os.name == 'nt':
+                return False
+            return True
+        return False
+
+
+# ===================== AST 增强型语法高亮器 =====================
 class CommandLexer(Lexer):
+    """
+    AST 驱动的命令行语法高亮器
+    
+    使用 ShellAstTokenizer 进行单遍扫描语义分词，
+    比原 shlex.split + 回退 _lex_manual 方案更准确、更高效。
+    
+    特性:
+    - 状态机分词：正确处理引号嵌套、转义、变量展开
+    - 命令头识别：首词匹配 valid_commands → command / command_invalid
+    - 重定向/管道/逻辑符高亮
+    - 变量 $VAR / $(...) / `${}` / 反引号 统一高亮
+    - 路径存在性检测着色
+    - 历史导航高亮叠加（保留原有功能）
+    """
+    
     def __init__(self, valid_commands: Optional[set] = None, virtual_root: str = ""):
         self.valid_commands = valid_commands if valid_commands is not None else set()
         self.virtual_root = virtual_root
+        self._tokenizer = ShellAstTokenizer(self.valid_commands, self.virtual_root)
 
     def lex_document(self, document: Document) -> Callable[[int], List[Tuple[str, str]]]:
         text = document.text
@@ -1333,15 +1857,11 @@ class CommandLexer(Lexer):
             if lineno != 0:
                 return []
 
-            tokens = []
-            segments = self._split_by_separators(text)
+            # 使用 AST 分词器一次扫描
+            tokens = self._tokenizer.tokenize(text)
 
-            for segment_text, is_separator in segments:
-                if is_separator:
-                    tokens.append((COLORS['separator'], segment_text))
-                else:
-                    sub_tokens = self._lex_command_segment(segment_text)
-                    tokens.extend(sub_tokens)
+            # ── 首词更正：将第一个非空白、非分隔符的 token 标记为命令 ──
+            tokens = self._apply_first_word_as_command(tokens)
 
             # ── 叠加历史导航高亮 token ──
             global _HIGHLIGHT_TOKEN
@@ -1359,167 +1879,41 @@ class CommandLexer(Lexer):
 
         return get_line_tokens
 
-    def _split_by_separators(self, text: str) -> List[Tuple[str, bool]]:
+    def _apply_first_word_as_command(self, tokens: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+        """
+        将第一个有意义 token 强制标注为命令（含路径命令检测）
+        ShellAstTokenizer._classify_word 不知道词法位置，
+        这里对首词进行命令特殊处理。
+        """
         result = []
-        last_end = 0
-        for match in re.finditer(r'[;&|]|&&|\|\|', text):
-            start, end = match.span()
-            if start > last_end:
-                result.append((text[last_end:start], False))
-            result.append((text[start:end], True))
-            last_end = end
-        if last_end < len(text):
-            result.append((text[last_end:], False))
+        found_first = False
+        
+        for style, text in tokens:
+            if not found_first:
+                if text.strip() and style != COLORS['separator']:
+                    found_first = True
+                    # 跳过空白/分隔符后，第一个有意义 token 就是命令头
+                    if text in self.valid_commands:
+                        result.append((COLORS['command'], text))
+                    elif self._tokenizer._looks_like_path(text):
+                        # 路径命令（如 ./script.sh）
+                        try:
+                            expanded = PathResolver.expand_path(text, self.virtual_root)
+                            if self.virtual_root and text.startswith('/'):
+                                expanded = PathResolver.normalize(text, self.virtual_root)
+                            if _PATH_EXISTENCE_CACHE.exists(expanded):
+                                result.append((COLORS['path'], text))
+                            else:
+                                result.append((COLORS['path_invalid'], text))
+                        except Exception:
+                            result.append((COLORS['command_invalid'], text))
+                    else:
+                        result.append((COLORS['command_invalid'], text))
+                    continue
+            
+            result.append((style, text))
+        
         return result
-
-    def _lex_command_segment(self, segment: str) -> List[Tuple[str, str]]:
-        tokens = []
-        posix = get_posix_mode()
-        try:
-            parts = shlex.split(segment, posix=posix)
-        except ValueError:
-            return self._lex_manual(segment)
-
-        if not parts:
-            return self._lex_manual(segment)
-
-        current_pos = 0
-        is_first = True
-        for part in parts:
-            while current_pos < len(segment) and segment[current_pos].isspace():
-                tokens.append(('', segment[current_pos]))
-                current_pos += 1
-
-            part_len = len(part)
-            part_text = segment[current_pos:current_pos+part_len]
-
-            if is_first:
-                if part_text in self.valid_commands:
-                    style = COLORS['command']
-                elif self._looks_like_path(part_text):
-                    # 路径形式的命令（如 ./a.sh），使用路径颜色而非错误红色
-                    expanded = PathResolver.expand_path(part_text, self.virtual_root)
-                    if self.virtual_root and part_text.startswith('/'):
-                        expanded = PathResolver.normalize(part_text, self.virtual_root)
-                    if _PATH_EXISTENCE_CACHE.exists(expanded):
-                        style = COLORS['path']
-                    else:
-                        style = COLORS['path_invalid']
-                else:
-                    style = COLORS['command_invalid']
-                is_first = False
-            elif part.startswith('-'):
-                style = COLORS['option']
-            elif self._looks_like_path(part):
-                expanded = PathResolver.expand_path(part, self.virtual_root)
-                if self.virtual_root and part.startswith('/'):
-                    expanded = PathResolver.normalize(part, self.virtual_root)
-                if _PATH_EXISTENCE_CACHE.exists(expanded):
-                    style = COLORS['path']
-                else:
-                    style = COLORS['path_invalid']
-            else:
-                if re.search(r'\$[\w{}]+|`[^`]*`|\$\([^)]*\)', part):
-                    style = COLORS['variable']
-                else:
-                    style = COLORS['string']
-
-            sub_tokens = self._highlight_symbols_in_word(part_text, style)
-            tokens.extend(sub_tokens)
-            current_pos += part_len
-
-        if current_pos < len(segment):
-            tokens.append(('', segment[current_pos:]))
-
-        return tokens
-
-    def _lex_manual(self, segment: str) -> List[Tuple[str, str]]:
-        tokens = []
-        i = 0
-        length = len(segment)
-        is_first = True
-        while i < length:
-            if segment[i].isspace():
-                j = i
-                while j < length and segment[j].isspace():
-                    j += 1
-                tokens.append(('', segment[i:j]))
-                i = j
-                continue
-
-            j = i
-            in_quote = False
-            quote_char = ''
-            while j < length:
-                if not in_quote and segment[j].isspace():
-                    break
-                if segment[j] in ('"', "'") and (j == 0 or segment[j-1] != '\\'):
-                    if not in_quote:
-                        in_quote = True
-                        quote_char = segment[j]
-                    elif segment[j] == quote_char:
-                        in_quote = False
-                        quote_char = ''
-                j += 1
-
-            word = segment[i:j]
-
-            if is_first:
-                if word in self.valid_commands:
-                    style = COLORS['command']
-                elif self._looks_like_path(word):
-                    # 路径形式的命令（如 ./a.sh），使用路径颜色而非错误红色
-                    expanded = PathResolver.expand_path(word, self.virtual_root)
-                    if self.virtual_root and word.startswith('/'):
-                        expanded = PathResolver.normalize(word, self.virtual_root)
-                    if _PATH_EXISTENCE_CACHE.exists(expanded):
-                        style = COLORS['path']
-                    else:
-                        style = COLORS['path_invalid']
-                else:
-                    style = COLORS['command_invalid']
-                is_first = False
-            elif word.startswith('-'):
-                style = COLORS['option']
-            elif self._looks_like_path(word):
-                expanded = PathResolver.expand_path(word, self.virtual_root)
-                if self.virtual_root and word.startswith('/'):
-                    expanded = PathResolver.normalize(word, self.virtual_root)
-                if _PATH_EXISTENCE_CACHE.exists(expanded):
-                    style = COLORS['path']
-                else:
-                    style = COLORS['path_invalid']
-            else:
-                if re.search(r'\$[\w{}]+|`[^`]*`|\$\([^)]*\)', word):
-                    style = COLORS['variable']
-                else:
-                    style = COLORS['string']
-
-            sub_tokens = self._highlight_symbols_in_word(word, style)
-            tokens.extend(sub_tokens)
-            i = j
-
-        return tokens
-
-    def _looks_like_path(self, text: str) -> bool:
-        return any(c in text for c in '/\\') or text.startswith('~') or text in ('.', '..')
-
-    def _highlight_symbols_in_word(self, word: str, base_style: str) -> List[Tuple[str, str]]:
-        tokens = []
-        i = 0
-        length = len(word)
-        while i < length:
-            if word[i] in '<>"\'`()[]{}':
-                tokens.append((COLORS['separator'], word[i]))
-                i += 1
-            else:
-                j = i
-                while j < length and word[j] not in '<>"\'`()[]{}':
-                    j += 1
-                if j > i:
-                    tokens.append((base_style, word[i:j]))
-                i = j
-        return tokens
 
 # ===================== 智能虚影补全 =====================
 class SmartAutoSuggest(AutoSuggest):

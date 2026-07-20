@@ -746,7 +746,7 @@ class UltraFastEnvironmentChecker:
         elif sys.platform.startswith("win32"):
             system_type = "Windows"
         elif sys.platform.startswith("darwin"):
-            system_type = "Linux/macOS"
+            system_type = "macOS"
         else:
             if os.path.exists("/etc/os-release"):
                 try:
@@ -985,7 +985,7 @@ class UltraFastEnvironmentChecker:
         
         # 检测是否为管理员
         is_admin = False
-        if sys.platform.startswith("linux") or "termux" in sys.prefix.lower():
+        if sys.platform.startswith("linux") or sys.platform == "darwin" or "termux" in sys.prefix.lower():
             try:
                 is_admin = os.geteuid() == 0
             except:
@@ -1107,7 +1107,27 @@ class UltraFastEnvironmentChecker:
         shell_methods = []
         
         try:
-            if sys.platform.startswith("linux") or sys.platform == "darwin":
+            if sys.platform == "darwin":
+                import subprocess as _subprocess
+                try:
+                    import ctypes
+                    libc = ctypes.CDLL(None)
+                    getppid = libc.getppid
+                    getppid.argtypes = []
+                    getppid.restype = ctypes.c_int
+                    ppid = getppid()
+                    if ppid > 0:
+                        shell_bin = _subprocess.run(
+                            ["ps", "-o", "comm=", "-p", str(ppid)],
+                            capture_output=True, text=True, timeout=5
+                        ).stdout.strip().lower()
+                        if "bash" in shell_bin:
+                            shell_methods.append("bash")
+                        elif "zsh" in shell_bin:
+                            shell_methods.append("zsh")
+                except:
+                    pass
+            elif sys.platform.startswith("linux"):
                 import ctypes
                 libc = ctypes.CDLL(None)
                 getppid = libc.getppid
@@ -1435,16 +1455,20 @@ class UltraFastEnvironmentChecker:
             
             os.environ["ONYX_IMPORT_TIME_MS"] = str(onyx_import_cost)
             
-            # MCP 预加载（仅首次启动，后续跳过）
+            # MCP 后台预加载（纯异步，不阻塞主流程 + 不阻塞 import）
             _mcp_flag = os.path.join(os.path.expanduser("~"), ".cache", "onyx", "mcp_preloaded.flag")
             if not os.path.exists(_mcp_flag):
-                try:
-                    from bin.ai_cmd import preload_mcp_servers
-                    from Onyx import USER_HOME_DIR as _onyx_user_home
-                    preload_mcp_servers(_onyx_user_home)
-                    log_print("[MCP预加载] 已调度后台预加载")
-                except Exception as _e:
-                    log_print(f"[MCP预加载] 跳过: {_e}")
+                def _bg_mcp():
+                    try:
+                        from bin.ai_cmd import preload_mcp_servers
+                        from Onyx import USER_HOME_DIR as _onyx_user_home
+                        preload_mcp_servers(_onyx_user_home)
+                        log_print("[MCP预加载] 后台完成")
+                    except Exception:
+                        pass
+                t = threading.Thread(target=_bg_mcp, daemon=True, name="mcp-preload")
+                t.start()
+                log_print("[MCP预加载] 已调度后台")
             else:
                 log_print("[MCP预加载] 已完成过，跳过")
             

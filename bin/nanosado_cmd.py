@@ -392,7 +392,7 @@ def handle_nanosado_core(
     if OS_OR_TBS == "OS":
         is_root = False
         try:
-            if sys_type.startswith("linux") or "termux" in sys.prefix.lower():
+            if sys_type.startswith("linux") or sys_type == "macOS" or "termux" in sys.prefix.lower():
                 is_root = os.geteuid() == 0
             elif sys_type.startswith("win32"):
                 import ctypes

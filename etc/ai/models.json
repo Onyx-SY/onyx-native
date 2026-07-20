@@ -6,20 +6,16 @@
     "stream_format": "openai",
     "models": [
       "deepseek-v4-pro",
-      "deepseek-v4-flash",
-      "deepseek-v4.5-lite",
-      "deepseek-v4.5-max",
-      "deepseek-reasoner-r1",
-      "deepseek-code-v2"
+      "deepseek-v4-flash"
     ],
-    "default_model": "deepseek-v4.5-max",
+    "default_model": "deepseek-v4-pro",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
       "max_tokens": 8192
     },
     "thinking": {
-      "type": "enable"
+      "type": "enabled"
     },
     "reasoning_effort": "high"
   },
@@ -33,10 +29,7 @@
       "gpt-5.5-pro",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
-      "gpt-5.6-luna",
-      "gpt-5.7-ultra",
-      "o4-mini",
-      "o4-preview"
+      "gpt-5.6-luna"
     ],
     "default_model": "gpt-5.6-terra",
     "params": {
@@ -54,10 +47,9 @@
       "claude-opus-4-8",
       "claude-fable-5",
       "claude-mythos-5",
-      "claude-opus-5",
-      "claude-sonnet-5-fast"
+      "claude-sonnet-5"
     ],
-    "default_model": "claude-opus-5",
+    "default_model": "claude-fable-5",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
@@ -69,12 +61,8 @@
     "api_url": "https://api.moonshot.cn/v1/chat/completions",
     "stream_format": "openai",
     "models": [
-      "moonshot-v1-8k",
-      "moonshot-v1-32k",
-      "moonshot-v1-128k",
-      "moonshot-v1-1024k",
       "kimi-k2.6",
-      "kimi-k2.7",
+      "kimi-k2.7-code",
       "kimi-k3.0-ultra"
     ],
     "default_model": "kimi-k3.0-ultra",
@@ -89,17 +77,12 @@
     "api_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     "stream_format": "openai",
     "models": [
-      "glm-4-air",
-      "glm-4-plus",
-      "glm-4-flash",
-      "glm-4-long",
       "glm-5",
-      "glm-5.3",
-      "glm-5.5-turbo",
-      "glm-5.5-max",
-      "glm-code"
+      "glm-5-turbo",
+      "glm-5.2",
+      "zcode-3.0"
     ],
-    "default_model": "glm-5.5-max",
+    "default_model": "glm-5.2",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
@@ -111,18 +94,13 @@
     "api_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
     "stream_format": "openai",
     "models": [
-      "qwen-turbo",
-      "qwen-long",
       "qwen3.5-plus",
       "qwen3.6-plus",
-      "qwen3-max",
       "qwen3.7-max",
-      "qwen4-lite",
-      "qwen4-pro",
-      "qwen4-ultra",
-      "qwen-code-v2"
+      "qwen3.8-max-preview",
+      "qwen3-coder-next"
     ],
-    "default_model": "qwen4-ultra",
+    "default_model": "qwen3.7-max",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
@@ -134,13 +112,12 @@
     "api_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
     "stream_format": "openai",
     "models": [
-      "doubao-lite-32k",
-      "doubao-pro-128k",
-      "doubao-ultra-256k",
-      "doubao-reasoner",
+      "doubao-seed-2.1-turbo",
+      "doubao-seed-2.1-pro",
+      "doubao-seed-thinking-v1.5",
       "doubao-code"
     ],
-    "default_model": "doubao-ultra-256k",
+    "default_model": "doubao-seed-2.1-pro",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
@@ -153,11 +130,9 @@
     "stream_format": "openai",
     "models": [
       "yi-lightning",
-      "yi-medium",
-      "yi-large",
       "yi-vision-max"
     ],
-    "default_model": "yi-large",
+    "default_model": "yi-lightning",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
@@ -169,13 +144,10 @@
     "api_url": "https://api.llama-api.com/chat/completions",
     "stream_format": "openai",
     "models": [
-      "llama3-8b",
-      "llama3-70b",
-      "llama3.1-405b",
       "llama4-maverick",
-      "llama4-sage"
+      "llama4-scout"
     ],
-    "default_model": "llama4-sage",
+    "default_model": "llama4-maverick",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,

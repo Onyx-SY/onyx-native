@@ -27,6 +27,7 @@ class ScanPathCmds:
     _EXEC_SUFFIXES_CACHE = {
         "Windows": {".exe", ".com", ".bat", ".cmd", ".ps1", ".vbs"},
         "Linux/macOS": {""},
+        "macOS": {""},
         "Termux": {""},
         "SpecialLinux": {""},
         "macos": {""}
@@ -752,7 +753,12 @@ if __name__ == "__main__":
     test_home = os.path.join(test_root, "home", "default")
     test_cmd_mapping_path = os.path.join(test_home, ".cache", "onyx", "cmd_mapping.msgpack")
     
-    sys_type = "Windows" if sys.platform.startswith("win32") else "Linux/macOS"
+    if sys.platform.startswith("win32"):
+        sys_type = "Windows"
+    elif sys.platform == "darwin":
+        sys_type = "macOS"
+    else:
+        sys_type = "Linux/macOS"
     
     print(f"\n{'='*60}")
     print("系统命令扫描测试")

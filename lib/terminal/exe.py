@@ -27,8 +27,14 @@ import sys
 import re
 import select
 import struct
-import fcntl
-import termios
+try:
+    import fcntl
+    import termios
+    HAVE_FCNTL_TERMIOS = True
+except ImportError:
+    fcntl = None
+    termios = None
+    HAVE_FCNTL_TERMIOS = False
 import signal
 import threading
 import platform
@@ -161,15 +167,6 @@ else:
 # ======================================================================
 # Marker Definitions
 # ======================================================================
-def generate_markers():
-    """Generate unique marker identifiers for command output delimiting"""
-    uid = uuid.uuid4().hex[:8]
-    return {
-        'start': f"__CMD_START_{uid}__",
-        'end': f"__CMD_END_{uid}__:",
-    }
-
-
 def generate_var_marker():
     """Generate marker for variable reading"""
     uid = uuid.uuid4().hex[:8]
@@ -207,6 +204,20 @@ _persistent_shell: Optional['PersistentShell'] = None
 # 用于给 AI 触发的命令加超时保护和用户弹窗
 AI_EXECUTION_MODE = False
 
+# ========== getcwd 缓存（减少频繁系统调用） ==========
+_cached_cwd: Optional[str] = None
+_cached_cwd_time: float = 0
+_CWD_CACHE_TTL = 0.5  # 秒
+
+
+def _get_cwd_cached() -> str:
+    global _cached_cwd, _cached_cwd_time
+    now = time.time()
+    if _cached_cwd is None or (now - _cached_cwd_time) > _CWD_CACHE_TTL:
+        _cached_cwd = os.getcwd()
+        _cached_cwd_time = now
+    return _cached_cwd
+
 
 # ======================================================================
 # Utility Functions
@@ -222,12 +233,12 @@ def get_terminal_size(fd: int = sys.stdin.fileno()) -> Tuple[int, int]:
             pass
         return 24, 80
 
-    try:
-        if os.isatty(fd):
+    if HAVE_FCNTL_TERMIOS and os.isatty(fd):
+        try:
             rows, cols = struct.unpack('hh', fcntl.ioctl(fd, termios.TIOCGWINSZ, '1234'))
             return rows, cols
-    except Exception:
-        pass
+        except Exception:
+            pass
     return 24, 80
 
 
@@ -238,11 +249,19 @@ def update_pty_size(master_fd) -> None:
     if rows != _current_pty_size[0] or cols != _current_pty_size[1]:
         _current_pty_size = (rows, cols)
         debug_log(f"PTY size updated: {rows}x{cols}")
-        if platform.system() != "Windows":
+        if HAVE_FCNTL_TERMIOS:
             try:
                 if master_fd is not None:
                     fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
                                 struct.pack('HHHH', rows, cols, 0, 0))
+            except Exception:
+                pass
+        elif platform.system() == "Windows":
+            # Windows: 通过 winpty 的 set_size 调整窗口
+            try:
+                import winpty
+                if _persistent_shell and _persistent_shell._winpty_handle:
+                    _persistent_shell._winpty_handle.set_size(cols, rows)
             except Exception:
                 pass
         elif hasattr(master_fd, 'set_size'):
@@ -418,7 +437,7 @@ class PersistentShell:
         # _inject_extra_vars() is still called in execute() when rebuilding a
         # dead shell, where the env dict is not re-applied.
         # Clear screen completely to remove all initialization residue
-        self._clear_screen()
+        # _clear_screen 移除：init 时无残留需要清除，省一次 PTY 写入
         debug_log(f"PersistentShell initialized: shell={self.shell}, shell_name={self.shell_name}")
 
     def _inject_extra_vars(self):
@@ -467,7 +486,7 @@ class PersistentShell:
         用 shell 的 PS1（__DONE__:$?）检测命令完成，不追加 marker。
         PS1 是 shell 提示词机制的一部分，SIGINT 无法阻止它被打印。
         """
-        # 用 PS1 中的 DONE marker 检测命令完成（而非追加 ; printf … 到命令链）
+        # 用 PS1 中的 DONE marker 检测命令完成
         _done_marker = self._done_marker
         full_cmd = f"{cmd}\n"
         debug_log(f"Passthrough full_cmd: {repr(full_cmd[:200])}")
@@ -478,7 +497,7 @@ class PersistentShell:
 
         # TTY raw mode：箭头键等需要逐字符转发到 PTY，不能行缓冲
         old_tty = None
-        if not is_windows and os.isatty(fd_stdin):
+        if HAVE_FCNTL_TERMIOS and os.isatty(fd_stdin):
             old_tty = termios.tcgetattr(fd_stdin)
             new_tty = termios.tcgetattr(fd_stdin)
             new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
@@ -505,7 +524,8 @@ class PersistentShell:
 
         # 排空 PTY 残留输出（单次 drain，无 sleep — PTY 已就绪时 drain 为 O(1)）
         self._drain_output()
-        _echo_skipped = False
+        _echo_pending = True  # 需要跳过 shell 回显的命令文本
+        _echo_buf = ""        # 累积回显字节
 
         try:
             try:
@@ -535,7 +555,15 @@ class PersistentShell:
                             stdin_data = None
                 else:
                     data = self._read_from_master(timeout=0.01)
+                    # Windows: 用 msvcrt 读取键盘输入并转发到 PTY
                     stdin_data = None
+                    if is_windows:
+                        try:
+                            import msvcrt
+                            if msvcrt.kbhit():
+                                stdin_data = msvcrt.getch()
+                        except ImportError:
+                            pass
 
                 # --- Forward PTY output to terminal ---
                 if data is not None:
@@ -550,15 +578,26 @@ class PersistentShell:
 
                     full_raw_output += text
 
-                    # 跳过 shell echo 的命令回显（第一行）
-                    if not _echo_skipped:
-                        # 移除命令回显行（可能跨多个 chunk）
-                        echo_pos = text.find('\n')
-                        if echo_pos != -1:
-                            text = text[echo_pos + 1:]
-                            _echo_skipped = True
+                    # 跳过 shell 回显的命令文本（仅匹配首部，不吞 TUI 输出）
+                    if _echo_pending:
+                        _echo_buf += text
+                        _max_echo_len = len(cmd) + 64  # 命令回显不可能超过 cmd 太多
+                        cmd_echo_end = _echo_buf.find('\n')
+                        if cmd_echo_end != -1 and cmd_echo_end < _max_echo_len:
+                            echo_line = _echo_buf[:cmd_echo_end].strip()
+                            if echo_line == cmd.strip() or cmd.strip().startswith(echo_line):
+                                text = _echo_buf[cmd_echo_end + 1:]
+                                _echo_pending = False
+                                if not text:
+                                    continue
+                            else:
+                                text = _echo_buf
+                                _echo_pending = False
+                        elif len(_echo_buf) > _max_echo_len:
+                            # 超过命令长度还没 \n → 不是命令回显（TUI 程序），全部放过
+                            text = _echo_buf
+                            _echo_pending = False
                         else:
-                            # 整个 chunk 都是命令回显，跳过
                             continue
 
                     # 检测 shell 提示词中的完成 marker（PS1 的一部分，SIGINT 后仍会打印）
@@ -595,7 +634,7 @@ class PersistentShell:
             debug_log(f"Passthrough exception: {e}", 'error')
         finally:
             if not is_windows:
-                if old_tty is not None and os.isatty(fd_stdin):
+                if old_tty is not None and HAVE_FCNTL_TERMIOS and os.isatty(fd_stdin):
                     try:
                         termios.tcsetattr(fd_stdin, termios.TCSANOW, old_tty)
                     except Exception:
@@ -772,12 +811,12 @@ class PersistentShell:
 
         self.master_fd = master_fd
 
-        try:
-            fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
-                        struct.pack('HHHH', rows, cols, 0, 0))
-        except Exception:
-            pass
-
+        if HAVE_FCNTL_TERMIOS:
+            try:
+                fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
+                            struct.pack('HHHH', rows, cols, 0, 0))
+            except Exception:
+                pass
         # 预热 shell 二进制到 page cache，加速 os.execvpe()
         try:
             with open(self.shell, 'rb') as _f:
@@ -939,7 +978,7 @@ class PersistentShell:
         drained = 0
         empty_count = 0
         for _ in range(max_iterations):
-            data = self._read_from_master(timeout=0)
+            data = self._read_from_master(timeout=0.002)
             if not data:
                 empty_count += 1
                 if empty_count >= 2:
@@ -954,14 +993,13 @@ class PersistentShell:
         pass
 
     def _disable_echo(self):
-        """抑制 shell 的 PS1/命令回显。不关 PTY ECHO（否则 input() 输入不可见）。"""
+        """抑制 shell 的命令回显（由 _execute_passthrough 的智能 echo 跳过处理）"""
         if self.master_fd is None and self._winpty_handle is None:
             return
         try:
             if self.shell_name == 'cmd':
                 self._write_to_master(b"@echo off\n")
-            # Unix: 不发送 stty -echo，靠 PS1='' + _echo_skipped 过滤命令回显
-            self._drain_output()
+                self._drain_output()
         except OSError as e:
             debug_log(f"Failed to disable echo: {e}", 'error')
             pass
@@ -1192,10 +1230,10 @@ class PersistentShell:
         passthrough: bool = False
     ) -> Tuple[int, str]:
         """
-        Execute a command in the persistent shell.
+        Execute a command in the persistent shell（统一 TTY 通道）。
         
-        passthrough=True: 命令原样透传，不包 { }、不加 start marker、不设 TTY。
-        用于 TUI 程序 (nano/vim) 和普通 shell 命令，保证信号和终端模式正确。
+        passthrough 参数保留但忽略：所有命令走 PTY 直通模式，
+        使用 PS1 marker 检测完成，无限接近原生 TTY 行为。
         """
         debug_log(f"Executing command (passthrough={passthrough}): {repr(cmd)}")
         
@@ -1225,384 +1263,9 @@ class PersistentShell:
     
         return_code = -1
     
-        # === passthrough 模式：命令原样透传，不修改 TTY，不包 {} ===
-        if passthrough:
-            return self._execute_passthrough(cmd, output_buffer, log_info, log_error)
-    
-        markers = generate_markers()
-        start_marker = markers['start']      # "__CMD_START_xxx__"
-        end_marker = markers['end']          # "__CMD_END_xxx__:"
-    
-        # For TUI programs, we need to send commands in a way that doesn't interfere
-        # Use subshell or command grouping to ensure markers don't break TUI output
-        if self.shell_name in ('pwsh', 'powershell'):
-            # PowerShell: use script block with markers as separate write-host commands
-            full_cmd = (
-                f"Write-Host '{start_marker}'; "
-                f"{cmd}; "
-                f"$EC = $LASTEXITCODE; "
-                f"Write-Host ('{end_marker}' + $EC)\n"
-            )
-        elif self.shell_name == 'fish':
-            full_cmd = (
-                f"printf '%s\\n' '{start_marker}'; "
-                f"{cmd}; "
-                f"set EC $status; "
-                f"printf '%s:%d\\n' '{end_marker}' $EC\n"
-            )
-        elif self.shell_name == 'cmd':
-            full_cmd = (
-                f"echo {start_marker}\n"
-                f"{cmd}\n"
-                f"set EC=%errorlevel%\n"
-                f"echo {end_marker}%EC%\n"
-            )
-        else:
-            # Unix shells: { } grouping so SIGINT kills only the command group.
-            # 但如果命令本身含 { }（如 hello() { echo hi; }），嵌套花括号会让 bash 卡死。
-            # 此时跳过 { } 包裹，直接执行 + 捕获退出码。
-            if '{' in cmd or '}' in cmd:
-                full_cmd = (
-                    f"printf '%s\\n' '{start_marker}' >&2; "
-                    f"{cmd}; "
-                    f"EC=$?; "
-                    f"printf '%s:%d\\n' '{end_marker}' $EC >&2\n"
-                )
-            else:
-                full_cmd = (
-                    f"printf '%s\\n' '{start_marker}' >&2; "
-                    f"{{ {cmd}; }}; "
-                    f"EC=$?; "
-                    f"printf '%s:%d\\n' '{end_marker}' $EC >&2\n"
-                )
-    
-        debug_log(f"Full command with markers: {repr(full_cmd)}")
-        shell_log(full_cmd, 'WRITE_CMD')
-    
-        is_windows = platform.system() == "Windows"
-        fd_stdin = sys.stdin.fileno()
-    
-        old_tty = None
-        if not is_windows and os.isatty(fd_stdin):
-            old_tty = termios.tcgetattr(fd_stdin)
-            new_tty = termios.tcgetattr(fd_stdin)
-            # Disable input processing that can interfere with TUI programs
-            # Clear ICRNL (CR→NL), INLCR (NL→CR), IGNCR (ignore CR) to pass Enter as \r
-            new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
-            # Disable canonical mode, echo, and signal generation
-            new_tty[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
-            termios.tcsetattr(fd_stdin, termios.TCSANOW, new_tty)
-            debug_log("TTY settings modified for TUI support")
-    
-        # v9.7: Safe signal handling with Ctrl+C grace period
-        # Save original SIGINT and SIGWINCH handlers
-        old_sigint = None
-        old_sigwinch = None
-        _interrupted_flag = {'value': False}  # mutable container for handler access
-        if not is_windows:
-            # Custom SIGINT handler as safety net (ISIG is disabled so normally not triggered)
-            # We do NOT use SIG_DFL because if a signal somehow reaches us, Python would die
-            # and the persistent shell would be killed
-            def _sigint_handler(signum, frame):
-                _interrupted_flag['value'] = True
-                debug_log("SIGINT caught by Python handler (safety net)")
-            old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
-            if hasattr(signal, 'SIGWINCH'):
-                def sigwinch_handler(signum, frame):
-                    update_pty_size(self.master_fd)
-                old_sigwinch = signal.signal(signal.SIGWINCH, sigwinch_handler)
-            debug_log("Signal handlers set (SIGINT=custom_handler, SIGWINCH=handler)")
-    
-        full_raw_output = ""
-        found_start = False
-        interrupted = False
-    
-        try:
-            try:
-                self._write_to_master(full_cmd.encode('utf-8'))
-                debug_log("Command written to PTY")
-            except OSError as e:
-                debug_log(f"Failed to write to shell: {e}", 'error')
-                if log_error:
-                    try:
-                        log_error(f"Failed to write to shell: {e}", "")
-                    except TypeError:
-                        log_error(f"Failed to write to shell: {e}")
-                return -1, full_raw_output
-    
-            # AI 执行超时保护：select 加 1s 超时，30s 弹窗询问用户
-            _exec_start = time.time()
-            _ai_warned = False
-            _ai_kill = False
-
-            while True:
-                if not is_windows and self.master_fd is not None:
-                    try:
-                        rlist, _, _ = select.select([self.master_fd, fd_stdin], [], [], 1.0)
-                    except (select.error, OSError):
-                        continue
-                    data = None
-                    stdin_data = None
-                    if self.master_fd in rlist:
-                        try:
-                            data = os.read(self.master_fd, 4096)
-                        except OSError:
-                            data = None
-                        if DEBUG_ENABLED and data:
-                            shell_log(data, 'READ')
-                    if fd_stdin in rlist:
-                        try:
-                            stdin_data = os.read(fd_stdin, 1024)
-                        except OSError:
-                            stdin_data = None
-                else:
-                    # Windows: use reader thread queue
-                    data = self._read_from_master(timeout=0.01)
-                    stdin_data = None  # handled via msvcrt below
-
-                # ── AI 超时弹窗（不阻塞命令，不自动中断）──
-                if AI_EXECUTION_MODE and not found_start and not _ai_warned:
-                    _elapsed = time.time() - _exec_start
-                    if _elapsed > 30:
-                        _ai_warned = True
-                        sys.stderr.write(
-                            "\n\033[33m⏱ 该命令已执行超过 30 秒，可能未启动或已卡死。"
-                            " 输入 \033[1mk\033[22m 终止，或继续等待…\033[0m\n"
-                        )
-                        sys.stderr.flush()
-
-                # --- Process PTY output ---
-                if data is not None:
-                    if len(data) == 0:
-                        # EOF: shell process died (PTY slave closed)
-                        self._dead = True
-                        debug_log("PTY EOF detected, shell is dead")
-                        break
-                    try:
-                        text = data.decode('utf-8', errors='replace')
-                    except UnicodeDecodeError:
-                        text = data.decode('latin-1', errors='replace')
-
-                    if not found_start:
-                        # 搜索行首的 start_marker。
-                        # 真实的 printf 输出是独立一行 "__CMD_START_xxx__\n"，
-                        # 而 bash echo 回显是 "printf ... '__CMD_START_xxx__' ..."（嵌在引号内）。
-                        # 逐行扫描，只匹配整行等于 start_marker（忽略首尾空白）的行。
-                        _lines = text.split('\n')
-                        for _li, _line in enumerate(_lines):
-                            if _line.strip() == start_marker:
-                                found_start = True
-                                debug_log("Start marker detected (line-start match)")
-                                # 重建 after_marker：当前行剩余 + 后续所有行
-                                _marker_pos = _line.find(start_marker)
-                                _after_same = _line[_marker_pos + len(start_marker):]
-                                _rest_lines = _lines[_li + 1:]
-                                after_marker = '\n'.join(
-                                    ([_after_same] if _after_same else []) + _rest_lines
-                                )
-                                full_raw_output += start_marker + after_marker
-                                # Strip leading newlines
-                                after_marker = after_marker.lstrip('\n\r')
-                                if after_marker:
-                                    end_pattern = re.escape(end_marker) + r":(-?\d+)"
-                                    end_match = re.search(end_pattern, after_marker)
-                                    if end_match:
-                                        return_code = int(end_match.group(1))
-                                        debug_log(f"End marker in start chunk, exit={return_code}")
-                                        before_end = after_marker[:end_match.start()]
-                                        if before_end:
-                                            self._display_text(before_end)
-                                        break
-                                    else:
-                                        self._display_text(after_marker)
-                                break
-                    else:
-                        full_raw_output += text
-                        # Check for end marker
-                        end_pattern = re.escape(end_marker) + r":(-?\d+)"
-                        end_match = re.search(end_pattern, text)
-                        if end_match:
-                            return_code = int(end_match.group(1))
-                            debug_log(f"End marker detected, exit code: {return_code}")
-                            before_end = text[:end_match.start()]
-                            if before_end:
-                                self._display_text(before_end)
-                            break
-                        else:
-                            self._display_text(text)
-
-                # --- Process stdin input ---
-                if not is_windows:
-                    if stdin_data is not None:
-                        # AI 超时弹窗后：用户输入 'k' 则终止命令
-                        if _ai_warned and not _ai_kill:
-                            if b'k' in stdin_data.lower():
-                                _ai_kill = True
-                                sys.stderr.write("\033[33m⏹ 用户选择终止命令\033[0m\n")
-                                sys.stderr.flush()
-                                self._write_to_master(b'\x03')  # Ctrl+C 送 PTY
-                                self._drain_output()
-                                self._clear_screen()
-                                break
-                            else:
-                                # 非 k 输入仍然转发
-                                try:
-                                    self._write_to_master(stdin_data)
-                                except OSError:
-                                    pass
-                        else:
-                            try:
-                                self._write_to_master(stdin_data)
-                            except OSError:
-                                pass
-                        if DEBUG_ENABLED:
-                            shell_log(stdin_data, 'STDIN')
-                else:
-                    # Windows: use msvcrt.kbhit()
-                    try:
-                        import msvcrt
-                        if msvcrt.kbhit():
-                            user_data = msvcrt.getch()
-                            # AI 超时弹窗后拦截 'k'
-                            if _ai_warned and not _ai_kill and user_data.lower() == b'k':
-                                _ai_kill = True
-                                sys.stderr.write("\033[33m⏹ 用户选择终止命令\033[0m\n")
-                                sys.stderr.flush()
-                                try:
-                                    self._write_to_master(b'\x03')
-                                except OSError:
-                                    pass
-                                self._drain_output()
-                                self._clear_screen()
-                                break
-                            try:
-                                self._write_to_master(user_data)
-                            except OSError:
-                                pass
-                    except ImportError:
-                        pass
-    
-        except KeyboardInterrupt:
-            # v9.7: KeyboardInterrupt is a fallback (ISIG is disabled so this shouldn't fire,
-            # but our custom SIGINT handler may have been triggered from elsewhere)
-            interrupted = True
-            debug_log("KeyboardInterrupt caught")
-            try:
-                # Send ^C byte as backup
-                self._write_to_master(b'\x03')
-            except OSError:
-                pass
-            # Give the command a short moment to terminate
-            ctrlc_time = time.time()
-            self._drain_output()
-            self._clear_screen()
-        except Exception as e:
-            debug_log(f"Internal exception during command execution: {e}\n{traceback.format_exc()}", 'error')
-            if log_error:
-                try:
-                    log_error(f"Internal exception during command execution: {e}\n{traceback.format_exc()}", "")
-                except TypeError:
-                    log_error(f"Internal exception during command execution: {e}")
-            return_code = -1
-        finally:
-            # Restore TTY settings
-            if old_tty and not is_windows and os.isatty(fd_stdin):
-                try:
-                    termios.tcsetattr(fd_stdin, termios.TCSANOW, old_tty)
-                    debug_log("TTY settings restored")
-                except termios.error:
-                    pass
-            
-            # Restore signal handlers
-            if old_sigint is not None:
-                signal.signal(signal.SIGINT, old_sigint)
-            if old_sigwinch is not None:
-                signal.signal(signal.SIGWINCH, old_sigwinch)
-            debug_log("Signal handlers restored")
-    
-        # After command execution, drain any remaining output to clean up for next command
-        self._drain_output()
-    
-        # v9.7: Check if the safety-net SIGINT handler was triggered
-        if not interrupted and _interrupted_flag['value']:
-            interrupted = True
-            debug_log("Interrupted via SIGINT safety-net handler")
-    
-        if interrupted:
-            output_buffer.append("[Interrupted]")
-            return -1, full_raw_output
-    
-        clean_output = self._extract_clean_output(full_raw_output, markers)
-        output_buffer.append(clean_output)
-        
-        debug_log(f"Command completed with exit code {return_code}, output length: {len(clean_output)}")
-    
-        return return_code, full_raw_output
-
-    def _display_text(self, text: str):
-        """Display text to stdout — streaming filter, no intermediate list"""
-        wrote = False
-        lines = text.split('\n')
-        for i, line in enumerate(lines):
-            if '__CMD_START_' in line or '__CMD_END_' in line or '__READY_' in line:
-                continue
-            if self._done_marker and self._done_marker in line:
-                continue
-            stripped = line.strip()
-            if stripped in _FILTERED_LINES:
-                continue
-            if stripped.startswith(_FILTERED_PREFIXES):
-                continue
-            # 跳过 split('\n') 产生的尾部空元素，避免命令输出后多余的换行
-            if not stripped and i == len(lines) - 1:
-                continue
-            sys.stdout.write(line + '\n')
-            wrote = True
-        if wrote:
-            sys.stdout.flush()
-
-    def _extract_clean_output(self, raw: str, markers: dict) -> str:
-        """Extract clean command output from raw output"""
-        start_marker = markers['start']
-        end_marker = markers['end']
-
-        start_idx = raw.find(start_marker)
-        if start_idx == -1:
-            debug_log("Start marker not found in output extraction")
-            return ""
-
-        start_idx += len(start_marker)
-        while start_idx < len(raw) and raw[start_idx] in ('\n', '\r'):
-            start_idx += 1
-
-        end_pattern = re.escape(end_marker) + r":(-?\d+)"
-        end_match = re.search(end_pattern, raw[start_idx:])
-
-        if end_match:
-            output = raw[start_idx:start_idx + end_match.start()]
-        else:
-            output = raw[start_idx:]
-
-        lines = output.split('\n')
-        clean_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if '__CMD_START_' in line or '__CMD_END_' in line or '__READY_' in line:
-                continue
-            if self._done_marker and self._done_marker in line:
-                continue
-            if stripped in _FILTERED_LINES:
-                continue
-            if stripped.startswith(_FILTERED_PREFIXES):
-                continue
-            clean_lines.append(line)
-
-        while clean_lines and not clean_lines[0].strip():
-            clean_lines.pop(0)
-        while clean_lines and not clean_lines[-1].strip():
-            clean_lines.pop()
-
-        return '\n'.join(clean_lines)
+        # 统一使用 passthrough 模式（PS1 marker + PTY 直通）
+        # 所有命令（TUI/系统/工具）共用 TTY 通道，能力最强
+        return self._execute_passthrough(cmd, output_buffer, log_info, log_error)
 
     def cleanup(self):
         """Terminate shell process and release resources"""
@@ -1615,28 +1278,36 @@ class PersistentShell:
                 self._read_thread.join(timeout=1.0)
 
         if self.pid:
-            try:
-                if platform.system() != "Windows":
-                    os.killpg(self.pid, signal.SIGTERM)
-            except OSError:
-                pass
-            try:
-                os.kill(self.pid, signal.SIGTERM)
-                for _ in range(5):
-                    try:
-                        pid_result, status = os.waitpid(self.pid, os.WNOHANG)
-                        if pid_result:
-                            break
-                    except OSError:
-                        break
-                    
+            if platform.system() == "Windows":
+                # Windows: use taskkill to kill the entire process tree
                 try:
-                    os.kill(self.pid, signal.SIGKILL)
-                    os.waitpid(self.pid, 0)
+                    import subprocess as _sp
+                    _sp.run(["taskkill", "/T", "/F", "/PID", str(self.pid)],
+                            capture_output=True, timeout=5)
+                except Exception:
+                    pass
+            else:
+                try:
+                    os.killpg(self.pid, signal.SIGTERM)
                 except OSError:
                     pass
-            except OSError:
-                pass
+                try:
+                    os.kill(self.pid, signal.SIGTERM)
+                    for _ in range(5):
+                        try:
+                            pid_result, status = os.waitpid(self.pid, os.WNOHANG)
+                            if pid_result:
+                                break
+                        except OSError:
+                            break
+                        
+                    try:
+                        os.kill(self.pid, signal.SIGKILL)
+                        os.waitpid(self.pid, 0)
+                    except OSError:
+                        pass
+                except OSError:
+                    pass
             self.pid = None
 
         if self.master_fd is not None and platform.system() != "Windows":
@@ -1681,18 +1352,18 @@ class PersistentShell:
 # Public Interface
 # ======================================================================
 def _get_persistent_shell(cwd: Optional[str] = None) -> PersistentShell:
-    """Thread-safe get or create persistent shell instance"""
+    """Thread-safe get or create persistent shell instance（性能优化版）"""
     global _persistent_shell
     if _persistent_shell is None or not _persistent_shell.is_alive():
         with _shell_lock:
             if _persistent_shell is None or not _persistent_shell.is_alive():
                 if _persistent_shell:
                     _persistent_shell.cleanup()
-                start_cwd = cwd or os.getcwd()
-                caller_vars = _collect_caller_vars(depth=3)
-                _persistent_shell = PersistentShell(cwd=start_cwd, extra_vars=caller_vars)
+                start_cwd = cwd or _get_cwd_cached()
+                # 背景预热时无需采集调用者变量（栈回溯开销大且无用）
+                _persistent_shell = PersistentShell(cwd=start_cwd)
     if _persistent_shell is not None:
-        target_cwd = cwd or os.getcwd()
+        target_cwd = cwd or _get_cwd_cached()
         if _persistent_shell.cwd != target_cwd:
             _persistent_shell.set_cwd(target_cwd)
     return _persistent_shell
@@ -1766,7 +1437,7 @@ def run_cmd_sync(
                 log_info_func(f"Executing command: {cmd}")
 
         if cwd is None:
-            cwd = os.getcwd()
+            cwd = _get_cwd_cached()
 
         shell = _get_persistent_shell(cwd=cwd)
 
@@ -1776,7 +1447,6 @@ def run_cmd_sync(
                 output_buffer,
                 log_info=log_info_func,
                 log_error=log_error_func,
-                passthrough=passthrough
             )
 
         if return_code != 0:

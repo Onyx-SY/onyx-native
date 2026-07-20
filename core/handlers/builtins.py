@@ -31,25 +31,26 @@ def handle_exit(cmd_parts: List[str], request_id: str) -> None:
     _sys.exit(0)
 
 
-def handle_run(cmd_parts: List[str], request_id: str) -> None:
-    """脚本执行命令（委托 bin/run_cmd）"""
-    from core.context import get_ctx
-    from bin.run_cmd import handle_run_core
-    ctx = get_ctx()
-    handle_run_core(
-        cmd_parts=cmd_parts, request_id=request_id,
-        ROOT_DIR=ctx.ROOT_DIR, USER_HOME_DIR=ctx.USER_HOME_DIR,
-        OS_OR_TBS=ctx.OS_OR_TBS, sys_type=ctx.sys_type,
-        SUPPORTED_EXEC_SUFFIXES=ctx.SUPPORTED_EXEC_SUFFIXES,
-        executable_config=ctx.executable_config,
-        resolve_path=lambda p: _resolve(ctx, p),
-        get_virtual_path=lambda p: _get_vp(ctx, p),
-        check_sandbox_path=lambda p, r: _check_sp(ctx, p, r),
-        validate_param_path=lambda p, r: _vpp(ctx, p, r),
-        run_cmd_sync=_run_cmd_sync, PYTHON_EXE=ctx.PYTHON_EXE,
-        log_info=_log_info, log_error=_log_error,
-        Fore=ctx.Fore, Style=ctx.Style,
-    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def handle_export(cmd_parts: List[str], request_id: str) -> None:

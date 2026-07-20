@@ -79,7 +79,7 @@ def get_tool_permission(ctx: "AppContext", tool_dir: str) -> int:
         try:
             with open(perm_file, "w", encoding="utf-8") as f:
                 f.write("3")
-            if ctx.sys_type in ["Linux/macOS", "Termux", "SpecialLinux"]:
+            if ctx.sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
                 os.chmod(perm_file, 0o644)
             log_info(f"工具权限文件创建：{perm_file}（默认权限3）", str(uuid.uuid4()))
             return 3

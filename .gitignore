@@ -9,3 +9,5 @@ __pycache__/
 ai_plugin/
 *.lic
 1.txt
+need.txt
+err.txt

@@ -4323,22 +4323,14 @@ def handle_ai(
         
         no_memory_text = lang_text.get("no_memory", "No historical memory" if current_lang == "english" else "无历史记忆")
         # 记忆上下文注入：每次循环都从磁盘加载 library 记忆
-        # 系统提示词（agreement/tools/mood）保持在最前面，记忆紧随其后
+        # ── 缓存优化：记忆追加到末尾，保持前缀稳定 ──
         if memory_section != no_memory_text:
             _memory_content = f"#聊天记忆\n{memory_section}"
-            # 查找是否已有记忆 system 消息，有则更新
-            _mem_idx = next((i for i, m in enumerate(conversation_history)
-                            if m.get("role") == "system" and m.get("content", "").startswith("#聊天记忆")), None)
-            if _mem_idx is not None:
-                conversation_history[_mem_idx]["content"] = _memory_content
-            else:
-                # 插入到第一个 system 消息（核心提示词）之后，保持其最前位置
-                _first_sys = next((i for i, m in enumerate(conversation_history)
-                                  if m.get("role") == "system" and not m.get("content", "").startswith("#聊天记忆")), None)
-                if _first_sys is not None:
-                    conversation_history.insert(_first_sys + 1, {"role": "system", "content": _memory_content})
-                else:
-                    conversation_history.insert(0, {"role": "system", "content": _memory_content})
+            # 查找并移除旧的记忆消息（可能在任何位置）
+            conversation_history = [m for m in conversation_history
+                                   if not (m.get("role") == "system" and m.get("content", "").startswith("#聊天记忆"))]
+            # 追加到末尾（API 调用前最后一条 system 消息）
+            conversation_history.append({"role": "system", "content": _memory_content})
             
             # 后续循环：只移除已在 library 里的用户提问，不删 system 消息
             if interaction_count > 1:

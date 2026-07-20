@@ -1565,6 +1565,32 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         native.append(_make_tool(*_task_tool_def))
 
     # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════════
+    # Python 内置分析 — 零依赖，纯 ast 实现
+    # ═══════════════════════════════════════════
+
+    native.append(_make_tool(
+        "py_diagnostics",
+        "检查 Python 文件的语法错误和常见问题。零依赖，纯内置实现。",
+        {"path": {"type": "string", "description": ".py 文件路径"}},
+        ["path"], PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "py_symbols",
+        "提取 Python 文件的符号表（函数、类、方法及参数）。零依赖，纯内置实现。",
+        {"path": {"type": "string", "description": ".py 文件路径"}},
+        ["path"], PERM_READONLY,
+    ))
+    native.append(_make_tool(
+        "py_definition",
+        "查找 Python 文件中某位置的符号定义。零依赖，纯内置实现。",
+        {"path": {"type": "string", "description": ".py 文件路径"},
+         "line": {"type": "integer", "description": "行号（从 1 开始）"},
+         "character": {"type": "integer", "description": "列号（从 0 开始）"}},
+        ["path", "line", "character"], PERM_READONLY,
+    ))
+
+    # ═══════════════════════════════════════════
     # LSP — 语言服务器协议工具
     # ═══════════════════════════════════════════
 
@@ -2603,6 +2629,17 @@ def _exec_lsp_symbols(path: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
+# Python 内置分析 — 零依赖，纯 ast 实现
+# ═══════════════════════════════════════════════════════════
+
+from .ai_lib.py_analysis import (
+    exec_py_diagnostics,
+    exec_py_symbols,
+    exec_py_definition,
+)
+
+
+# ═══════════════════════════════════════════════════════════
 # Memory — 记忆查询执行器
 # ═══════════════════════════════════════════════════════════
 
@@ -3240,6 +3277,11 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "CronList":     lambda p: _exec_cron_list(p.get("enabled_only", False)),
         "CronDisable":  lambda p: _exec_cron_disable(p.get("cron_id", "")),
         "CronDelete":   lambda p: _exec_cron_delete(p.get("cron_id", "")),
+
+        # ── Python 内置分析（零依赖） ──
+        "py_diagnostics": lambda p: exec_py_diagnostics(p.get("path", "")),
+        "py_symbols":     lambda p: exec_py_symbols(p.get("path", "")),
+        "py_definition":  lambda p: exec_py_definition(p.get("path", ""), int(p.get("line", 1)), int(p.get("character", 0))),
 
         # ── LSP 语言服务 ──
         "LspDiagnostics": lambda p: _exec_lsp_diagnostics(p.get("path", "")),
@@ -4840,7 +4882,8 @@ def handle_ai(
                         # 不展示工具调用信息给用户，保持界面清爽
                     # Plan 模式：未确认前只暴露计划相关工具，禁止 AI 探索/执行
                     if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed:
-                        _plan_only = {"submit_plan", "mark_step_complete", "ExitPlanMode", "choose_ask"}
+                        _plan_only = {"submit_plan", "mark_step_complete", "ExitPlanMode", "choose_ask",
+                                       "py_diagnostics", "py_symbols", "py_definition"}
                         _active_tools = [t for t in native_tools
                                          if t.get("function", {}).get("name") in _plan_only]
                     else:
@@ -5224,6 +5267,7 @@ def handle_ai(
                     "TaskCreate","TaskList","TaskGet","TaskUpdate","TaskStop",
                     "TaskBoard","TaskRemove","TeamCreate","TeamList","TeamDelete",
                     "CronCreate","CronList","CronDisable","CronDelete",
+                    "py_diagnostics","py_symbols","py_definition",
                     "LspDiagnostics","LspHover","LspDefinition","LspReferences","LspSymbols",
                     "MemoryRead","MemorySearch","UndoLastEdit",
                 )

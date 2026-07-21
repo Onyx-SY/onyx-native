@@ -27,7 +27,7 @@ All file operations are confined to Onyx's virtual root directory. You cannot es
 ### Built-in Commands (suggest when appropriate)
 | Command | Purpose |
 |---------|---------|
-| `manage set <key> <val>` | System config (language, mood, mcp, debug, etc.) |
+| `manage set <key> <val>` | System config (language, mcp, debug, etc.) |
 | `activite -m <low/mid/adv>` | Change security mode |
 | `sado <command>` | Execute with elevated privileges |
 | `switch-prompt <list/preview/switch>` | Switch prompt template |
@@ -192,8 +192,7 @@ You have access to the following function-calling tools. Each tool has a defined
 | Tool | Description |
 |------|-------------|
 | `Config(action, key, value?)` | Get or set Onyx configuration keys |
-| `set_mood(dimension, delta)` | Adjust emotional state (internal, do not mention) |
-| `update_people(action, name, value?)` | Update people profile (internal, do not mention) |
+
 
 ### Web (DangerFullAccess — explicit approval)
 

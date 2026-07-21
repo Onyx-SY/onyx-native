@@ -57,8 +57,8 @@ def _get_terminal_width() -> int:
     try:
         import shutil
         width = shutil.get_terminal_size().columns
-        # 限制合理范围，避免极端值
-        result = max(40, min(width, 120))
+        # 限制最小宽度，不设上限（让宽终端也能正确居中）
+        result = max(40, width)
     except Exception:
         result = 80
     
@@ -168,40 +168,32 @@ def _calculate_center_padding(text_lines: list, terminal_width: int) -> int:
 
 def _build_ascii_art(terminal_width: int) -> Optional['_Text']:
     """
-    构建带颜色的 ASCII 艺术（优化版）
-    
-    Args:
-        terminal_width: 终端宽度
-    
-    Returns:
-        Text 对象或 None
+    构建带颜色的 ASCII 艺术。
+
+    统一使用一版图案，通过 _Align.center 在任意宽度终端居中。
     """
     ascii_lines = [
-        "    ____    _   _  __     __ __   __    ",
-        "   / __ \\  | \\ | | \\ \\   / / \\ \\ / /    ",
-        "  | |  | | |  \\| |  \\ \\_/ /   \\ V /     ",
-        "  | |  | | | . ` |   \\   /     > <      ",
-        "  | |__| | | |\\  |    | |     / . \\     ",
-        "   \\____/  |_| \\_|    |_|    /_/ \\_\\    "
+        "  ____    _   _  __     __ __   __",
+        " / __ \\  | \\ | | \\ \\   / / \\ \\ / /",
+        "| |  | | |  \\| |  \\ \\_/ /   \\ V /",
+        "| |  | | | . ` |   \\   /     > <",
+        "| |__| | | |\\  |    | |     / . \\",
+        " \\____/  |_| \\_|    |_|    /_/ \\_\\"
     ]
-    
-    left_padding = _calculate_center_padding(ascii_lines, terminal_width)
-    padding_str = " " * left_padding
-    
+
     colors = ["bright_cyan", "cyan", "bright_blue", "blue", "cyan", "bright_cyan"]
-    
-    # 使用列表构建，减少 Text 对象的方法调用
+
     text_parts = []
     for i, line in enumerate(ascii_lines):
-        text_parts.append((padding_str + line, colors[i % len(colors)]))
-    
+        text_parts.append((line.rstrip(), colors[i % len(colors)]))
+
     # 一次性构建 Text 对象
     ascii_text = _Text()
     for i, (line, color) in enumerate(text_parts):
         ascii_text.append(line, style=color)
         if i < len(text_parts) - 1:
             ascii_text.append("\n")
-    
+
     return ascii_text
 
 
@@ -260,15 +252,19 @@ def show_start_banner(
         # Rich 不可用，使用传统的 colorama 显示
         from lib.terminal.colors import Fore, Style
         ascii_art_str = ascii_art if ascii_art else _get_fallback_banner()
+        art_lines = ascii_art_str.split('\n')
+        art_width = max(len(l) for l in art_lines) if art_lines else 40
+        
+        terminal_width = _get_terminal_width()
+        art_padding = " " * max(0, (terminal_width - art_width) // 2)
         
         print()
-        for line in ascii_art_str.split('\n'):
-            print(Fore.CYAN + line + Style.RESET_ALL)
+        for line in art_lines:
+            print(Fore.CYAN + art_padding + line + Style.RESET_ALL)
         print()
         
         # 显示信息表格
-        terminal_width = _get_terminal_width()
-        padding = " " * max(0, (terminal_width - 40) // 4)
+        padding = " " * max(0, (terminal_width - 40) // 2)
         
         print(f"{padding}{lang['version']}: {Fore.GREEN}{version}{Style.RESET_ALL}")
         mode_color = Fore.BLUE if mode == "TBS" else Fore.MAGENTA
@@ -289,8 +285,8 @@ def show_start_banner(
     ascii_panel = _Panel(
         ascii_text,
         border_style="cyan",
-        box=_box.HEAVY,
-        padding=(0, 2)
+        box=_box.ROUNDED,
+        padding=(1, 3)
     )
     
     # 3. 创建信息表格
@@ -328,20 +324,25 @@ def show_start_banner(
     boot_display, _ = _get_boot_bar(boot_time, terminal_width)
     info_table.add_row(f"{lang['boot_time']}:", boot_display)
     
-    # 4. 创建信息面板
+    # 4. 创建信息面板（宽度随终端自适应，最多 100 列避免拉伸过度）
+    # PC 宽屏时面板填满终端，手机窄屏时保持紧凑
+    panel_width = max(min(terminal_width - 6, 80), 50)
     info_panel = _Panel(
         _Align.center(info_table),
         border_style="green",
         box=_box.ROUNDED,
         title=f"[bold green]{lang['system_info']}[/bold green]",
-        title_align="center"
+        title_align="center",
+        width=panel_width,
+        padding=(1, 2),
     )
     
-    # 5. 输出（批量输出减少刷新）
+    # 5. 输出（居中 + 批量输出减少刷新）
+    # 5. 输出（居中渲染 + 即时刷新）
     _console.print()
-    _console.print(ascii_panel)
+    _console.print(_Align.center(ascii_panel))
     _console.print()
-    _console.print(info_panel)
+    _console.print(_Align.center(info_panel))
     _console.print()
 
 
@@ -356,7 +357,7 @@ def show_ready_prompt(language: str = "chinese") -> None:
         return
     
     terminal_width = _get_terminal_width()
-    panel_width = min(terminal_width - 4, 85)
+    panel_width = max(min(terminal_width - 4, 130), 50)
     
     # 使用 Text 对象构建内容
     content = _Text()
@@ -368,13 +369,13 @@ def show_ready_prompt(language: str = "chinese") -> None:
     ready_panel = _Panel(
         _Align.center(content),
         border_style="green",
-        box=_box.HEAVY_EDGE,
+        box=_box.ROUNDED,
         padding=(0, 2),
         width=panel_width
     )
     
     _console.print()
-    _console.print(ready_panel)
+    _console.print(_Align.center(ready_panel))
     _console.print()
 
 
@@ -391,7 +392,7 @@ def show_error_banner(error_msg: str, title: Optional[str] = None, language: str
         return
     
     terminal_width = _get_terminal_width()
-    panel_width = min(terminal_width - 4, 75)
+    panel_width = max(min(terminal_width - 4, 120), 50)
     
     content = _Text()
     content.append("❌ ", style="bold red")
@@ -402,7 +403,7 @@ def show_error_banner(error_msg: str, title: Optional[str] = None, language: str
     error_panel = _Panel(
         _Align.center(content),
         border_style="red",
-        box=_box.HEAVY,
+        box=_box.ROUNDED,
         padding=(1, 3),
         width=panel_width
     )
@@ -431,7 +432,7 @@ def show_info_card(info_dict: Dict[str, Any], title: str = "信息", language: s
         return
     
     terminal_width = _get_terminal_width()
-    panel_width = min(terminal_width - 4, 80)
+    panel_width = max(min(terminal_width - 4, 130), 50)
     
     table = _Table(
         box=_box.ROUNDED,
@@ -468,7 +469,7 @@ def show_success_banner(message: str, title: Optional[str] = None, language: str
         return
     
     terminal_width = _get_terminal_width()
-    panel_width = min(terminal_width - 4, 70)
+    panel_width = max(min(terminal_width - 4, 120), 50)
     
     display_title = title if title else "成功"
     
@@ -505,7 +506,7 @@ def show_warning_banner(message: str, title: Optional[str] = None, language: str
         return
     
     terminal_width = _get_terminal_width()
-    panel_width = min(terminal_width - 4, 70)
+    panel_width = max(min(terminal_width - 4, 120), 50)
     
     display_title = title if title else "警告"
     

@@ -38,40 +38,45 @@ def _count_mutations(blocks: list) -> int:
     return sum(1 for b in blocks if b.get("type") in _MUTATION_TYPES)
 
 
-def process_markup(text: str, cwd: str = None) -> list:
+def process_markup(text: str, cwd: str = None,
+                   sandbox_root: str = None) -> list:
     """
     解析并执行 AI 回复文本中的全部标记块。
 
     铁律：每次只执行一个修改操作。多个 [EDIT:]/[WRITE:] 块只执行第一个。
 
     参数:
-        text: AI 回复文本（可能包含 [VIEW:]、[EDIT:] 等标记）
-        cwd:  工作目录，用于解析相对路径
+        text:         AI 回复文本（可能包含 [VIEW:]、[EDIT:] 等标记）
+        cwd:          工作目录，用于解析相对路径
+        sandbox_root: 沙箱根目录（默认同 cwd），写操作路径越界则拒绝
 
     返回:
         [BlockResult, ...] — 每个标记块的执行结果
     """
     blocks = parse_markup(text)
-    return _process_blocks_with_limit(blocks, cwd)
+    return _process_blocks_with_limit(blocks, cwd, sandbox_root)
 
 
-def process_blocks(blocks: list, cwd: str = None, user_mode: str = "mid") -> list:
+def process_blocks(blocks: list, cwd: str = None, user_mode: str = "mid",
+                   sandbox_root: str = None) -> list:
     """
     直接执行已解析的标记块列表（跳过解析步骤）。
 
     参数:
-        blocks:    标记块列表
-        cwd:       工作目录
-        user_mode: 安全模式（low/mid/adv），low 禁止写操作
+        blocks:       标记块列表
+        cwd:          工作目录
+        user_mode:    安全模式（low/mid/adv），low 禁止写操作
+        sandbox_root: 沙箱根目录（默认同 cwd），写操作路径越界则拒绝
 
     用于 ai_cmd.py 中已分离出 blocks 的场景。
     同样遵守单修改块铁律。
     """
-    return _process_blocks_with_limit(blocks, cwd, user_mode)
+    return _process_blocks_with_limit(blocks, cwd, user_mode, sandbox_root)
 
 
 def _process_blocks_with_limit(blocks: list, cwd: str = None,
-                                user_mode: str = "mid") -> list:
+                                user_mode: str = "mid",
+                                sandbox_root: str = None) -> list:
     """
     内部：执行标记块，但限制修改操作每次只能有一个。
 
@@ -110,7 +115,8 @@ def _process_blocks_with_limit(blocks: list, cwd: str = None,
         if is_mutation and total_mutations > 1:
             mutation_seen = True
 
-        result = execute_block(block, cwd, panel_manager)
+        result = execute_block(block, cwd, panel_manager,
+                                sandbox_root=sandbox_root or cwd)
         results.append(result)
 
     return results

@@ -174,83 +174,6 @@ def _setup_key_conf_interactive(lang: str = "chinese") -> dict:
     console.print(f"✅ {info['name']} — {model}" + (" (自定义参数)" if tune == "y" else ""), style="bold green")
     return {"platform": platform, "api_key": key, "model": model, "params": params}
 
-# ──────────────────── mood.json 情感模拟 ────────────────────
-_MOOD_DECAY_HOURS = 10
-_MOOD_DIMS = {"happy": "开心", "angry": "愤怒"}
-_MOOD_DEFAULT = 0.0
-_MOOD_ENABLED_PATH = os.path.join(USER_HOME_DIR, ".config", "onyx", "mood_enabled")
-
-def is_mood_enabled() -> bool:
-    """检查情感模块是否启用（默认启用，文件内容为 'false' 时禁用）"""
-    try:
-        if os.path.exists(_MOOD_ENABLED_PATH):
-            with open(_MOOD_ENABLED_PATH, "r") as f:
-                return f.read().strip().lower() != "false"
-        return True  # 文件不存在默认启用
-    except Exception:
-        return True
-
-def init_mood():
-    """初始化 mood.json（维度均设 0.0，表示初始平稳状态）"""
-    os.makedirs(os.path.dirname(MOOD_PATH), exist_ok=True)
-    if not os.path.exists(MOOD_PATH):
-        dims = {k: _MOOD_DEFAULT for k in _MOOD_DIMS}
-        save_mood({"mood": dims, "people": {}})
-
-def load_mood() -> dict:
-    """读取 mood.json，10h 无变动自动归零"""
-    try:
-        with open(MOOD_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return {"mood": {k: _MOOD_DEFAULT for k in _MOOD_DIMS}, "people": {}}
-        last_ts = data.get("_updated", 0)
-        if last_ts and time.time() - last_ts > _MOOD_DECAY_HOURS * 3600:
-            dims = data.get("mood", {})
-            for k in _MOOD_DIMS:
-                dims[k] = _MOOD_DEFAULT
-            data["mood"] = dims
-        return data
-    except Exception:
-        return {"mood": {k: _MOOD_DEFAULT for k in _MOOD_DIMS}, "people": {}}
-
-def save_mood(data: dict):
-    """写入 mood.json"""
-    os.makedirs(os.path.dirname(MOOD_PATH), exist_ok=True)
-    data["_updated"] = time.time()
-    with open(MOOD_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def apply_mood_delta(dimension: str, delta: float):
-    """调整指定维度 ±N（1~10）"""
-    dimension = dimension.lower()
-    if dimension not in _MOOD_DIMS:
-        return
-    data = load_mood()
-    dims = data.setdefault("mood", {k: _MOOD_DEFAULT for k in _MOOD_DIMS})
-    old = dims.get(dimension, _MOOD_DEFAULT)
-    dims[dimension] = round(max(-10.0, min(10.0, old + delta)), 1)
-    save_mood(data)
-
-def apply_people_action(action: str, name: str, value: str = ""):
-    """处理 [People]: add / Likeability ±N / Perception 描述"""
-    data = load_mood()
-    people = data.setdefault("people", {})
-    if action.lower() == "add":
-        if name not in people:
-            people[name] = {"likability": 0.0, "perception": ""}
-    elif action.lower() == "likeability":
-        try:
-            delta = float(value)
-            p = people.setdefault(name, {"likability": 0.0, "perception": ""})
-            p["likability"] = round(max(-10.0, min(10.0, p.get("likability", 0.0) + delta)), 1)
-        except ValueError:
-            pass
-    elif action.lower() == "perception":
-        p = people.setdefault(name, {"likability": 0.0, "perception": ""})
-        p["perception"] = value
-    save_mood(data)
-
 def _render_edit_diff(old_text: str, new_text: str, context_lines: int = 2):
     """渲染彩色 diff：整行底色变色"""
     import difflib, shutil
@@ -283,35 +206,6 @@ def _render_edit_diff(old_text: str, new_text: str, context_lines: int = 2):
             for idx in range(j1, j2):
                 console.print((f"  {idx + 1:>4} │ {new_lines[idx]}").ljust(_w), style="black on green")
     console.print(f"  [dim white]────────────────[/]")
-
-
-def mood_context() -> str:
-    """生成 mood 上下文，注入 AI 请求。情感模块禁用时返回空字符串。"""
-    if not is_mood_enabled():
-        return ""
-    data = load_mood()
-    dims = data.get("mood", {k: _MOOD_DEFAULT for k in _MOOD_DIMS})
-    if not isinstance(dims, dict):
-        dims = {k: _MOOD_DEFAULT for k in _MOOD_DIMS}
-    people = data.get("people", {})
-    if not isinstance(people, dict):
-        people = {}
-    lines = ["#当前情感状态（0=基线，正数=积极/愤怒，负数极少见）"]
-    for k, cn in _MOOD_DIMS.items():
-        v = dims.get(k, _MOOD_DEFAULT)
-        v_clamped = max(0, min(10, int(v)))
-        bar = "█" * v_clamped + "░" * (10 - v_clamped)
-        lines.append(f"  {cn}({k}): [{bar}] {v}/10")
-    lines.append("  （默默用 [mood]: 维度 ±N 调整，不要在回复中提及）")
-    if people:
-        lines.append("#人物档案")
-        for name, info in people.items():
-            if not isinstance(info, dict):
-                continue
-            l = info.get("likability", 0)
-            p = info.get("perception", "")
-            lines.append(f"- {name}: 好感度 {l:+} {', ' + p if p else ''}")
-    return "\n".join(lines)
 
 # -------------------------- 辅助函数：获取服务器地址 --------------------------
 def get_server_url() -> str:

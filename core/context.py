@@ -192,6 +192,9 @@ class AppContext:
     _RE_MULTI_SPACE: Any = None
     _RE_OPT_SLASH: Any = None
     _RE_OPT_STAR: Any = None
+    _RE_CMD_FLAG_GAP: Any = None
+    _RE_TOKEN_PATH_START: Any = None
+    _RE_TOKEN_PATH_AFTER_SP: Any = None
 
     # ---- 退出码 ----
     _LAST_EXIT_CODE: int = 0
@@ -216,6 +219,12 @@ class AppContext:
             self._RE_OPT_SLASH = re.compile(r'(\s*-\w+)\s*(\/)')
         if not self._RE_OPT_STAR:
             self._RE_OPT_STAR = re.compile(r'(\s*-\w+)\s*(\*)')
+        if not self._RE_CMD_FLAG_GAP:
+            self._RE_CMD_FLAG_GAP = re.compile(r'(\w)(?=-[a-zA-Z0-9])')
+        if not self._RE_TOKEN_PATH_START:
+            self._RE_TOKEN_PATH_START = re.compile(r'(?<=^)([a-zA-Z0-9_.]+)(?=/)')
+        if not self._RE_TOKEN_PATH_AFTER_SP:
+            self._RE_TOKEN_PATH_AFTER_SP = re.compile(r'(?<=\s)([a-zA-Z0-9_.]+)(?=/)')
         if not self._INTERACTIVE_FULL:
             self._INTERACTIVE_FULL = self._INTERACTIVE_DEFAULT
         if not self._COLOR_MAP:

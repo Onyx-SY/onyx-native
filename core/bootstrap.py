@@ -137,7 +137,7 @@ def verify_admin_password(ctx: "AppContext") -> bool:
         pwd = getpass(p["input"])
         with open(ctx.ADMIN_PASSWORD_PATH, "r", encoding="utf-8") as f:
             stored = f.read().strip()
-        if argon2id_verify(pwd, "", stored):
+        if argon2id_verify(pwd, stored):
             return True
         print(ctx.Fore.RED + p["incorrect"] + ctx.Style.RESET_ALL)
         return False

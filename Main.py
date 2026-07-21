@@ -381,15 +381,7 @@ LANGUAGE_TEXT = {
             "first_run_proceeding": "🚀 正在进入 Onyx 主程序…",
             "setup_welcome": "🔧 欢迎！检测到这是首次启动，请完成初始配置。",
             "setup_step_lang": "第 1 步：选择语言",
-            "setup_step_ai": "第 2 步：配置 AI",
-            "ai_select_platform": "🤖 选择 AI 平台",
-            "ai_custom_platform": "自定义 (Custom)",
-            "ai_enter_key": "🔑 输入 {} API Key",
-            "ai_enter_url": "🌐 输入 API 地址",
-            "ai_enter_model": "📋 输入模型名称",
-            "ai_select_model": "📋 选择模型",
-            "ai_skip_config": "⊙ 已跳过 AI 配置（之后可在 Onyx 中用 ai 命令设置）",
-            "ai_config_saved": "✅ AI 配置已保存"
+
         }
     },
     "english": {
@@ -494,15 +486,7 @@ LANGUAGE_TEXT = {
             "first_run_proceeding": "🚀 Proceeding to Onyx main program…",
             "setup_welcome": "🔧 Welcome! First launch detected — please complete initial setup.",
             "setup_step_lang": "Step 1: Select language",
-            "setup_step_ai": "Step 2: Configure AI",
-            "ai_select_platform": "🤖 Select AI platform",
-            "ai_custom_platform": "Custom",
-            "ai_enter_key": "🔑 Enter {} API Key",
-            "ai_enter_url": "🌐 Enter API URL",
-            "ai_enter_model": "📋 Enter model name",
-            "ai_select_model": "📋 Select model",
-            "ai_skip_config": "⊙ AI config skipped (you can set it later with the ai command in Onyx)",
-            "ai_config_saved": "✅ AI config saved"
+
         }
     }
 }
@@ -540,46 +524,7 @@ class BilingualManager:
         return self.text["check_steps"]
 
 
-def _load_ai_models() -> dict:
-    """Load AI platform configs from etc/ai/models.json.
 
-    Returns a dict keyed by platform id.  When the JSON file is missing or
-    unparseable a hardcoded fallback is used so the app never breaks.
-    """
-    models_path = os.path.join(ROOT_DIR, "onyx", "etc", "ai", "models.json")
-    try:
-        with open(models_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Strip meta keys (anything without an api_url)
-        return {k: v for k, v in data.items() if isinstance(v, dict) and "api_url" in v}
-    except Exception:
-        pass
-    # ── Hardcoded fallback (kept in sync with models.json) ──
-    return {
-        "deepseek": {
-            "name": "深度求索DeepSeek",
-            "api_url": "https://api.deepseek.com/v1/chat/completions",
-            "default_model": "deepseek-v4-flash",
-            "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
-            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
-            "thinking": {"type": "enabled"},
-            "reasoning_effort": "high",
-        },
-        "openai": {
-            "name": "OpenAI",
-            "api_url": "https://api.openai.com/v1/chat/completions",
-            "default_model": "gpt-5.5-instant",
-            "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro"],
-            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
-        },
-        "anthropic": {
-            "name": "Anthropic",
-            "api_url": "https://api.anthropic.com/v1/messages",
-            "default_model": "claude-sonnet-4-6",
-            "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
-            "params": {"max_tokens": 4096},
-        },
-    }
 
 
 class UltraFastEnvironmentChecker:
@@ -765,15 +710,18 @@ class UltraFastEnvironmentChecker:
     
     @timer("get_python_executable")
     def get_python_executable(self) -> str:
-        """获取Python可执行文件路径"""
+        """获取Python可执行文件路径——直接信任当前解释器（上层脚本已激活虚拟环境）"""
+        # 直接使用当前运行的解释器。上层启动脚本已经负责激活虚拟环境，
+        # 进入后 sys.executable 自动指向 venv 内的 Python，无需多層检测。
         if sys.executable and os.path.exists(sys.executable):
             return sys.executable
-        
+
+        # 极罕见的兜底：sys.executable 为空时搜索 PATH
         for name in ["python3", "python", "python3.9", "python3.8", "python3.7"]:
             python_path = shutil.which(name)
             if python_path:
                 return python_path
-        
+
         raise FileNotFoundError("Python可执行文件未找到")
     
     def get_pip_executable(self, python_exe: str) -> str:
@@ -868,7 +816,7 @@ class UltraFastEnvironmentChecker:
     def install_single_lib(self, lib_name: str, mirror: str) -> bool:
         """安装单个库"""
         try:
-            pip_cmd = self.pip_exe.split() + ["install", "--no-cache-dir", "-i", mirror, lib_name]
+            pip_cmd = [self.python_exe, "-m", "pip", "install", "--no-cache-dir", "-i", mirror, lib_name]
             result = subprocess.run(pip_cmd, check=False, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, timeout=30)
             return result.returncode == 0
@@ -884,7 +832,7 @@ class UltraFastEnvironmentChecker:
         best_mirror = self.test_mirror_speed()
         
         try:
-            pip_cmd = self.pip_exe.split() + ["install", "--no-cache-dir", "-i", best_mirror] + libs
+            pip_cmd = [self.python_exe, "-m", "pip", "install", "--no-cache-dir", "-i", best_mirror] + libs
             result = subprocess.run(pip_cmd, check=False, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, timeout=60)
             return result.returncode == 0
@@ -1021,20 +969,6 @@ class UltraFastEnvironmentChecker:
 
         # ── 自动编译 C 扩展库 ──
         self._auto_compile_c_extensions()
-
-        # 初始化 .ai_s/onyx_ai.md（最高指示文件，AI 通过 [PROMPT]: 写入）
-        ai_s_dir = os.path.join(user_home_dir, ".ai_s")
-        onyx_ai_file = os.path.join(ai_s_dir, "onyx_ai.md")
-        if not os.path.exists(onyx_ai_file):
-            try:
-                os.makedirs(ai_s_dir, exist_ok=True)
-                with open(onyx_ai_file, "w", encoding="utf-8") as f:
-                    f.write("# 最高指示 / Supreme Directives\n\n")
-                    f.write("> 此文件由 AI 通过 `[PROMPT]:` 字段自动维护，记录跨会话的重要信息。\n")
-                    f.write("> This file is auto-maintained by AI via `[PROMPT]:` field for cross-session memory.\n")
-                log_print(f"📝 已初始化最高指示文件: {onyx_ai_file}")
-            except Exception as e:
-                log_print(f"⚠️ 初始化最高指示文件失败: {e}")
 
         return True
 
@@ -1432,7 +1366,18 @@ class UltraFastEnvironmentChecker:
         
         self.disable_ultra_fast_mode()
         log_print("✅ 永久缓存和极致启动标记已清除")
-    
+
+    def _clear_onyx_cache(self):
+        """清除 ~/.cache/onyx 目录（Python 环境变更时调用）"""
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "onyx")
+        if os.path.exists(cache_dir):
+            try:
+                import shutil
+                shutil.rmtree(cache_dir)
+                log_print(f"🧹 已清除缓存目录: {cache_dir}")
+            except Exception as e:
+                log_print(f"⚠️ 清除缓存目录失败: {e}")
+
     @timer("jump_to_main_immediately")
     def jump_to_main_immediately(self, cached_results: dict):
         """极致优化：直接跳转到主程序"""
@@ -1447,7 +1392,9 @@ class UltraFastEnvironmentChecker:
             os.environ["MAIN_START_TIME"] = str(time.time())
             
             self.ensure_c_files_for_termux()
-            
+
+            self._ensure_rich()
+
             onyx_import_start = time.perf_counter()
             from Onyx import main_loop
             onyx_import_cost = round((time.perf_counter() - onyx_import_start) * 1000, 3)
@@ -1479,6 +1426,20 @@ class UltraFastEnvironmentChecker:
             onyx_abs = os.path.join(main_file_dir, "Onyx.py")
             subprocess.run([self.python_exe, onyx_abs], check=False)
     
+    def _ensure_rich(self) -> None:
+        """确保 rich 库可用（快速检查，不阻塞）"""
+        try:
+            import rich  # noqa: F401
+        except ImportError:
+            log_print("⚠️ 核心库 rich 未安装，尝试自动安装…")
+            try:
+                subprocess.run(
+                    [self.python_exe, "-m", "pip", "install", "rich", "--no-cache-dir"],
+                    check=False, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
     @timer("execute_single_command")
     def execute_single_command(self, command: str, quiet: bool = False) -> int:
         """执行单个命令"""
@@ -1491,6 +1452,7 @@ class UltraFastEnvironmentChecker:
                     if root_dir not in sys.path:
                         sys.path.insert(0, root_dir)
                     
+                    self._ensure_rich()
                     import Onyx
                     exit_code = Onyx.run_command_once(command)
                     return exit_code
@@ -1513,11 +1475,13 @@ class UltraFastEnvironmentChecker:
                 if root_dir not in sys.path:
                     sys.path.insert(0, root_dir)
                 
+                self._ensure_rich()
                 import Onyx
                 exit_code = Onyx.run_command_once(command)
                 return exit_code
             except:
-                exit_code = subprocess.run([self.python_exe, "cmd.py", "-c", command], 
+                cmd_py = os.path.join(main_file_dir, "cmd.py")
+                exit_code = subprocess.run([self.python_exe, cmd_py, "-c", command],
                                           check=False).returncode
                 return exit_code
         except:
@@ -1597,92 +1561,31 @@ class UltraFastEnvironmentChecker:
         except Exception as e:
             log_print(f"[FirstRun] Failed to save language: {e}", is_error=True)
 
-    def _save_ai_config(self, platform: str, api_key: str, model: str,
-                        api_url: str, params: dict):
-        """Persist AI config to key.conf (delegate to bin.ai_cmd)."""
-        try:
-            # 使用 ai_cmd 的 save_key_conf（自动混淆 api_key）
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "bin"))
-            from bin.ai_cmd import save_key_conf
-            save_key_conf(platform, api_key, model, params)
-            log_print(f"[FirstRun] AI config saved")
-        except Exception as e:
-            log_print(f"[FirstRun] Failed to save AI config: {e}", is_error=True)
-
-    _AI_PLATFORMS = _load_ai_models()
-
     def _first_time_setup_wizard(self):
-        """First-time interactive setup: language → AI config.
-
-        Uses InquirerPy when available; falls back to numbered menus with
-        plain input().  All prompts are bilingual and switch to the
-        user's chosen language immediately after Step 1.
+        """First-time interactive setup: language selection only.
+        AI 配置已移出启动流程，用户可在 Onyx 中用 ai 命令随时设置。
         """
         iq = self._try_import_inquirerpy()
 
         # ── Header ────────────────────────────────────────────────────
         welcome = ("\n" + "=" * 64 + "\n"
                    "  🔧 欢迎！检测到首次启动 / Welcome! First launch detected\n"
-                   "  请完成初始配置 / Please complete initial setup\n"
+                   "  请选择语言 / Please select language\n"
                    + "=" * 64)
         print(welcome)
         log_print("[FirstRun] Setup wizard started")
 
-        # ── Step 1: Language ──────────────────────────────────────────
+        # ── Language ──────────────────────────────────────────────────
         print(f"\n  📌 {self.t('setup_step_lang')}")
         lang_title = "🌐 请选择语言 / Please select language"
         lang_options = ["中文 (Chinese)", "English"]
         lang_choice = self._select_one(iq, lang_title, lang_options, default=lang_options[0])
         lang = "chinese" if "中文" in lang_choice else "english"
 
-        # Switch language immediately
         self.lang.current_language = lang
         self.lang.text = LANGUAGE_TEXT[lang]
         self._save_language_setting(lang)
         print(f"  ✅ {lang_choice}")
-
-        # ── Step 2: AI Configuration ──────────────────────────────────
-        t = self.t  # shorthand
-        print(f"\n  📌 {t('setup_step_ai')}")
-
-        # Build platform list (built-in + custom)
-        plat_keys = list(self._AI_PLATFORMS.keys()) + ["custom"]
-        plat_names = [self._AI_PLATFORMS[p]["name"] for p in self._AI_PLATFORMS]
-        plat_names.append(t("ai_custom_platform"))
-
-        plat_choice = self._select_one(iq, t("ai_select_platform"), plat_names)
-        if not plat_choice:
-            print(f"  {t('ai_skip_config')}")
-            return
-        plat_idx = plat_names.index(plat_choice)
-        platform = plat_keys[plat_idx]
-
-        # ── API Key (masked input) ──
-        key_prompt = t("ai_enter_key").format(
-            self._AI_PLATFORMS[platform]["name"] if platform != "custom" else t("ai_custom_platform")
-        )
-        api_key = self._secret_input(iq, key_prompt)
-        if not api_key:
-            print(f"  {t('ai_skip_config')}")
-            return
-
-        # ── URL & Model ──
-        if platform == "custom":
-            api_url = self._text_input(iq, t("ai_enter_url"),
-                                       "https://api.openai.com/v1/chat/completions")
-            model = self._text_input(iq, t("ai_enter_model"), "gpt-4")
-            params = {"temperature": 0.1, "max_tokens": 4096}
-        else:
-            info = self._AI_PLATFORMS[platform]
-            api_url = info["api_url"]
-            model = self._select_one(iq, t("ai_select_model"), info["models"],
-                                     default=info["default_model"])
-            params = dict(info["params"])
-
-        # ── Save ──
-        self._save_ai_config(platform, api_key, model, api_url, params)
-        info_name = self._AI_PLATFORMS[platform]["name"] if platform != "custom" else t("ai_custom_platform")
-        print(f"  {t('ai_config_saved')}: {info_name} — {model}")
 
     # ── First-run forced check helpers ─────────────────────────────────────────
     # These are used only by first_run_forced_check() to print bilingual
@@ -1799,6 +1702,8 @@ class UltraFastEnvironmentChecker:
                 REQUIRED_DEPENDENCIES["python_libs"]
             )
             if missing_libs:
+                # 缓存可能指向错误的 Python 环境，清除后下一轮重新检测
+                self._clear_onyx_cache()
                 print(f"  {self.t('missing_libs')}: {', '.join(missing_libs)}")
                 ok = self.parallel_install_libs(missing_libs)
                 if ok:
@@ -1964,8 +1869,8 @@ class UltraFastEnvironmentChecker:
             if permanent_cache:
                 cache_data = permanent_cache
                 self.system_type = cache_data.get('system_type', self.system_type)
-                self.python_exe = cache_data.get('python_exe', self.python_exe)
-                self.pip_exe = cache_data.get('pip_exe', self.pip_exe)
+                # python_exe/pip_exe 不由缓存恢复——__init__ 已在
+                # get_python_executable 中自动检测虚拟环境
                 
                 cache_data['permanent_cache_used'] = True
                 self.jump_to_main_immediately(cache_data)
@@ -1998,6 +1903,7 @@ class UltraFastEnvironmentChecker:
                     missing_files = future_files.result()
             
             if missing_libs:
+                self._clear_onyx_cache()
                 with TimeIt("安装缺失库"):
                     self.parallel_install_libs(missing_libs)
             
@@ -2053,6 +1959,9 @@ def signal_handler(signum, frame):
 
 
 def main() -> None:
+    # 启动伊始清屏（清屏 + 清滚动缓冲区 + 光标归位）
+    print('\033[3J\033[2J\033[H', end='', flush=True)
+
     main_start = time.perf_counter()
     
     parser = argparse.ArgumentParser(

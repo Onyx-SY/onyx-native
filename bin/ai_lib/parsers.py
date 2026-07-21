@@ -8,7 +8,7 @@ Onyx AI 解析模块 — SSE 结构化响应 / AI 原始响应 / 遗留 Shell �
 import re
 from typing import Dict, Any, List
 
-from .config import apply_mood_delta, apply_people_action
+
 
 
 def parse_sse_structured_response(sse_text: str) -> Dict[str, Any]:
@@ -258,31 +258,6 @@ def parse_sse_structured_response(sse_text: str) -> Dict[str, Any]:
                 lines.insert(i, remainder)
             continue
 
-        # ── [mood]: happy +0.1 / angry -0.2 ──
-        mood_match = re.match(r'^\[mood\]:\s*(\S+)\s+([+-]\d+(?:\.\d+)?)', stripped)
-        if mood_match:
-            try:
-                apply_mood_delta(mood_match.group(1), float(mood_match.group(2)))
-            except ValueError:
-                pass
-            continue
-
-        # ── [PEOPLE]:add / Likeability / Perception ──
-        people_match = re.match(r'^\[PEOPLE\]:\s*(\S+)\s+(.+)', stripped)
-        if people_match:
-            action = people_match.group(1)
-            rest = people_match.group(2).strip()
-            if action.lower() == "add":
-                apply_people_action("add", rest)
-            elif action.lower() == "likeability":
-                parts = rest.rsplit(None, 1)
-                if len(parts) == 2:
-                    apply_people_action("likeability", parts[0], parts[1])
-            elif action.lower() == "perception":
-                parts = rest.split(None, 1)
-                if len(parts) == 2:
-                    apply_people_action("perception", parts[0], parts[1])
-            continue
 
         # ── 直接字段标记 [ANSWER]: / [ANALYSIS]: / ... ──
         field_match = re.match(r'^\[(ANSWER|ANALYSIS|ASK|MEMORY|TAG|CLASS|SLEEP|PROMPT)\]:', stripped)

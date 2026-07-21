@@ -83,7 +83,7 @@ class AsyncManScanner:
             config.platform = 'linux'
             config.man_dirs = ["/usr/share/man", "/usr/local/share/man"]
         except Exception as e:
-            logger.error(f"系统检测失败: {e}")
+            logger.debug(f"系统检测失败: {e}")
         
         return config
     
@@ -94,7 +94,7 @@ class AsyncManScanner:
                 with open(SCAN_PROGRESS_PATH, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception as e:
-                logger.error(f"加载扫描进度失败: {e}")
+                logger.debug(f"加载扫描进度失败: {e}")
         return {"scanned": [], "last_index": 0, "total_commands": 0}
     
     def _save_progress(self):
@@ -103,7 +103,7 @@ class AsyncManScanner:
             with open(SCAN_PROGRESS_PATH, 'w', encoding='utf-8') as f:
                 json.dump(self._current_progress, f, indent=2)
         except Exception as e:
-            logger.error(f"保存扫描进度失败: {e}")
+            logger.debug(f"保存扫描进度失败: {e}")
     
     def _load_builtin_commands(self) -> Dict:
         """加载内置 cmd.json 中的命令数据"""
@@ -112,7 +112,7 @@ class AsyncManScanner:
                 with open(BUILTIN_CMD_JSON, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception as e:
-                logger.error(f"加载内置命令文件失败: {e}")
+                logger.debug(f"加载内置命令文件失败: {e}")
         return {}
     
     def _load_existing_commands(self) -> Dict:
@@ -123,7 +123,7 @@ class AsyncManScanner:
         try:
             commands = self._load_builtin_commands()
         except Exception as e:
-            logger.error(f"加载内置命令失败: {e}")
+            logger.debug(f"加载内置命令失败: {e}")
 
         # 加载已保存的命令文件，合并到内置命令上（已保存的优先级更高）
         if os.path.exists(COMMAND_JSON_PATH):
@@ -131,7 +131,7 @@ class AsyncManScanner:
                 with open(COMMAND_JSON_PATH, 'r', encoding='utf-8') as f:
                     saved = json.load(f)
             except Exception as e:
-                logger.error(f"加载命令文件失败: {e}")
+                logger.debug(f"加载命令文件失败: {e}")
                 saved = {}
 
             for cmd, info in saved.items():
@@ -152,7 +152,7 @@ class AsyncManScanner:
                 try:
                     self._save_commands(commands)
                 except Exception as e:
-                    logger.error(f"初始化 command.json 失败: {e}")
+                    logger.debug(f"初始化 command.json 失败: {e}")
 
         return commands
 
@@ -164,7 +164,7 @@ class AsyncManScanner:
                 json.dump(commands, f, indent=2, ensure_ascii=False, sort_keys=True)
             os.replace(tmp_path, COMMAND_JSON_PATH)
         except Exception as e:
-            logger.error(f"保存命令数据失败: {e}")
+            logger.debug(f"保存命令数据失败: {e}")
             if os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
@@ -190,7 +190,7 @@ class AsyncManScanner:
                     except (PermissionError, OSError):
                         continue
         except Exception as e:
-            logger.error(f"查找手册页失败 {cmd_name}: {e}")
+            logger.debug(f"查找手册页失败 {cmd_name}: {e}")
         return manpage_paths
     
     def read_manpage_content(self, manpage_path: Path) -> str:
@@ -203,7 +203,7 @@ class AsyncManScanner:
                 with open(manpage_path, 'r', encoding='utf-8', errors='ignore') as f:
                     return f.read()
         except Exception as e:
-            logger.error(f"读取手册页失败 {manpage_path}: {e}")
+            logger.debug(f"读取手册页失败 {manpage_path}: {e}")
             return ""
     
     def parse_options_from_roff(self, content: str) -> Set[str]:
@@ -246,7 +246,7 @@ class AsyncManScanner:
                     for opt in long_opts:
                         options.add(f"--{opt}")
         except Exception as e:
-            logger.error(f"解析选项失败: {e}")
+            logger.debug(f"解析选项失败: {e}")
         
         return options
     
@@ -263,7 +263,7 @@ class AsyncManScanner:
                     if options:
                         break
         except Exception as e:
-            logger.error(f"提取选项失败 {cmd}: {e}")
+            logger.debug(f"提取选项失败 {cmd}: {e}")
         return sorted(options)
     
     def get_all_commands(self) -> List[str]:
@@ -299,7 +299,7 @@ class AsyncManScanner:
                     except (PermissionError, OSError):
                         continue
         except Exception as e:
-            logger.error(f"获取命令列表失败: {e}")
+            logger.debug(f"获取命令列表失败: {e}")
         
         return sorted(commands)
     
@@ -353,7 +353,7 @@ class AsyncManScanner:
                         if cmd not in existing:
                             existing[cmd] = {"subcommands": [], "options": []}
                 except Exception as e:
-                    logger.error(f"扫描命令失败 {cmd}: {e}")
+                    logger.debug(f"扫描命令失败 {cmd}: {e}")
 
                 self._current_progress["scanned"] = list(existing.keys())
                 self._current_progress["last_index"] = i + 1
@@ -367,9 +367,9 @@ class AsyncManScanner:
                 try:
                     os.remove(SCAN_PROGRESS_PATH)
                 except Exception as e:
-                    logger.error(f"删除进度文件失败: {e}")
+                    logger.debug(f"删除进度文件失败: {e}")
         except Exception as e:
-            logger.error(f"扫描循环失败: {e}")
+            logger.debug(f"扫描循环失败: {e}")
 
 
 _scanner: Optional[AsyncManScanner] = None

@@ -414,11 +414,20 @@ class PersistentShell:
         self._stop_thread = False
         # 用于 PS1 完成检测的随机 marker（在 _init_shell / _setup_prompt / _execute_passthrough 中使用）
         self._done_marker = f"__DONE_{uuid.uuid4().hex[:12]}__"
+        # 动态 prompt 模式列表：除 marker 外，还实时学习 shell 实际 PS1
+        # 即使 PS1 被 venv/主题等改写，也能通过 fallback 模式检测命令完成
+        self._prompt_patterns: List[re.Pattern] = []
+        self._prompt_probed = False
 
         # Merge environment variables with extra variables
         self._extra_vars = {}
         # 1. Add current process environment variables
+        # 不复制父进程的 PS1/PROMPT——_init_shell_unix 中会设为 marker 用于命令完成检测
+        # VIRTUAL_ENV 保留不动，让 PTY 子 shell 也能在同一个 venv 中使用
+        _SKIP_ENV_KEYS = frozenset({'PS1', 'PROMPT', 'PROMPT_COMMAND'})
         for key, value in os.environ.items():
+            if key in _SKIP_ENV_KEYS:
+                continue
             if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', key):
                 self._extra_vars[key] = value
         # 2. Add caller's variables (overwrites environment variables with same name)
@@ -474,6 +483,66 @@ class PersistentShell:
             except OSError as e:
                 debug_log(f"Failed to inject variables: {e}", 'error')
 
+    def _probe_and_learn_prompt(self) -> None:
+        """探测 shell 实际 PS1，加入 fallback 模式列表。
+
+        发送一个无声命令（空 echo），抓取其输出与下一个 prompt 之间
+        的文本作为当前 PS1 的样貌。之后 mark 完成时既认 __DONE__
+         marker，也认实测到的 PS1。
+        """
+        if self._prompt_probed:
+            return
+        self._prompt_probed = True
+
+        probe = "echo __PSL_PROBE__\n"
+        try:
+            self._write_to_master(probe.encode('utf-8'))
+        except OSError:
+            return
+
+        # 读回显 + probe 结果 + 紧接其后的 prompt
+        buf = ""
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                chunk = self._read_from_master(timeout=0.3)
+                if not chunk:
+                    continue
+                buf += chunk
+                # probe 标记已出现 → 之后的内容就是 PS1
+                if "__PSL_PROBE__" in buf:
+                    # 等一小段时间收完 prompt 的剩余字节
+                    time.sleep(0.1)
+                    # 再读一次收尾
+                    try:
+                        buf += self._read_from_master(timeout=0.2) or ""
+                    except Exception:
+                        pass
+                    break
+            except Exception:
+                break
+
+        # 从 buf 中提取 probe 输出之后、prompt 之前/之后的内容
+        idx = buf.rfind("__PSL_PROBE__")
+        if idx < 0:
+            return
+        after_probe = buf[idx + len("__PSL_PROBE__"):]
+        # 去掉 probe 自身的回显（可能包含换行）
+        after_probe = after_probe.strip()
+        if not after_probe:
+            return
+
+        # 把实际观察到的 prompt 文本加入模式列表
+        # 转义 regex 特殊字符，匹配行尾
+        escaped = re.escape(after_probe)
+        pattern_str = f"(?:{escaped})"
+        try:
+            compiled = re.compile(pattern_str)
+            self._prompt_patterns.append(compiled)
+            debug_log(f"Learned PS1 prompt pattern: {after_probe!r}")
+        except re.error:
+            pass
+
     def _execute_passthrough(
         self,
         cmd: str,
@@ -486,48 +555,52 @@ class PersistentShell:
         用 shell 的 PS1（__DONE__:$?）检测命令完成，不追加 marker。
         PS1 是 shell 提示词机制的一部分，SIGINT 无法阻止它被打印。
         """
-        # 用 PS1 中的 DONE marker 检测命令完成
-        _done_marker = self._done_marker
-        full_cmd = f"{cmd}\n"
-        debug_log(f"Passthrough full_cmd: {repr(full_cmd[:200])}")
-        shell_log(full_cmd, 'WRITE_CMD')
-
-        is_windows = platform.system() == "Windows"
-        fd_stdin = sys.stdin.fileno()
-
-        # TTY raw mode：箭头键等需要逐字符转发到 PTY，不能行缓冲
-        old_tty = None
-        if HAVE_FCNTL_TERMIOS and os.isatty(fd_stdin):
-            old_tty = termios.tcgetattr(fd_stdin)
-            new_tty = termios.tcgetattr(fd_stdin)
-            new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
-            new_tty[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
-            termios.tcsetattr(fd_stdin, termios.TCSANOW, new_tty)
-
-        old_sigint = None
-        old_sigwinch = None
-        _interrupted_flag = {'value': False}
-        if not is_windows:
-            def _sigint_handler(signum, frame):
-                _interrupted_flag['value'] = True
-                debug_log("SIGINT caught by Python handler (passthrough)")
-            old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
-            if hasattr(signal, 'SIGWINCH'):
-                def sigwinch_handler(signum, frame):
-                    update_pty_size(self.master_fd)
-                old_sigwinch = signal.signal(signal.SIGWINCH, sigwinch_handler)
-
-        full_raw_output = ""
-        interrupted = False
-        return_code = -1
-        fd_stdin = sys.stdin.fileno()
-
-        # 排空 PTY 残留输出（单次 drain，无 sleep — PTY 已就绪时 drain 为 O(1)）
-        self._drain_output()
-        _echo_pending = True  # 需要跳过 shell 回显的命令文本
-        _echo_buf = ""        # 累积回显字节
-
+        # 首次执行时探测 shell 实际 PS1，加入 fallback 模式列表
         try:
+            if not self._prompt_probed:
+                self._probe_and_learn_prompt()
+
+            # 用 PS1 中的 DONE marker 检测命令完成
+            _done_marker = self._done_marker
+            full_cmd = f"{cmd}\n"
+            debug_log(f"Passthrough full_cmd: {repr(full_cmd[:200])}")
+            shell_log(full_cmd, 'WRITE_CMD')
+
+            is_windows = platform.system() == "Windows"
+            fd_stdin = sys.stdin.fileno()
+
+            # TTY raw mode：箭头键等需要逐字符转发到 PTY，不能行缓冲
+            old_tty = None
+            if HAVE_FCNTL_TERMIOS and os.isatty(fd_stdin):
+                old_tty = termios.tcgetattr(fd_stdin)
+                new_tty = termios.tcgetattr(fd_stdin)
+                new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
+                new_tty[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+                termios.tcsetattr(fd_stdin, termios.TCSANOW, new_tty)
+
+            old_sigint = None
+            old_sigwinch = None
+            _interrupted_flag = {'value': False}
+            if not is_windows:
+                def _sigint_handler(signum, frame):
+                    _interrupted_flag['value'] = True
+                    debug_log("SIGINT caught by Python handler (passthrough)")
+                old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
+                if hasattr(signal, 'SIGWINCH'):
+                    def sigwinch_handler(signum, frame):
+                        update_pty_size(self.master_fd)
+                    old_sigwinch = signal.signal(signal.SIGWINCH, sigwinch_handler)
+
+            full_raw_output = ""
+            interrupted = False
+            return_code = -1
+            fd_stdin = sys.stdin.fileno()
+
+            # 排空 PTY 残留输出（单次 drain，无 sleep — PTY 已就绪时 drain 为 O(1)）
+            self._drain_output()
+            _echo_pending = True  # 需要跳过 shell 回显的命令文本
+            _echo_buf = ""        # 累积回显字节
+
             try:
                 self._write_to_master(full_cmd.encode('utf-8'))
                 debug_log("Passthrough command written to PTY")
@@ -615,6 +688,37 @@ class PersistentShell:
                                 if output_buffer is not None:
                                     output_buffer.append(clean)
                             break
+
+                    # ── Fallback: 实测到的 prompt pattern ──
+                    _prompt_matched = False
+                    for pat in self._prompt_patterns:
+                        if pat.search(text):
+                            debug_log(f"PS1 fallback prompt pattern matched")
+                            _prompt_matched = True
+                            break
+                    if not _prompt_matched:
+                        # 通用 prompt 结尾检测：行末为 $ # > % 之一（可跟空格）
+                        lines = text.split('\n')
+                        for ln in reversed(lines):
+                            stripped = ln.strip()
+                            if stripped and re.search(r'[$#>%]\s*$', stripped):
+                                _prompt_matched = True
+                                debug_log(f"PS1 generic prompt char matched: {stripped!r}")
+                                break
+                    if _prompt_matched:
+                        return_code = 0  # fallback 无法获知退出码
+                        # 去掉 prompt 本身的字符再输出
+                        clean = text.rstrip('\n')
+                        for pat in self._prompt_patterns:
+                            clean = pat.sub('', clean)
+                        clean = re.sub(r'.*[$#>%]\s*$', '', clean, flags=re.MULTILINE).rstrip('\n')
+                        if clean:
+                            clean_out = clean.replace('\r\n', '\n')
+                            sys.stdout.write(clean_out)
+                            sys.stdout.flush()
+                            if output_buffer is not None:
+                                output_buffer.append(clean_out)
+                        break
 
                     # Real-time output forwarding
                     clean = text.replace('\r\n', '\n')

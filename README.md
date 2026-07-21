@@ -135,7 +135,7 @@ Onyx maintains persistent memory across sessions, not just chat logs.
 | **Chat history** | `.ai_s/chat/{name}.json` | Multi-turn dialogs grouped by chat name, full context preserved |
 | **Session records** | `.ai_s/library/{id}.txt` | Complete per-session output, context, and decisions |
 | **Episodic memory** | `.ai_s/memory/` | Key events and facts extracted from sessions, with proactive forgetting |
-| **Mood simulation** | `.ai_s/mood.json` | Decay-based emotional state that influences AI tone (opt-in) |
+
 
 The AI writes to `.ai_s/onyx_ai.md` autonomously to record decisions and preferences that
 persist across restarts.  Episodic memory uses a JSON backbone with automatic pruning — old
@@ -323,7 +323,7 @@ Onyx 在多次 session 之间维持持久记忆，不只是聊天记录。
 | **对话历史** | `.ai_s/chat/{name}.json` | 按 chat 分组的多轮对话，完整上下文保留 |
 | **Session 记录** | `.ai_s/library/{id}.txt` | 每次 session 的完整输出、上下文与决策 |
 | **情景记忆** | `.ai_s/memory/` | 从 session 中提取的关键事件和事实，带主动遗忘机制 |
-| **情感模拟** | `.ai_s/mood.json` | 基于衰减的情感状态，影响 AI 语气（可选启用） |
+
 
 AI 自主向 `.ai_s/onyx_ai.md` 写入跨重启的决策和偏好。情景记忆以 JSON 为核心结构，
 自动淘汰旧条目或低重要性内容。

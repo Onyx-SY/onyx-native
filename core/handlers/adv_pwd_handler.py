@@ -25,7 +25,7 @@ def handle_set_adv_pwd(ctx: "AppContext", cmd_parts: List[str], request_id: str)
     try:
         with open(ctx.ADMIN_PASSWORD_PATH, "r", encoding="utf-8") as f:
             stored_hash = f.read().strip()
-        if not argon2id_verify(current_pwd, "", stored_hash):
+        if not argon2id_verify(current_pwd, stored_hash):
             print(ctx.Fore.RED + t("adv_pwd_handler.pwd_incorrect") + ctx.Style.RESET_ALL)
             log_error("修改ADV密码失败：当前密码错误", request_id)
             return

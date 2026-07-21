@@ -94,7 +94,7 @@ def argon2id_hash(password: str, salt: str) -> str:
     return hashed.decode("utf-8")
 
 # 真正的argon2id验证（底层实现，无版本兼容问题）
-def argon2id_verify(password: str, salt: str, stored_hash: str) -> bool:
+def argon2id_verify(password: str, stored_hash: str) -> bool:
     password_bytes = password.encode("utf-8")
     stored_hash_bytes = stored_hash.encode("utf-8")
     
@@ -1399,8 +1399,36 @@ def init_sandbox_config() -> None:
         "english": "Sandbox config not found. Enable sandbox? (y/N, safer; if n, use real system root. You can change later by editing {}): "
     }
     
-    print(Fore.YELLOW + prompt_msg[cur_lang].format(_SANDBOX_CONFIG_PATH) + Style.RESET_ALL, end="")
-    answer = input().strip().lower()
+    # 交叉平台输入——确保终端处于 cooked 模式，用 try/finally 保证恢复
+    answer = "n"
+    fd = None
+    old_tty = None
+    try:
+        import termios
+        fd = sys.stdin.fileno()
+        old_tty = termios.tcgetattr(fd)
+        new = termios.tcgetattr(fd)
+        # 开启 ICANON（行缓冲）、ECHO（回显）、ICRNL（\r→\n 转换）
+        new[3] |= (termios.ICANON | termios.ECHO)
+        new[0] |= termios.ICRNL
+        termios.tcsetattr(fd, termios.TCSANOW, new)
+        sys.stdout.write(Fore.YELLOW + prompt_msg[cur_lang].format(_SANDBOX_CONFIG_PATH) + Style.RESET_ALL + " ")
+        sys.stdout.flush()
+        answer = sys.stdin.readline().strip().lower()
+    except BaseException:
+        # 如果 termios 不可用或 stdin 不是 tty，回退到 input()
+        try:
+            print(Fore.YELLOW + prompt_msg[cur_lang].format(_SANDBOX_CONFIG_PATH) + Style.RESET_ALL, end="")
+            answer = input().strip().lower()
+        except BaseException:
+            answer = "n"
+    finally:
+        if old_tty is not None and fd is not None:
+            try:
+                import termios as _t
+                _t.tcsetattr(fd, _t.TCSANOW, old_tty)
+            except Exception:
+                pass
     if answer == 'y':
         _SANDBOX_ENABLED = True
     else:
@@ -1466,9 +1494,9 @@ def hash_password(password: str, salt: str) -> str:
     """替换为内置库argon2id加密"""
     return argon2id_hash(password, salt)
 
-def verify_password(input_password: str, salt: str, stored_hash: str) -> bool:
+def verify_password(input_password: str, stored_hash: str) -> bool:
     """替换为内置库argon2id验证"""
-    return argon2id_verify(input_password, salt, stored_hash)
+    return argon2id_verify(input_password, stored_hash)
 
 
 
@@ -1694,6 +1722,11 @@ def execute_tool(tool_info: ToolInfo, args: List[str], request_id: str) -> None:
 _RE_MULTI_SPACE = re.compile(r'\s+')
 _RE_OPT_SLASH = re.compile(r'(\s*-\w+)\s*(\/)')
 _RE_OPT_STAR = re.compile(r'(\s*-\w+)\s*(\*)')
+# 新增：cmd-flag 之间缺空格（rm-rf → rm -rf）
+_RE_CMD_FLAG_GAP = re.compile(r'(\w)(?=-[a-zA-Z0-9])')
+# 新增：token/path 之间缺空格（fdisk/dev/sda → fdisk /dev/sda）
+_RE_TOKEN_PATH_START = re.compile(r'(?<=^)([a-zA-Z0-9_.]+)(?=/)')
+_RE_TOKEN_PATH_AFTER_SP = re.compile(r'(?<=\s)([a-zA-Z0-9_.]+)(?=/)')
 
 def check_blocked_cmd(cmd: str, request_id: str) -> Tuple[bool, bool]:
     from core.security import check_blocked_cmd as _cbc
@@ -1995,9 +2028,7 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
     - 带子命令标志 (-mcp, -c, -tui, -key) → 一次性调用 bin.ai_cmd.handle_ai
     - 纯对话 → 进入 bin.ai_interactive.ai_interactive_session 持久 REPL
     """
-    # ── 初始化 mood.json（情感模拟）──
-    from bin.ai_cmd import init_mood
-    init_mood()
+
 
     # ── 首次使用：检查并引导配置 key.conf ──
     from bin.ai_cmd import load_key_conf, _setup_key_conf_interactive
@@ -3016,9 +3047,7 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
             log_warning(f"保存初始化计时失败: {str(e)}", request_id)
 
     try:
-        # 1. 清屏（仅交互模式）— 放在最前面，这样后续报错不会被洗掉
-        if not oneshot:
-            handle_clear(["clear"], request_id)
+        # 1. 清屏（Main.py 入口已清屏，此处不再重复）
         record_step("1.clear_screen")
 
         # 2. 权限检测与用户主目录初始化

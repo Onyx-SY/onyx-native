@@ -45,7 +45,7 @@ LANGUAGE_PATH = os.path.join(CONFIG_DIR, "language")
 CLEAN_LOG_TIME_PATH = os.path.join(CONFIG_DIR, "clean-log-time")
 ADV_DANGER_CMD_PROMPT_PATH = os.path.join(CONFIG_DIR, "adv_danger_cmd_prompt")
 MCP_ENABLED_PATH = os.path.join(CONFIG_DIR, "mcp_enabled")
-MOOD_ENABLED_PATH = os.path.join(CONFIG_DIR, "mood_enabled")
+
 SPRING_MODE_PATH = os.path.join(CONFIG_DIR, "spring_mode")
 
 # ========== 沙箱配置文件路径 ==========
@@ -59,7 +59,7 @@ DEFAULT_CONFIGS = {
     CLEAN_LOG_TIME_PATH: "3",
     ADV_DANGER_CMD_PROMPT_PATH: "true",
     MCP_ENABLED_PATH: "true",
-    MOOD_ENABLED_PATH: "true",
+
     SPRING_MODE_PATH: "true",
 }
 
@@ -376,10 +376,8 @@ def handle_set_option(options: List[str], request_id: str) -> None:
         success = write_config_file(MCP_ENABLED_PATH, opt_value)
 
     elif opt_name == "mood":
-        if opt_value not in ["true", "false"]:
-            print_silent(Fore.RED + _get_msg("值必须为 true/false", "Value must be true/false"))
-            return
-        success = write_config_file(MOOD_ENABLED_PATH, opt_value)
+        console.print(Fore.YELLOW + _get_msg("情感模块已移除", "Mood module has been removed"))
+        success = True
 
     elif opt_name == "spring-mode":
         if opt_value not in ["true", "false"]:

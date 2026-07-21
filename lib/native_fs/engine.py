@@ -68,14 +68,16 @@ def _resolve_path(path: str, cwd: str = None) -> str:
 
 
 def execute_block(block: dict, cwd: str = None,
-                  panel_mgr: PanelManager = None) -> BlockResult:
+                  panel_mgr: PanelManager = None,
+                  sandbox_root: str = None) -> BlockResult:
     """
     执行一个标记块。
 
     参数:
-        block:     从 parse_markup() 返回的块 dict
-        cwd:       工作目录（解析相对路径用）
-        panel_mgr: 面板管理器（不传则无面板显示）
+        block:       从 parse_markup() 返回的块 dict
+        cwd:         工作目录（解析相对路径用）
+        panel_mgr:   面板管理器（不传则无面板显示）
+        sandbox_root: 沙箱根目录，设置后写操作会校验路径不越界
 
     返回: BlockResult
     """
@@ -86,8 +88,24 @@ def execute_block(block: dict, cwd: str = None,
     if panel_mgr is None:
         panel_mgr = PanelManager()
 
-    # ── 二进制文件拦截（仅阻止写操作，VIEW 仍允许）──
+    # ── 写操作类型集合 ──
     _mutation_types = {"edit", "edit_range", "write", "append", "insert", "delete", "delete_by_content", "replace_all"}
+
+    # ── 沙箱路径校验（写操作）──
+    if sandbox_root and block_type in _mutation_types:
+        try:
+            real_abs = os.path.realpath(abs_path)
+            real_root = os.path.realpath(sandbox_root)
+            if not real_abs.startswith(real_root + os.sep) and real_abs != real_root:
+                err_msg = f"⛔ 路径越界：{path} 不在沙箱目录 \"{sandbox_root}\" 内"
+                pm = panel_mgr or PanelManager()
+                pm.show_static(make_error_panel(path, err_msg))
+                return BlockResult(block, False, err_msg)
+        except Exception as e:
+            err_msg = f"⛔ 沙箱校验异常：{e}"
+            return BlockResult(block, False, err_msg)
+
+    # ── 二进制文件拦截（仅阻止写操作，VIEW 仍允许）──
     if block_type in _mutation_types and is_binary_path(abs_path):
         err_msg = f"❌ 拒绝编辑二进制文件: {path}（使用 shell 命令处理）"
         pm = panel_mgr or PanelManager()
@@ -97,7 +115,7 @@ def execute_block(block: dict, cwd: str = None,
     # 分发
     if block_type == "batch":
         # batch 的 path 是多文件操作，不传 abs_path
-        return _do_batch(block, cwd, panel_mgr)
+        return _do_batch(block, cwd, panel_mgr, sandbox_root=sandbox_root)
     elif block_type == "view":
         return _do_view(block, abs_path, panel_mgr)
     elif block_type == "edit":
@@ -554,7 +572,8 @@ def _do_delete_by_content(block: dict, abs_path: str,
 
 
 def _do_batch(block: dict, cwd: str = None,
-              pm: PanelManager = None) -> BlockResult:
+              pm: PanelManager = None,
+              sandbox_root: str = None) -> BlockResult:
     """
     执行 BATCH（原子批量操作）块。
 
@@ -597,7 +616,7 @@ def _do_batch(block: dict, cwd: str = None,
     sub_results = []
     try:
         for sb in sub_blocks:
-            r = execute_block(sb, cwd, pm)
+            r = execute_block(sb, cwd, pm, sandbox_root=sandbox_root)
             sub_results.append(r)
             if not r.success:
                 raise Exception(f"子操作失败: {r.message}")

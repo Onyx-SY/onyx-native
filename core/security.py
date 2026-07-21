@@ -177,16 +177,25 @@ def check_blocked_cmd(ctx: "AppContext", cmd: str, request_id: str) -> Tuple[boo
     re_multi = ctx._RE_MULTI_SPACE
     re_opt_slash = ctx._RE_OPT_SLASH
     re_opt_star = ctx._RE_OPT_STAR
+    re_cmd_flag_gap = ctx._RE_CMD_FLAG_GAP
+    re_token_path_start = ctx._RE_TOKEN_PATH_START
+    re_token_path_after_sp = ctx._RE_TOKEN_PATH_AFTER_SP
 
     cmd_lower = cmd.strip().lower()
     cmd_normalized = re_multi.sub(' ', cmd_lower)
     cmd_normalized = re_opt_slash.sub(r'\1 \2', cmd_normalized)
     cmd_normalized = re_opt_star.sub(r'\1 \2', cmd_normalized)
+    cmd_normalized = re_cmd_flag_gap.sub(r'\1 ', cmd_normalized)
+    cmd_normalized = re_token_path_start.sub(r'\1 ', cmd_normalized)
+    cmd_normalized = re_token_path_after_sp.sub(r'\1 ', cmd_normalized)
 
     for blocked in blocked_cmds:
         blocked_normalized = re_multi.sub(' ', blocked.strip().lower())
         blocked_normalized = re_opt_slash.sub(r'\1 \2', blocked_normalized)
         blocked_normalized = re_opt_star.sub(r'\1 \2', blocked_normalized)
+        blocked_normalized = re_cmd_flag_gap.sub(r'\1 ', blocked_normalized)
+        blocked_normalized = re_token_path_start.sub(r'\1 ', blocked_normalized)
+        blocked_normalized = re_token_path_after_sp.sub(r'\1 ', blocked_normalized)
         if cmd_normalized == blocked_normalized:
             return _handle_blocked_match(ctx, cmd, blocked, request_id, "base_block", "CMD_BLOCK", "CMD_CONFIRM", "CMD_CANCEL")
 
@@ -196,6 +205,9 @@ def check_blocked_cmd(ctx: "AppContext", cmd: str, request_id: str) -> Tuple[boo
             blocked_normalized = re_multi.sub(' ', blocked.strip().lower())
             blocked_normalized = re_opt_slash.sub(r'\1 \2', blocked_normalized)
             blocked_normalized = re_opt_star.sub(r'\1 \2', blocked_normalized)
+            blocked_normalized = re_cmd_flag_gap.sub(r'\1 ', blocked_normalized)
+            blocked_normalized = re_token_path_start.sub(r'\1 ', blocked_normalized)
+            blocked_normalized = re_token_path_after_sp.sub(r'\1 ', blocked_normalized)
             if cmd_normalized == blocked_normalized:
                 return _handle_blocked_match(ctx, cmd, blocked, request_id, "special_block", "CMD_BLOCK", "CMD_CONFIRM", "CMD_CANCEL")
 

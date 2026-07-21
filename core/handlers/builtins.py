@@ -247,8 +247,7 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
     """AI 命令（委托 bin/ai_cmd 或 bin/ai_interactive）"""
     from core.context import get_ctx
     ctx = get_ctx()
-    from bin.ai_cmd import init_mood, load_key_conf, _setup_key_conf_interactive
-    init_mood()
+    from bin.ai_cmd import load_key_conf, _setup_key_conf_interactive
     conf = load_key_conf()
     if not conf or not conf.get("api_key"):
         _setup_key_conf_interactive(ctx.global_config["display_info"]["language"]["current"])

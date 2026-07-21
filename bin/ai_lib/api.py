@@ -19,7 +19,7 @@ console = Console()
 from .config import (
     get_current_lang, get_prompt_text, load_key_conf,
     _SUPPORTED_PLATFORMS, ROOT_DIR, USER,
-    mood_context, is_mood_enabled,
+
 )
 from .parsers import parse_sse_structured_response
 from .storage import (
@@ -167,7 +167,7 @@ Onyx Mode: {onyx_mode}
 #Working directory: {os.getcwd()}
 #Persistent memory
 {onyx_ai_prompt if onyx_ai_prompt else '(none)'}
-{mood_context()}
+
 #{task_label}
 {question}"""
 
@@ -199,16 +199,6 @@ Onyx Mode: {onyx_mode}
         except Exception:
             pass
 
-    # ── 条件加载情感模块提示词 etc/ai/mood.md ──
-    if is_mood_enabled():
-        try:
-            _mood_prompt_path = os.path.join(ROOT_DIR, "etc", "ai", "mood.md")
-            if os.path.exists(_mood_prompt_path):
-                with open(_mood_prompt_path, "r", encoding="utf-8") as _mf:
-                    system_prompt = (system_prompt or "") + "\n\n" + _mf.read()
-        except Exception:
-            pass
-
     # ── 构建 messages ──
     if messages is None:
         _messages = []
@@ -236,18 +226,74 @@ Onyx Mode: {onyx_mode}
 
     payload: dict
     if plat_key == "anthropic":
-        system_content = ""
-        user_content = ""
+        # ── 将 OpenAI 格式 _messages 正确转换为 Anthropic 格式 ──
+        system_parts = []
+        anthropic_msgs = []
+
         for m in _messages:
-            if m["role"] == "system":
-                system_content = m["content"]
+            role = m.get("role", "")
+            if role == "system":
+                system_parts.append(m.get("content", ""))
+                continue
+
+            if role == "user":
+                anthropic_msgs.append({"role": "user", "content": m.get("content", "")})
+
+            elif role == "assistant":
+                content_text = m.get("content", "")
+                tool_calls = m.get("tool_calls")
+                if tool_calls:
+                    blocks = []
+                    if content_text:
+                        blocks.append({"type": "text", "text": content_text})
+                    for tc in tool_calls:
+                        try:
+                            args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                        except (json.JSONDecodeError, ValueError, TypeError):
+                            args = {}
+                        blocks.append({
+                            "type": "tool_use",
+                            "id": tc.get("id", ""),
+                            "name": tc.get("function", {}).get("name", ""),
+                            "input": args,
+                        })
+                    anthropic_msgs.append({"role": "assistant", "content": blocks})
+                else:
+                    anthropic_msgs.append({"role": "assistant", "content": content_text})
+
+            elif role == "tool":
+                anthropic_msgs.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": m.get("tool_call_id", ""),
+                        "content": m.get("content", ""),
+                    }],
+                })
+
+        # 合并连续 user 消息（Anthropic 要求 user/assistant 交替）
+        merged = []
+        for msg in anthropic_msgs:
+            if merged and merged[-1]["role"] == "user" and msg["role"] == "user":
+                prev = merged[-1]["content"]
+                curr = msg["content"]
+                if isinstance(prev, str) and isinstance(curr, str):
+                    merged[-1]["content"] = prev + "\n\n" + curr
+                elif isinstance(prev, list) and isinstance(curr, str):
+                    prev.append({"type": "text", "text": curr})
+                elif isinstance(prev, str) and isinstance(curr, list):
+                    merged[-1]["content"] = [{"type": "text", "text": prev}] + curr
+                else:
+                    merged[-1]["content"] = prev + curr
             else:
-                user_content = m["content"]
+                merged.append(msg)
+
+        system_content = "\n\n".join(system_parts)
         payload = {
             "model": model,
             "max_tokens": p.get("max_tokens", 4096),
-            "system": system_content,
-            "messages": [{"role": "user", "content": user_content}],
+            "system": system_content if system_content else None,
+            "messages": merged if merged else [{"role": "user", "content": ""}],
             "stream": True,
         }
         if p.get("temperature") is not None:

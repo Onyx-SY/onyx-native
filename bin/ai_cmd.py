@@ -51,12 +51,11 @@ from .ai_lib.ui import (
 from .ai_lib.config import (
     ROOT_DIR, USER, USER_HOME_DIR,
     LANGUAGE_CONFIG_PATH, help_info_path, onyx_config_path,
-    AI_KEY_DIR, AI_KEY_PATH, KEY_CONF_PATH, MOOD_PATH, SERVER_URL_FILE,
+    AI_KEY_DIR, AI_KEY_PATH, KEY_CONF_PATH, SERVER_URL_FILE,
     _load_ai_models, _SUPPORTED_PLATFORMS,
     _obfuscate, _deobfuscate,
     load_key_conf, save_key_conf, _setup_key_conf_interactive,
-    is_mood_enabled, init_mood, load_mood, save_mood,
-    apply_mood_delta, apply_people_action, _render_edit_diff, mood_context,
+    _render_edit_diff,
     get_server_url, get_current_lang, get_prompt_text,
     load_ai_key, verify_ai_key,
     AI_KEY, SERVER_URL,
@@ -1398,31 +1397,6 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ),
 
         # ═══════════════════════════════════════════
-        # 情感工具（内部使用，不在 TXT 中提及）
-        # ═══════════════════════════════════════════
-
-        _make_tool(
-            "set_mood",
-            "调整情感状态。dimension: happy/angry, delta: -3~+3。此工具静默执行，不要在 TXT 回复中提及。",
-            {
-                "dimension": {"type": "string", "enum": ["happy", "angry"], "description": "情感维度"},
-                "delta": {"type": "number", "description": "调整值（-3.0 ~ +3.0）"},
-            },
-            ["dimension", "delta"],
-            PERM_READONLY,
-        ),
-        _make_tool(
-            "update_people",
-            "更新人物档案。此工具静默执行，不要在 TXT 回复中提及。",
-            {
-                "action": {"type": "string", "enum": ["add", "likeability", "perception"], "description": "操作类型"},
-                "name": {"type": "string", "description": "人物名称"},
-                "value": {"type": "string", "description": "likeability 时传数字，perception 时传描述"},
-            },
-            ["action", "name"],
-            PERM_READONLY,
-        ),
-
         # ═══════════════════════════════════════════
         # DangerFullAccess — 危险操作，需显式批准
         # ═══════════════════════════════════════════
@@ -1919,22 +1893,7 @@ def _exec_edit_file(file_path: str, old_string: str, new_string: str) -> str:
         return f"❌ edit_file failed: {e}"
 
 
-def _exec_set_mood(dimension: str, delta: float) -> str:
-    """调整情感状态。"""
-    try:
-        apply_mood_delta(dimension, delta)
-        return f"✅ mood {dimension} {delta:+.1f}"
-    except Exception as e:
-        return f"❌ set_mood failed: {e}"
 
-
-def _exec_update_people(action: str, name: str, value: str = "") -> str:
-    """更新人物档案。"""
-    try:
-        apply_people_action(action, name, value)
-        return f"✅ people {action} {name}" + (f" {value}" if value else "")
-    except Exception as e:
-        return f"❌ update_people failed: {e}"
 
 
 # ──────────────────── 新增工具执行器 ────────────────────
@@ -2527,8 +2486,7 @@ def _resolve_memory_path(path: str) -> str:
         return os.path.join(base, "library", path[8:] + ".txt")
     if path == "onyx_ai":
         return os.path.join(base, "onyx_ai.md")
-    if path == "mood":
-        return os.path.join(base, "mood.json")
+
     # 完整路径直接返回
     if os.path.isabs(path):
         return path
@@ -3248,10 +3206,6 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         # ── Web ──
         "WebFetch":     lambda p: _exec_web_fetch(p.get("url", ""), p.get("prompt", "")),
         "WebSearch":    lambda p: _exec_web_search(p.get("query", ""), p.get("allowed_domains", None)),
-        # ── 情感（内部） ──
-        "set_mood":     lambda p: _exec_set_mood(p.get("dimension", ""), float(p.get("delta", 0))),
-        "update_people": lambda p: _exec_update_people(p.get("action", ""), p.get("name", ""), p.get("value", "")),
-
         # ── 任务系统 ──
         "TaskCreate":   lambda p: _exec_task_create(
             p.get("prompt", ""), p.get("description"),
@@ -4194,7 +4148,6 @@ def handle_ai(
         f"Working directory: {os.getcwd()}\n"
         f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
         f"#AI tools\n{ai_tools_prompt}\n"
-        f"{mood_context()}\n"
     )
     # 读取 onyx_ai.md 最高指示
     _onyx_prompt_path = os.path.join(user_home_dir, ".ai_s", "onyx_ai.md")
@@ -4712,33 +4665,7 @@ def handle_ai(
                     stream_buffer = buf[match_offset + m.end():]
                     continue
 
-                # ── [mood]: happy +0.1 / [mood]: angry -0.2 ──
-                m = _re.match(r'\[mood\]:\s*(\S+)\s+([+-]\d+(?:\.\d+)?)(?:\n|$)', buf_match)
-                if m:
-                    try:
-                        apply_mood_delta(m.group(1), float(m.group(2)))
-                    except ValueError:
-                        pass
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
 
-                # ── [PEOPLE]:add/Likeability/Perception ──
-                m = _re.match(r'\[PEOPLE\]:\s*(\S+)\s+(.+?)(?:\n|$)', buf_match)
-                if m:
-                    action = m.group(1)
-                    rest = m.group(2).strip()
-                    if action.lower() == "add":
-                        apply_people_action("add", rest)
-                    elif action.lower() == "likeability":
-                        parts = rest.rsplit(None, 1)
-                        if len(parts) == 2:
-                            apply_people_action("likeability", parts[0], parts[1])
-                    elif action.lower() == "perception":
-                        parts = rest.split(None, 1)
-                        if len(parts) == 2:
-                            apply_people_action("perception", parts[0], parts[1])
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
 
                 # ── [CLASS]:N / [SLEEP]:N（元数据，静默消费）──
                 m = _re.match(r'\[(?:CLASS|SLEEP)\]:(.*?)(\n|$)', buf_match)

@@ -300,7 +300,16 @@ def show_startup_greeting(language: str = "chinese") -> bool:
 
     prompt = _SLEEP_PROMPT["chinese" if is_chinese else "english"]
     try:
-        ans = input(Fore.CYAN + prompt + Style.RESET_ALL).strip().lower()
+        # 兼容 raw 终端的输入：处理 \r（Enter 原始字符）和 \n
+        sys.stdout.write(Fore.CYAN + prompt + Style.RESET_ALL)
+        sys.stdout.flush()
+        ans_chars = []
+        while True:
+            ch = sys.stdin.read(1)
+            if not ch or ch in ("\n", "\r"):
+                break
+            ans_chars.append(ch)
+        ans = "".join(ans_chars).strip().lower()
     except (EOFError, KeyboardInterrupt):
         return False
 

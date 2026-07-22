@@ -100,7 +100,7 @@ _MEMORY_CACHE_MAX = 50
 
 # （解析函数已移至 bin/ai_lib/parsers.py）
 from .ai_lib.parsers import parse_sse_structured_response, _parse_ai_raw_response, _parse_legacy_shell
-from .ai_lib.api import call_ai_api_sse, process_ai_result_fields, extract_ai_commands, build_memory_context
+from .ai_lib.api import call_ai_api_sse, process_ai_result_fields, extract_ai_commands, build_memory_context, build_stable_prefix
 from .ai_lib.lang import get_lang_text
 from .ai_lib.helpers import (
     handle_sleep_wait, set_ai_thread_priority, confirm_plan,
@@ -1324,6 +1324,43 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
             PERM_READONLY,  # 预览是安全的
         ),
         _make_tool(
+            "remember",
+            "标记一个 library 会话为重要（提升保留等级，不会被压缩清理）。用 session_id 指定目标。",
+            {
+                "session_id": {"type": "string", "description": "library 会话 UUID，如 abc123-def456"},
+            },
+            ["session_id"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "forget",
+            "归档一个 library 会话（移到 .archive/，从活跃索引移除，可恢复）。",
+            {
+                "session_id": {"type": "string", "description": "library 会话 UUID"},
+            },
+            ["session_id"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "memory",
+            "搜索或列出 library 历史会话。operation=search 按关键词搜索，operation=list 列出所有活跃记忆。",
+            {
+                "operation": {"type": "string", "enum": ["search", "list"], "description": "search 按关键词搜索；list 列出所有活跃记忆"},
+                "query": {"type": "string", "description": "搜索关键词（operation=search 时必填）"},
+                "filter": {"type": "string", "description": "可选过滤 class 等级（operation=list 时），如 '10' 只列永久保留的"},
+                "limit": {"type": "integer", "description": "返回结果数，默认 8，最大 20"},
+            },
+            ["operation"],
+            PERM_READONLY,
+        ),
+        _make_tool(
+            "compact_stats",
+            "查看 library 压缩状态：活跃条目数、归档数、估算 token 数、触发阈值。",
+            {},
+            [],
+            PERM_READONLY,
+        ),
+        _make_tool(
             "choose_ask",
             '当你不确定用户意图时，提供几个选项让用户选择。用户也可以选择「以上都不是」然后自由输入。',
             {
@@ -1787,11 +1824,18 @@ def _exec_get_file_info(file_path: str) -> str:
 
 
 def _exec_read_file(file_path: str, range_str: str = None) -> str:
-    """读取文件内容，支持行号范围。"""
+    """
+    读取文件内容，支持行号范围。
+    
+    返回带行号前缀的内容（每行格式 "LINE │ 内容"），
+    AI 可以精确引用行号而无需重读文件。
+    同时记录到 library 时保留完整路径+行号+内容。
+    """
     try:
-        if not os.path.exists(file_path):
-            return f"❌ File not found: {file_path}"
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        abs_path = os.path.abspath(file_path)
+        if not os.path.exists(abs_path):
+            return f"❌ File not found: {abs_path}"
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
             # 大文件分块读取，支持 Ctrl+C 中断
             f.seek(0, 2)
             file_size = f.tell()
@@ -1808,20 +1852,50 @@ def _exec_read_file(file_path: str, range_str: str = None) -> str:
                         break
                     parts.append(chunk)
                 content = "".join(parts)
+        
+        lines = content.split("\n")
+        total_lines = len(lines)
+        
+        # ── 行号范围处理 ──
+        start_line = 1
+        end_line = total_lines
+        view_mode = "full"
+        
         if range_str:
             try:
                 if "-" in range_str:
                     start, end = map(int, range_str.split("-", 1))
-                    lines = content.split("\n")
-                    lines = lines[max(0, start-1):end]
-                    content = "\n".join(lines)
+                    start_line = max(1, start)
+                    end_line = min(total_lines, end)
+                    selected = lines[start_line - 1:end_line]
+                    view_mode = f"range {start_line}-{end_line}"
                 else:
                     line_no = int(range_str)
-                    lines = content.split("\n")
-                    content = lines[min(line_no-1, len(lines)-1)]
+                    start_line = max(1, min(line_no, total_lines))
+                    end_line = start_line
+                    selected = [lines[start_line - 1]]
+                    view_mode = f"line {start_line}"
             except (ValueError, IndexError):
-                pass
-        return content
+                selected = lines
+        else:
+            selected = lines
+        
+        # ── 构建带行号前缀的输出 ──
+        from lib.native_fs.panels import number_lines as _num_lines
+        raw_selected = "\n".join(selected)
+        numbered = _num_lines(raw_selected, start=start_line)
+        
+        # 构建返回文本：路径 + 行范围 + 行号内容
+        header = (
+            f"📖 `{abs_path}` "
+            f"({view_mode} of {total_lines} lines)"
+        )
+        
+        # 限制输出大小：最多 8000 字符
+        if len(numbered) > 8000:
+            numbered = numbered[:8000] + f"\n... (truncated, {len(numbered)} chars total)"
+        
+        return f"{header}\n\n{numbered}"
     except Exception as e:
         return f"❌ read_file failed: {e}"
 
@@ -2996,7 +3070,10 @@ def _exec_choose_ask(question: str, options: list) -> str:
         )
 
         if selected == none_label:
-            # 自由输入
+            # 自由输入 — 先回显用户选择，建立视觉连续性（避免 InquirerPy select 清屏后出现空白断层）
+            from rich.console import Console as _RC
+            _rc = _RC()
+            _rc.print(f"  → {selected}", style="dim")
             free_text = _text_input(_mcp_t("💬 请输入你的回答", "💬 Your answer:")).strip()
             if free_text:
                 return f"__FREE_TEXT__:{free_text}"
@@ -3007,6 +3084,56 @@ def _exec_choose_ask(question: str, options: list) -> str:
         return _mcp_t("⏹ 用户取消", "⏹ Cancelled by user")
     except Exception as e:
         return f"❌ choose_ask failed: {e}"
+
+
+def _exec_remember_session(session_id: str) -> str:
+    """标记 library 会话为重要（Reasonix remember 等价物）"""
+    try:
+        from .ai_lib.storage import mark_session_important
+        home_dir = os.path.expanduser("~")
+        return mark_session_important(home_dir, session_id)
+    except Exception as e:
+        return f"❌ remember failed: {e}"
+
+
+def _exec_forget_session(session_id: str) -> str:
+    """归档 library 会话（Reasonix forget 等价物）"""
+    try:
+        from .ai_lib.storage import archive_session
+        home_dir = os.path.expanduser("~")
+        return archive_session(home_dir, session_id)
+    except Exception as e:
+        return f"❌ forget failed: {e}"
+
+
+def _exec_search_library(query: str, limit: int = 8) -> str:
+    """BM25 搜索海马体（Reasonix recall 等价物）"""
+    try:
+        from .ai_lib.storage import search_library
+        home_dir = os.path.expanduser("~")
+        return search_library(home_dir, query, limit)
+    except Exception as e:
+        return f"❌ memory search failed: {e}"
+
+
+def _exec_list_hippocampus(filter_type: str = None, limit: int = 30) -> str:
+    """列出海马体活跃记忆（Reasonix list 等价物）"""
+    try:
+        from .ai_lib.storage import list_hippocampus
+        home_dir = os.path.expanduser("~")
+        return list_hippocampus(home_dir, filter_type=filter_type, limit=limit)
+    except Exception as e:
+        return f"❌ memory list failed: {e}"
+
+
+def _exec_compact_stats() -> str:
+    """查看压缩状态"""
+    try:
+        from .ai_lib.storage import get_compaction_stats
+        home_dir = os.path.expanduser("~")
+        return get_compaction_stats(home_dir)
+    except Exception as e:
+        return f"❌ compact_stats failed: {e}"
 
 
 def _exec_config(action: str, key: str, value: str = None) -> str:
@@ -3197,6 +3324,15 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "ExitPlanMode":  lambda p: _exec_exit_plan_mode(),
         # ── 用户选择提问 ──
         "choose_ask":    lambda p: _exec_choose_ask(p.get("question", ""), p.get("options", [])),
+        # ── Library 记忆管理（Reasonix remember/forget/recall）──
+        "remember":     lambda p: _exec_remember_session(p.get("session_id", "")),
+        "forget":       lambda p: _exec_forget_session(p.get("session_id", "")),
+        "memory":       lambda p: (
+            _exec_search_library(p.get("query", ""), p.get("limit", 8))
+            if p.get("operation", "search") == "search"
+            else _exec_list_hippocampus(p.get("filter"), p.get("limit", 30))
+        ),
+        "compact_stats": lambda p: _exec_compact_stats(),
         # ── 配置 ──
         "Config":       lambda p: _exec_config(p.get("action", "get"), p.get("key", ""), p.get("value", None)),
         # ── 子代理与输出 ──
@@ -4261,6 +4397,10 @@ def handle_ai(
 
     current_question = initial_question  # 用于日志/估算，API 实际走 conversation_history
 
+    # ── 缓存稳定前缀：只算一次，会话期间绝不变化 ──
+    # 注入 system prompt 第一条消息 → DeepSeek 前缀缓存命中
+    _stable_prefix = build_stable_prefix(user_home_dir)
+
     while continue_asking:
         _tool_calls_processed_this_round = False
         _commands_processed_this_round = False
@@ -4282,7 +4422,7 @@ def handle_ai(
             user_home_dir, current_chat_name, current_session_id,
             referenced_memory_uuid, (interaction_count == 1 and not message_appended), mode
         )
-
+        
         # AI 引用记忆时显示提示（API 调用前，让用户提前看到）
         if referenced_memory_uuid:
             console.print(
@@ -4859,6 +4999,7 @@ def handle_ai(
                     on_reasoning=_on_reasoning,
                     user_home_dir=user_home_dir,
                     tools=_active_tools,
+                    memory_block=_stable_prefix,
                     )
                     _mcp_debug(f"call_ai_api_sse 返回: {'interrupted' if (api_raw_result or {}).get('_interrupted') else 'OK' if api_raw_result else 'None'}")
                 except Exception as _api_exc:
@@ -5054,7 +5195,7 @@ def handle_ai(
                 continue_asking = True
                 
                 if interaction_count == 1:
-                    record_ai_session(user_home_dir, current_session_id, initial_question, ai_result, user_answer, {}, referenced_memory_uuid or "", native_results="")
+                    record_ai_session(user_home_dir, current_session_id, initial_question, ai_result, user_answer, {}, referenced_memory_uuid or "", markup_results=ai_result.get("_markup_results"))
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
@@ -5649,7 +5790,7 @@ def handle_ai(
                         final_ai_result["txt"] = refuse_summary
                 
                 if interaction_count == 1:
-                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "", native_results="")
+                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "", markup_results=final_ai_result.get("_markup_results"))
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:
@@ -5689,7 +5830,7 @@ def handle_ai(
                         final_ai_result["txt"] = refuse_summary
                 
                 if interaction_count == 1:
-                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "", native_results="")
+                    record_ai_session(user_home_dir, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "", markup_results=final_ai_result.get("_markup_results"))
                 else:
                     existing_content, record_path = get_latest_ai_session(user_home_dir, current_session_id)
                     if existing_content and record_path:

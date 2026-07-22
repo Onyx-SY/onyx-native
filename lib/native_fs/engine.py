@@ -35,17 +35,25 @@ class BlockResult:
 
     def __init__(self, block: dict, success: bool, message: str,
                  content: str = None, old_content: str = None,
-                 raw_content: str = None):
+                 raw_content: str = None,
+                 start_line: int = None, end_line: int = None,
+                 total_lines: int = None,
+                 search: str = None, replace: str = None):
         self.type = block.get("type", "unknown")
         self.path = block.get("path", "")
         self.success = success
         self.message = message
-        self.content = content          # VIEW 读取的内容（带行号，用于显示）
-        self.raw_content = raw_content  # VIEW 读取的原始内容（无行号，用于 AI 回传）
-        self.old_content = old_content  # DELETE/EDIT 被替换的内容
+        self.content = content           # VIEW 读取的内容（带行号，用于显示）
+        self.raw_content = raw_content   # VIEW 读取的原始内容（无行号，用于 AI 回传）
+        self.old_content = old_content   # DELETE/EDIT 被替换的内容
+        self.start_line = start_line     # 行范围起始（1-indexed）
+        self.end_line = end_line         # 行范围结束（1-indexed）
+        self.total_lines = total_lines   # 文件总行数
+        self.search = search             # EDIT 的 SEARCH 文本
+        self.replace = replace           # EDIT 的 REPLACE 文本
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "type": self.type,
             "success": self.success,
             "path": self.path,
@@ -54,6 +62,17 @@ class BlockResult:
             "raw_content": self.raw_content,
             "old_content": self.old_content,
         }
+        if self.start_line is not None:
+            d["start_line"] = self.start_line
+        if self.end_line is not None:
+            d["end_line"] = self.end_line
+        if self.total_lines is not None:
+            d["total_lines"] = self.total_lines
+        if self.search is not None:
+            d["search"] = self.search
+        if self.replace is not None:
+            d["replace"] = self.replace
+        return d
 
     def __repr__(self):
         status = "✅" if self.success else "❌"
@@ -97,9 +116,9 @@ def execute_block(block: dict, cwd: str = None,
             real_abs = os.path.realpath(abs_path)
             real_root = os.path.realpath(sandbox_root)
             if not real_abs.startswith(real_root + os.sep) and real_abs != real_root:
-                err_msg = f"⛔ 路径越界：{path} 不在沙箱目录 \"{sandbox_root}\" 内"
+                err_msg = f"⛔ 路径越界：{abs_path} 不在沙箱目录 \"{sandbox_root}\" 内"
                 pm = panel_mgr or PanelManager()
-                pm.show_static(make_error_panel(path, err_msg))
+                pm.show_static(make_error_panel(abs_path, err_msg))
                 return BlockResult(block, False, err_msg)
         except Exception as e:
             err_msg = f"⛔ 沙箱校验异常：{e}"
@@ -119,9 +138,9 @@ def execute_block(block: dict, cwd: str = None,
             for _pdir in _protected:
                 _pdir_real = os.path.realpath(_pdir)
                 if real_abs == _pdir_real or real_abs.startswith(_pdir_real + os.sep):
-                    err_msg = f"⛔ 保护目录拦截：{path} 是核心保护目录，不允许修改"
+                    err_msg = f"⛔ 保护目录拦截：{abs_path} 是核心保护目录，不允许修改"
                     pm = panel_mgr or PanelManager()
-                    pm.show_static(make_error_panel(path, err_msg))
+                    pm.show_static(make_error_panel(abs_path, err_msg))
                     return BlockResult(block, False, err_msg)
         except Exception as e:
             err_msg = f"⛔ 保护目录校验异常：{e}"
@@ -129,9 +148,9 @@ def execute_block(block: dict, cwd: str = None,
 
     # ── 二进制文件拦截（仅阻止写操作，VIEW 仍允许）──
     if block_type in _mutation_types and is_binary_path(abs_path):
-        err_msg = f"❌ 拒绝编辑二进制文件: {path}（使用 shell 命令处理）"
+        err_msg = f"❌ 拒绝编辑二进制文件: {abs_path}（使用 shell 命令处理）"
         pm = panel_mgr or PanelManager()
-        pm.show_static(make_error_panel(path, err_msg))
+        pm.show_static(make_error_panel(abs_path, err_msg))
         return BlockResult(block, False, err_msg)
 
     # 分发
@@ -184,7 +203,7 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
     """执行 VIEW 操作（100% 精确，不截断）"""
     ok, err, lines = _read_file_lines(abs_path)
     if not ok:
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     total_lines = len(lines)
@@ -207,7 +226,7 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
             line_range = (line, line)
         else:
             err = f"行号越界: {line}, 文件共 {total_lines} 行"
-            pm.show_static(make_error_panel(block["path"], err))
+            pm.show_static(make_error_panel(abs_path, err))
             return BlockResult(block, False, err, content=str(total_lines))
 
     elif start is not None and end is not None:
@@ -216,7 +235,7 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
         end_1 = min(total_lines, end)
         if start_1 > end_1 or start_1 > total_lines:
             err = f"行范围越界: {start}-{end}, 文件共 {total_lines} 行"
-            pm.show_static(make_error_panel(block["path"], err))
+            pm.show_static(make_error_panel(abs_path, err))
             return BlockResult(block, False, err)
         selected = lines[start_1 - 1:end_1]
         raw_content = "\n".join(selected)
@@ -231,7 +250,7 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
                 matched.append((i + 1, line_text))
         if not matched:
             msg = f"未找到含 \"{search_text}\" 的行"
-            pm.show_static(make_error_panel(block["path"], msg))
+            pm.show_static(make_error_panel(abs_path, msg))
             return BlockResult(block, False, msg)
         raw_lines = []
         formatted_lines = []
@@ -250,7 +269,7 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
 
     # 构建并显示面板（带行号版本）
     panel = make_reading_panel(
-        block["path"], display_content,
+        abs_path, display_content,
         line_range=line_range,
         total_lines=total_lines,
     )
@@ -259,9 +278,16 @@ def _do_view(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
         pass  # 面板显示后自动管理生命周期
 
     # 返回时 content=带行号（面板用），raw_content=纯文本（AI 回传用）
+    _sl = line_range[0] if line_range else None
+    _el = line_range[1] if line_range else None
+    # 搜索关键词传给 search 字段，AI 能理解读的是什么
+    _search_kw = search_text if search_text else None
     return BlockResult(block, True, f"已读取 {total_lines} 行",
                        content=display_content,
-                       raw_content=raw_content)
+                       raw_content=raw_content,
+                       start_line=_sl, end_line=_el,
+                       total_lines=total_lines,
+                       search=_search_kw)
 
 
 def _do_edit(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
@@ -271,23 +297,24 @@ def _do_edit(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
 
     if not search:
         err = "SEARCH 内容为空"
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     # 校验
     ok, err_msg = validate_edit(abs_path, search, replace)
     if not ok:
-        pm.show_static(make_error_panel(block["path"], err_msg))
+        pm.show_static(make_error_panel(abs_path, err_msg))
         return BlockResult(block, False, err_msg)
 
     # 构建面板
-    panel, dim_panel = make_edit_panel(block["path"], search, replace)
+    panel, dim_panel = make_edit_panel(abs_path, search, replace)
 
     # 执行
     with pm.show_panel(panel, dim_panel):
         success, msg = apply_edit(abs_path, search, replace, backup=True)
 
     return BlockResult(block, success, msg,
+                       search=search, replace=replace,
                        old_content=search)
 
 
@@ -300,7 +327,7 @@ def _do_edit_by_range(block: dict, abs_path: str,
 
     ok, err, lines = _read_file_lines(abs_path)
     if not ok:
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     total = len(lines)
@@ -309,7 +336,7 @@ def _do_edit_by_range(block: dict, abs_path: str,
 
     if start_1 > end_1 or start_1 > total:
         err = f"行范围越界: {start}-{end}, 文件共 {total} 行"
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     # 获取被替换的旧内容（用于面板展示）
@@ -322,7 +349,7 @@ def _do_edit_by_range(block: dict, abs_path: str,
 
     # 构建面板
     panel, dim_panel = make_edit_panel(
-        block["path"],
+        abs_path,
         search=old_content,
         replace=new_content,
     )
@@ -335,9 +362,12 @@ def _do_edit_by_range(block: dict, abs_path: str,
             block, True,
             f"已替换第 {start_1}-{end_1} 行（{len(new_lines_list)} 行 → {len(old_lines)} 行）",
             old_content=old_content,
+            start_line=start_1, end_line=end_1,
+            total_lines=total,
+            search=old_content, replace=new_content,
         )
     except Exception as e:
-        pm.show_static(make_error_panel(block["path"], f"替换失败: {e}"))
+        pm.show_static(make_error_panel(abs_path, f"替换失败: {e}"))
         return BlockResult(block, False, f"替换失败: {e}")
 
 
@@ -377,7 +407,7 @@ def _do_write(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
     if indent_warn:
         pm.console.print(f"  [bold yellow]{indent_warn}[/]")
 
-    panel, dim_panel = make_write_panel(block["path"], content, is_new=is_new)
+    panel, dim_panel = make_write_panel(abs_path, content, is_new=is_new)
 
     try:
         with pm.show_panel(panel, dim_panel):
@@ -386,7 +416,7 @@ def _do_write(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
         return BlockResult(block, True,
                            f"{'创建' if is_new else '写入'}成功: {abs_path}")
     except Exception as e:
-        pm.show_static(make_error_panel(block["path"], f"写入失败: {e}"))
+        pm.show_static(make_error_panel(abs_path, f"写入失败: {e}"))
         return BlockResult(block, False, f"写入失败: {e}")
 
 
@@ -398,10 +428,10 @@ def _do_append(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
 
     if not os.path.exists(abs_path):
         err = f"文件不存在: {abs_path}"
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
-    panel, dim_panel = make_append_panel(block["path"], content)
+    panel, dim_panel = make_append_panel(abs_path, content)
 
     try:
         with pm.show_panel(panel, dim_panel):
@@ -417,7 +447,7 @@ def _do_append(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
                     f.write("\n")
         return BlockResult(block, True, f"追加成功: {abs_path}")
     except Exception as e:
-        pm.show_static(make_error_panel(block["path"], f"追加失败: {e}"))
+        pm.show_static(make_error_panel(abs_path, f"追加失败: {e}"))
         return BlockResult(block, False, f"追加失败: {e}")
 
 
@@ -428,19 +458,19 @@ def _do_insert(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
 
     ok, err, lines = _read_file_lines(abs_path)
     if not ok:
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     if line_no < 0 or line_no > len(lines):
         err = f"行号越界: {line_no}, 文件共 {len(lines)} 行"
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     # 在第 line_no 行后插入（正确 split 多行内容）
     insert_lines = content.split("\n")
     new_lines = lines[:line_no] + insert_lines + lines[line_no:]
 
-    panel, dim_panel = make_insert_panel(block["path"], line_no, content)
+    panel, dim_panel = make_insert_panel(abs_path, line_no, content)
 
     try:
         with pm.show_panel(panel, dim_panel):
@@ -449,7 +479,7 @@ def _do_insert(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
         return BlockResult(block, True,
                            f"已在第 {line_no} 行后插入 {len(content.split(chr(10)))} 行")
     except Exception as e:
-        pm.show_static(make_error_panel(block["path"], f"插入失败: {e}"))
+        pm.show_static(make_error_panel(abs_path, f"插入失败: {e}"))
         return BlockResult(block, False, f"插入失败: {e}")
 
 
@@ -461,7 +491,7 @@ def _do_delete(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
 
     ok, err, lines = _read_file_lines(abs_path)
     if not ok:
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     # 边界校验
@@ -469,7 +499,7 @@ def _do_delete(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
     end_1 = min(len(lines), end)
     if start_1 > end_1 or start_1 > len(lines):
         err = f"行范围越界: {start}-{end}, 文件共 {len(lines)} 行"
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     # 提取被删内容
@@ -478,7 +508,7 @@ def _do_delete(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
 
     # 构建面板
     panel, dim_panel = make_delete_panel(
-        block["path"], deleted_content,
+        abs_path, deleted_content,
         line_range=(start_1, end_1),
     )
 
@@ -491,9 +521,11 @@ def _do_delete(block: dict, abs_path: str, pm: PanelManager) -> BlockResult:
         deleted_count = len(deleted_lines)
         return BlockResult(block, True,
                            f"已删除 {deleted_count} 行 ({start_1}-{end_1})",
-                           old_content=deleted_content)
+                           old_content=deleted_content,
+                           start_line=start_1, end_line=end_1,
+                           total_lines=len(lines))
     except Exception as e:
-        pm.show_static(make_error_panel(block["path"], f"删除失败: {e}"))
+        pm.show_static(make_error_panel(abs_path, f"删除失败: {e}"))
         return BlockResult(block, False, f"删除失败: {e}")
 
 
@@ -562,7 +594,7 @@ def _do_delete_by_content(block: dict, abs_path: str,
 
     ok, err, lines = _read_file_lines(abs_path)
     if not ok:
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     full_content = "\n".join(lines)
@@ -570,16 +602,16 @@ def _do_delete_by_content(block: dict, abs_path: str,
 
     if count == 0:
         err = f"未找到匹配内容: {search}"
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     if count > 1:
         err = f"内容不唯一（找到 {count} 处匹配）"
-        pm.show_static(make_error_panel(block["path"], err))
+        pm.show_static(make_error_panel(abs_path, err))
         return BlockResult(block, False, err)
 
     # 构建面板
-    panel, dim_panel = make_delete_panel(block["path"], search)
+    panel, dim_panel = make_delete_panel(abs_path, search)
 
     try:
         with pm.show_panel(panel, dim_panel):
@@ -589,7 +621,7 @@ def _do_delete_by_content(block: dict, abs_path: str,
         return BlockResult(block, True, f"已删除匹配内容: {search}",
                            old_content=search)
     except Exception as e:
-        pm.show_static(make_error_panel(block["path"], f"删除失败: {e}"))
+        pm.show_static(make_error_panel(abs_path, f"删除失败: {e}"))
         return BlockResult(block, False, f"删除失败: {e}")
 
 

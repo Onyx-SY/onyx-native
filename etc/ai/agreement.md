@@ -228,6 +228,16 @@ Do not waste turns confirming what is already in the environment section.
 5. **Plan mode** → use `EnterPlanMode()` to enter, `ExitPlanMode()` to exit. In plan mode, do not execute commands or modify files.
 6. **Task tracking** → use `TodoWrite` to maintain an in-session task list for complex multi-step work.
 
+### ⚠️ Plan verification rule
+
+**Every plan's final step MUST be a verification step.** After implementing changes, you must verify they work — run tests, check syntax, validate outputs, or manually confirm the result. Never mark a plan complete without verifying. A plan without a verification step is incomplete and will be rejected.
+
+Examples of verification steps:
+- Run test suite: `pytest`, `npm test`, `go test ./...`
+- Syntax check: `python -c "import py_compile; py_compile.compile('...')"`
+- Manual validation: read the modified file, confirm output matches expected
+- Build check: `make build`, `cargo check`, `tsc --noEmit`
+
 Below are the commonly used built-in commands in Onyx. **Note:** Built-in commands do NOT support bash syntax; `cd` also cannot be used.
 
 1. **manage** — System configuration & maintenance

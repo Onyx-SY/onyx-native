@@ -3638,6 +3638,26 @@ def main_loop() -> None:
         # ========== 阶段7: 交互循环 ==========
         log_info(f"   阶段7-进入交互模式: 等待用户输入", request_id)
         
+        # ── 全局 raw 模式：整个会话期间 stdin 保持 raw 态，不再每条命令 save/restore ──
+        _global_old_tty = None
+        try:
+            import termios as _termios
+            import fcntl as _fcntl
+            if os.isatty(sys.stdin.fileno()):
+                _global_old_tty = _termios.tcgetattr(sys.stdin.fileno())
+                _new_tty = _termios.tcgetattr(sys.stdin.fileno())
+                # 清除 ICANON/ECHO/ISIG → raw 模式
+                _new_tty[0] &= ~(_termios.ICRNL | _termios.INLCR | _termios.IGNCR)
+                _new_tty[3] &= ~(_termios.ICANON | _termios.ECHO | _termios.ISIG)
+                _new_tty[6][_termios.VMIN] = 1
+                _new_tty[6][_termios.VTIME] = 0
+                _termios.tcsetattr(sys.stdin.fileno(), _termios.TCSANOW, _new_tty)
+        except ImportError:
+            _global_old_tty = None  # termios not available (Windows etc.)
+        except Exception:
+            _global_old_tty = None
+        # ────────────────────────────────────────────────────────────
+        
         # 记录命令执行次数
         cmd_count = 0
         last_log_time = time.time()
@@ -3738,6 +3758,14 @@ def main_loop() -> None:
             graceful_shutdown(user_info["session_id"])
         except Exception:
             pass
+
+        # 恢复终端属性（崩溃时也确保终端回到 cooked 模式）
+        if _global_old_tty is not None:
+            try:
+                import termios as _termios2
+                _termios2.tcsetattr(sys.stdin.fileno(), _termios2.TCSANOW, _global_old_tty)
+            except Exception:
+                pass
 
         sys.exit(1)
 

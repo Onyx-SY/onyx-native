@@ -570,22 +570,24 @@ class PersistentShell:
             is_windows = platform.system() == "Windows"
             fd_stdin = sys.stdin.fileno()
 
-            # TTY raw mode：箭头键等需要逐字符转发到 PTY，不能行缓冲
-            old_tty = None
-            if HAVE_FCNTL_TERMIOS and os.isatty(fd_stdin):
-                old_tty = termios.tcgetattr(fd_stdin)
-                new_tty = termios.tcgetattr(fd_stdin)
-                new_tty[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
-                new_tty[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
-                termios.tcsetattr(fd_stdin, termios.TCSANOW, new_tty)
+            # 不再在此处 save/restore 终端属性：由外层 main_loop 统一管理 raw 模式。
+            # 这样交互式程序和 TUI 程序在命令运行时获得稳定的 raw 通道。
+            # 每个命令结束时也不再恢复——直到整个 Onyx 会话结束才恢复。
 
             old_sigint = None
             old_sigwinch = None
             _interrupted_flag = {'value': False}
             if not is_windows:
                 def _sigint_handler(signum, frame):
+                    """将 SIGINT 转发到 PTY 子进程组，使 Ctrl+C 能真正杀死前台程序"""
                     _interrupted_flag['value'] = True
-                    debug_log("SIGINT caught by Python handler (passthrough)")
+                    debug_log("SIGINT caught by Python handler, forwarding to PTY process group")
+                    if self.pid is not None:
+                        try:
+                            pgid = os.getpgid(self.pid)
+                            os.killpg(pgid, signal.SIGINT)
+                        except (ProcessLookupError, PermissionError, OSError) as e:
+                            debug_log(f"Failed to forward SIGINT to process group: {e}", 'error')
                 old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
                 if hasattr(signal, 'SIGWINCH'):
                     def sigwinch_handler(signum, frame):
@@ -690,36 +692,12 @@ class PersistentShell:
                                     output_buffer.append(clean)
                             break
 
-                    # ── Fallback: 实测到的 prompt pattern ──
-                    _prompt_matched = False
-                    for pat in self._prompt_patterns:
-                        if pat.search(text):
-                            debug_log(f"PS1 fallback prompt pattern matched")
-                            _prompt_matched = True
-                            break
-                    if not _prompt_matched:
-                        # 通用 prompt 结尾检测：行末为 $ # > % 之一（可跟空格）
-                        lines = text.split('\n')
-                        for ln in reversed(lines):
-                            stripped = ln.strip()
-                            if stripped and re.search(r'[$#>%]\s*$', stripped):
-                                _prompt_matched = True
-                                debug_log(f"PS1 generic prompt char matched: {stripped!r}")
-                                break
-                    if _prompt_matched:
-                        return_code = 0  # fallback 无法获知退出码
-                        # 去掉 prompt 本身的字符再输出
-                        clean = text.rstrip('\n')
-                        for pat in self._prompt_patterns:
-                            clean = pat.sub('', clean)
-                        clean = re.sub(r'.*[$#>%]\s*$', '', clean, flags=re.MULTILINE).rstrip('\n')
-                        if clean:
-                            clean_out = clean.replace('\r\n', '\n')
-                            sys.stdout.write(clean_out)
-                            sys.stdout.flush()
-                            if output_buffer is not None:
-                                output_buffer.append(clean_out)
-                        break
+                    # ── 不再使用 fallback prompt pattern 检测 ──
+                    # 2026-07-22: 移除了通用 prompt 正则（$ > # %）和 _prompt_patterns 匹配。
+                    # 这些会误抓交互式程序（如 c.py 的 "🔢 >"）自身的提示符，导致 passthrough
+                    # 提前退出。交互式程序不产生 PS1 __DONE__ marker，必须保持 passthrough
+                    # 直通直到用户 Ctrl+C 或程序自己退出（产生 PTY EOF）。
+                    # 只有 shell 的 PS1（__DONE__:exit_code）才是命令完成的可靠信号。
 
                     # Real-time output forwarding
                     clean = text.replace('\r\n', '\n')
@@ -739,31 +717,8 @@ class PersistentShell:
             debug_log(f"Passthrough exception: {e}", 'error')
         finally:
             if not is_windows:
-                if old_tty is not None and HAVE_FCNTL_TERMIOS and os.isatty(fd_stdin):
-                    _restored = False
-                    for _attempt in range(3):
-                        try:
-                            termios.tcsetattr(fd_stdin, termios.TCSANOW, old_tty)
-                            _restored = True
-                            break
-                        except termios.error as e:
-                            if e.args and e.args[0] == errno.EINTR:
-                                debug_log(f"tcsetattr restore interrupted (EINTR), retry {_attempt + 1}/3")
-                                continue
-                            debug_log(f"tcsetattr restore failed: {e}", 'error')
-                            break
-                        except Exception as e:
-                            debug_log(f"tcsetattr restore exception: {e}", 'error')
-                            break
-                    if not _restored:
-                        # 兜底：至少保证 ISIG 重新打开，即使其它标志位没恢复干净
-                        try:
-                            _emergency = termios.tcgetattr(fd_stdin)
-                            _emergency[3] |= termios.ISIG
-                            termios.tcsetattr(fd_stdin, termios.TCSANOW, _emergency)
-                            debug_log("ISIG emergency restore applied (partial recovery)")
-                        except Exception as e:
-                            debug_log(f"ISIG emergency restore also failed: {e}", 'error')
+                # 不再恢复终端属性：由外层 main_loop 统一管理 raw 模式生命周期。
+                # 仅恢复 Python 的信号 handlers。
                 if old_sigint:
                     signal.signal(signal.SIGINT, old_sigint)
                 if old_sigwinch and hasattr(signal, 'SIGWINCH'):

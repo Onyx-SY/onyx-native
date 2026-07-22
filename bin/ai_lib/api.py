@@ -60,7 +60,12 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
                     on_reasoning: Optional[Callable[[str], None]] = None,
                     user_home_dir: str = None,
                     tools: Optional[List[Dict]] = None,
-                    messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
+                    messages: Optional[List[Dict]] = None,
+                    memory_block: str = "") -> Dict[str, Any]:
+    """
+    memory_block: 缓存稳定前缀（build_stable_prefix 输出），
+                  注入 system prompt 末尾。同值返回相同 → DeepSeek 前缀缓存命中。
+    """
     # 惰性导入避免循环引用
     from .config import get_current_lang, get_prompt_text, load_key_conf
 
@@ -213,10 +218,21 @@ Onyx Mode: {onyx_mode}
     if messages is None:
         _messages = []
         if system_prompt:
-            _messages.append({"role": "system", "content": system_prompt})
+            sp_content = system_prompt
+            # 注入缓存稳定前缀到 system prompt 末尾
+            if memory_block:
+                sp_content = sp_content.rstrip() + "\n\n# Persistent Memory (cache-stable)\n" + memory_block
+            _messages.append({"role": "system", "content": sp_content})
+        elif memory_block:
+            _messages.append({"role": "system", "content": "# Persistent Memory (cache-stable)\n" + memory_block})
         _messages.append({"role": "user", "content": env_info})
     else:
-        _messages = messages
+        # messages 已预构建：将 memory_block 作为独立的 system 消息前置
+        # 关键：独立消息 → 第一条不变 → DeepSeek 前缀缓存命中
+        if memory_block:
+            _messages = [{"role": "system", "content": "# Persistent Memory (cache-stable)\n" + memory_block}] + list(messages)
+        else:
+            _messages = list(messages)
 
     # 保留 reasoning_content（DeepSeek thinking 模式要求回传）
     # 仅对不支持 thinking 的平台剥离该字段
@@ -679,15 +695,38 @@ def extract_ai_commands(ai_result: Dict[str, Any]) -> List[str]:
     return commands
 
 
+def build_stable_prefix(home_dir: str, chat_name: str = None) -> str:
+    """
+    构建缓存稳定的记忆前缀（确定性输出，同输入→同输出）。
+    
+    使用海马体（chat JSON）作为 library 索引——海马体天然的
+    {id, session_uuid, question, tag, class} 结构比 LIBRARY.md 更精确。
+    
+    此函数的结果注入 system prompt，DeepSeek 自动前缀缓存命中。
+    每次会话只计算一次，中途绝不变化。
+    """
+    from .storage import load_hippocampus_index as _load_idx
+    
+    hippocampus = _load_idx(home_dir, chat_name)
+    return hippocampus if hippocampus else ""
+
+
 def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
                          referenced_memory_uuid: Optional[str], is_first_interaction: bool,
                          mode: str = "normal") -> str:
-    """构建记忆上下文 — 分三段：历史摘要(UUID链) | 当前会话(ongoing) | 引用记忆"""
+    """
+    构建瞬态记忆上下文（每轮变化，不参与前缀缓存）。
+    
+    包含：UUID 链历史 | 当前会话实时内容 | 引用记忆
+    
+    注意：LIBRARY.md 索引已移至 build_stable_prefix() 作为缓存稳定前缀。
+    """
     lang = get_current_lang()
     is_en = lang == "english"
     parts = []
 
     if mode == "normal":
+        # ── 瞬态记忆：UUID 链 + 当前会话（每轮变化，不参与缓存前缀）──
         chat_memory = load_chat_memory_for_context(home_dir, chat_name)
         uuid_chain = []
         if chat_memory:

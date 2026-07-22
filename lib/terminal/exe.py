@@ -27,6 +27,7 @@ import sys
 import re
 import select
 import struct
+import errno
 try:
     import fcntl
     import termios
@@ -739,10 +740,30 @@ class PersistentShell:
         finally:
             if not is_windows:
                 if old_tty is not None and HAVE_FCNTL_TERMIOS and os.isatty(fd_stdin):
-                    try:
-                        termios.tcsetattr(fd_stdin, termios.TCSANOW, old_tty)
-                    except Exception:
-                        pass
+                    _restored = False
+                    for _attempt in range(3):
+                        try:
+                            termios.tcsetattr(fd_stdin, termios.TCSANOW, old_tty)
+                            _restored = True
+                            break
+                        except termios.error as e:
+                            if e.args and e.args[0] == errno.EINTR:
+                                debug_log(f"tcsetattr restore interrupted (EINTR), retry {_attempt + 1}/3")
+                                continue
+                            debug_log(f"tcsetattr restore failed: {e}", 'error')
+                            break
+                        except Exception as e:
+                            debug_log(f"tcsetattr restore exception: {e}", 'error')
+                            break
+                    if not _restored:
+                        # 兜底：至少保证 ISIG 重新打开，即使其它标志位没恢复干净
+                        try:
+                            _emergency = termios.tcgetattr(fd_stdin)
+                            _emergency[3] |= termios.ISIG
+                            termios.tcsetattr(fd_stdin, termios.TCSANOW, _emergency)
+                            debug_log("ISIG emergency restore applied (partial recovery)")
+                        except Exception as e:
+                            debug_log(f"ISIG emergency restore also failed: {e}", 'error')
                 if old_sigint:
                     signal.signal(signal.SIGINT, old_sigint)
                 if old_sigwinch and hasattr(signal, 'SIGWINCH'):

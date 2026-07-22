@@ -32,6 +32,14 @@ _SLASH_COMMANDS_CN: Dict[str, str] = {
     "/exit":   "退出 AI 对话，返回 shell",
     "/quit":   "同 /exit",
     "/clear":  "清屏",
+    "/quiet":  "切换精简模式（隐藏 token/耗时等辅助信息）",
+    "/tokens": "显示当前会话累计 token 用量",
+    "/stats":  "显示会话统计（轮数、token、耗时）",
+    "/reset":  "重置对话上下文，开始新对话",
+    "/export": "导出对话记录到文件",
+    "/lang":   "切换语言 (cn/en)",
+    "/mode":   "切换 AI 模式 (normal/plan)",
+    "/time":   "切换是否显示每轮耗时",
     "/config": "⚙️ 统一配置 AI 模型/密钥/参数",
     "/model":  "查看/切换 AI 模型与参数",
     "/param":  "查看/设置模型参数 (temperature/top_p/max_tokens/effort)",
@@ -45,6 +53,14 @@ _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/exit":   "Exit AI mode, return to shell",
     "/quit":   "Same as /exit",
     "/clear":  "Clear screen",
+    "/quiet":  "Toggle quiet mode (hide token/timing info)",
+    "/tokens": "Show cumulative token usage for this session",
+    "/stats":  "Show session statistics (rounds, tokens, time)",
+    "/reset":  "Reset conversation context, start fresh",
+    "/export": "Export conversation to file",
+    "/lang":   "Switch language (cn/en)",
+    "/mode":   "Switch AI mode (normal/plan)",
+    "/time":   "Toggle per-round timing display",
     "/config": "⚙️ Unified AI config (model/key/params)",
     "/model":  "View/switch AI model and params",
     "/param":  "View/set model params (temperature/top_p/max_tokens/effort)",
@@ -509,6 +525,155 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         console.print(_t("param_usage_full", lang))
         return True
 
+    elif cmd == "/quiet":
+        # 切换精简模式
+        current = ctx.get("quiet", False)
+        ctx["quiet"] = not current
+        status = _t("quiet_on", lang) if not current else _t("quiet_off", lang)
+        console.print(f"[dim]{status}[/]")
+        return True
+
+    elif cmd == "/tokens":
+        """显示累计 token 用量（依赖 API 精确值）"""
+        from bin.ai_lib.mcp_state import _thread_locals
+        sp = getattr(_thread_locals, 'session_total_prompt', 0)
+        sc = getattr(_thread_locals, 'session_total_completion', 0)
+        rc = getattr(_thread_locals, 'session_round_count', 0)
+        ch = getattr(_thread_locals, 'session_total_cache_hit', 0)
+        if sp or sc:
+            total = sp + sc
+            if lang == "chinese":
+                console.print(Panel(
+                    f"累计 Token 用量（API 精确值）\n\n"
+                    f"  交互轮数: {rc}\n"
+                    f"  Prompt:     {sp:,} tokens\n"
+                    f"  Completion: {sc:,} tokens\n"
+                    f"  合计:       {total:,} tokens\n"
+                    f"  Cache 命中: {ch:,} tokens" if ch else f"  合计: {total:,} tokens",
+                    title="📊 Token 统计", border_style="cyan"
+                ))
+            else:
+                console.print(Panel(
+                    f"Cumulative Token Usage (API precise)\n\n"
+                    f"  Rounds:  {rc}\n"
+                    f"  Prompt:     {sp:,} tokens\n"
+                    f"  Completion: {sc:,} tokens\n"
+                    f"  Total:      {total:,} tokens\n"
+                    f"  Cache hit:  {ch:,} tokens" if ch else f"  Total: {total:,} tokens",
+                    title="📊 Token Stats", border_style="cyan"
+                ))
+        else:
+            no_data = _t("no_token_data", lang)
+            console.print(f"[dim]{no_data}[/]")
+        return True
+
+    elif cmd == "/stats":
+        """会话统计"""
+        from bin.ai_lib.mcp_state import _thread_locals
+        sp = getattr(_thread_locals, 'session_total_prompt', 0)
+        sc = getattr(_thread_locals, 'session_total_completion', 0)
+        rc = getattr(_thread_locals, 'session_round_count', 0)
+        start = ctx.get("session_start", 0)
+        elapsed = time.time() - start if start else 0
+        avg = elapsed / rc if rc > 0 else 0
+        if lang == "chinese":
+            console.print(Panel(
+                f"  交互轮数:   {rc}\n"
+                f"  Token 总计: {sp + sc:,}\n"
+                f"  会话时长:   {elapsed:.0f}s\n"
+                f"  平均每轮:   {avg:.1f}s",
+                title="📈 会话统计", border_style="cyan"
+            ))
+        else:
+            console.print(Panel(
+                f"  Rounds:      {rc}\n"
+                f"  Total tokens: {sp + sc:,}\n"
+                f"  Duration:    {elapsed:.0f}s\n"
+                f"  Avg/round:   {avg:.1f}s",
+                title="📈 Session Stats", border_style="cyan"
+            ))
+        return True
+
+    elif cmd == "/reset":
+        """重置对话上下文"""
+        from bin.ai_lib.mcp_state import _thread_locals
+        # 清除累计 token
+        for attr in ('session_total_prompt', 'session_total_completion',
+                     'session_total_cache_hit', 'session_round_count',
+                     'last_prompt_tokens', 'last_completion_tokens',
+                     'last_cache_hit', 'last_cache_miss'):
+            if hasattr(_thread_locals, attr):
+                delattr(_thread_locals, attr)
+        # 重置会话起始时间
+        ctx["session_start"] = time.time()
+        confirm = _t("reset_done", lang)
+        console.print(f"[green]{confirm}[/]")
+        return True
+
+    elif cmd == "/export":
+        """导出对话记录到文件"""
+        from bin.ai_cmd import get_ai_session_library_dir, get_current_chat_name
+        home = ctx["user_home_dir"]
+        lib_dir = get_ai_session_library_dir(home)
+        session_id = ctx.get("session_id", "")
+        src = os.path.join(lib_dir, f"{session_id}.txt") if session_id else ""
+        if src and os.path.exists(src):
+            export_name = f"ai_export_{session_id[:8]}.md"
+            dst = os.path.join(home, export_name)
+            try:
+                with open(src, "r", encoding="utf-8") as f:
+                    content = f.read()
+                with open(dst, "w", encoding="utf-8") as f:
+                    f.write(f"# AI 对话导出\n\n{content}")
+                console.print(f"[green]{_t('export_ok', lang).format(dst)}[/]")
+            except Exception as e:
+                console.print(f"[red]{_t('export_fail', lang).format(e)}[/]")
+        else:
+            console.print(f"[yellow]{_t('export_no_data', lang)}[/]")
+        return True
+
+    elif cmd == "/lang":
+        """切换语言"""
+        if args:
+            new_lang = args[0].lower()
+            if new_lang in ("cn", "chinese", "zh"):
+                ctx["lang"] = "chinese"
+            elif new_lang in ("en", "english"):
+                ctx["lang"] = "english"
+            else:
+                console.print(f"[yellow]{_t('lang_invalid', lang).format(new_lang)}[/]")
+                return True
+            console.print(f"[green]{_t('lang_switched', ctx['lang'])}[/]")
+        else:
+            # 无参数时切换
+            ctx["lang"] = "english" if lang == "chinese" else "chinese"
+            console.print(f"[green]{_t('lang_switched', ctx['lang'])}[/]")
+        return True
+
+    elif cmd == "/mode":
+        """切换 AI 模式"""
+        if args:
+            new_mode = args[0].lower()
+            if new_mode in ("normal", "plan"):
+                ctx["mode"] = new_mode
+                console.print(f"[green]{_t('mode_switched', lang).format(new_mode)}[/]")
+            else:
+                console.print(f"[yellow]{_t('mode_invalid', lang).format(new_mode)}[/]")
+        else:
+            current_mode = ctx.get("mode", "normal")
+            new_mode = "plan" if current_mode == "normal" else "normal"
+            ctx["mode"] = new_mode
+            console.print(f"[green]{_t('mode_switched', lang).format(new_mode)}[/]")
+        return True
+
+    elif cmd == "/time":
+        """切换每轮耗时显示"""
+        current = ctx.get("show_time", True)
+        ctx["show_time"] = not current
+        status = _t("time_on", lang) if ctx["show_time"] else _t("time_off", lang)
+        console.print(f"[dim]{status}[/]")
+        return True
+
     else:
         console.print(f"[yellow]{_t('unknown_cmd', lang).format(cmd)}[/]")
         return True
@@ -546,6 +711,10 @@ def ai_interactive_session(
         "user_home_dir": user_home_dir,
         "lang": current_lang,
         "session_id": str(uuid.uuid4()),
+        "mode": "normal",
+        "quiet": False,
+        "show_time": True,
+        "session_start": time.time(),
         "_key_changed": False,
         "_chat_changed": False,
     }

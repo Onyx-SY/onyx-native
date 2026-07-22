@@ -105,6 +105,28 @@ def execute_block(block: dict, cwd: str = None,
             err_msg = f"⛔ 沙箱校验异常：{e}"
             return BlockResult(block, False, err_msg)
 
+    # ── 保护目录校验（写操作→禁止修改核心目录）──
+    if sandbox_root and block_type in _mutation_types:
+        try:
+            real_abs = os.path.realpath(abs_path)
+            real_root = os.path.realpath(sandbox_root)
+            _protected = [
+                os.path.join(real_root, "onyx"),
+                os.path.join(real_root, "etc", "pki"),
+                os.path.join(real_root, "onyxlog"),
+                os.path.join(real_root, "tools", "sys_tools"),
+            ]
+            for _pdir in _protected:
+                _pdir_real = os.path.realpath(_pdir)
+                if real_abs == _pdir_real or real_abs.startswith(_pdir_real + os.sep):
+                    err_msg = f"⛔ 保护目录拦截：{path} 是核心保护目录，不允许修改"
+                    pm = panel_mgr or PanelManager()
+                    pm.show_static(make_error_panel(path, err_msg))
+                    return BlockResult(block, False, err_msg)
+        except Exception as e:
+            err_msg = f"⛔ 保护目录校验异常：{e}"
+            return BlockResult(block, False, err_msg)
+
     # ── 二进制文件拦截（仅阻止写操作，VIEW 仍允许）──
     if block_type in _mutation_types and is_binary_path(abs_path):
         err_msg = f"❌ 拒绝编辑二进制文件: {path}（使用 shell 命令处理）"

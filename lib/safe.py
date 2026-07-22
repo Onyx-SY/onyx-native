@@ -773,13 +773,18 @@ def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str],
                                    username: str, user_mode,
                                    log_info_func=None, log_error_func=None,
                                    request_id: str = None, msg: Dict = None,
-                                   user_home: str = None) -> bool:
+                                   user_home: str = None,
+                                   is_ai_call: bool = False) -> bool:
     """
     检查命令对路径的权限
     遍历所有路径，检查是否命中规则且命令不在允许列表中
     
-    - low/mid: 命中细颗粒度 → 拒绝并提示
-    - adv: 命中细颗粒度 → 使用增强的确认逻辑（先检查全局开关）
+    - AI 调用: 保持严格拦截
+    - 人类调用: 
+      - 在家目录下 → 静默跳过（不拦截）
+      - 不在家目录下 → low/mid 弹确认，adv 弹确认
+    
+    - adv: 使用增强的确认逻辑（先检查全局开关）
     
     返回 True 表示允许执行，False 表示拦截
     """
@@ -794,6 +799,14 @@ def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str],
         current_mode = user_mode.current_mode
     else:
         current_mode = "low"
+    
+    # ── 人类在家目录下操作 → 静默跳过，不拦截 ──
+    if not is_ai_call and user_home:
+        safe_home = os.path.abspath(user_home).rstrip('/')
+        for p in all_phys_paths:
+            if p and os.path.abspath(p).rstrip('/').startswith(safe_home):
+                _debug_print(f"人类命令，路径 {p} 在家目录下，静默跳过拦截")
+                return True
     
     # 【修复重复询问】：收集所有被拦截的路径，统一处理
     denied_paths = []
@@ -847,24 +860,46 @@ def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str],
             force_confirm=(cmd_type in _ADV_FORCE_CONFIRM_COMMANDS)
         )
     else:
-        # low/mid 模式直接拒绝
-        error_msg = _get_msg("fine_grained_path_denied", cmd=cmd_head, path=denied_paths[0])
-        print(Fore.RED + error_msg + Style.RESET_ALL)
-        if log_error_func:
-            log_error_func(f"细颗粒度路径权限拦截：命令 {cmd_head} 不允许在路径 {denied_paths[0]} 上执行", request_id)
-        return False
+        # low/mid 模式：人类可确认执行，AI 直接拒绝
+        if is_ai_call:
+            error_msg = _get_msg("fine_grained_path_denied", cmd=cmd_head, path=denied_paths[0])
+            print(Fore.RED + error_msg + Style.RESET_ALL)
+            if log_error_func:
+                log_error_func(f"细颗粒度路径权限拦截：命令 {cmd_head} 不允许在路径 {denied_paths[0]} 上执行", request_id)
+            return False
+        else:
+            # 人类用户：弹确认框
+            paths_str = ', '.join(denied_paths[:3])
+            if len(denied_paths) > 3:
+                paths_str += f' ... (共 {len(denied_paths)} 个路径)'
+            warning_msg = _get_msg("adv_path_permission_warning", cmd=cmd_head, path=paths_str)
+            print(Fore.YELLOW + warning_msg + Style.RESET_ALL)
+            confirm_msg = _get_msg("adv_confirm_exec")
+            try:
+                confirm = input(Fore.YELLOW + confirm_msg + Style.RESET_ALL).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return False
+            if confirm in ('y', 'yes'):
+                _debug_print(f"人类用户确认执行：{cmd_head}")
+                return True
+            print(Fore.RED + _get_msg("user_cancelled") + Style.RESET_ALL)
+            return False
 
 def check_fine_grained_advanced_syntax(phys_paths: List[str], root_dir: str, username: str,
                                         user_mode, advanced_types: Dict[str, bool],
                                         log_info_func=None, log_error_func=None,
                                         request_id: str = None,
-                                        user_home: str = None) -> bool:
+                                        user_home: str = None,
+                                        is_ai_call: bool = False) -> bool:
     """
     检查细颗粒度路径 + 高级语法的组合
     
     规则：
-    - low/mid: 细颗粒度 + 重定向/here-doc/管道/逻辑操作符 → 直接拒绝
-    - adv: 细颗粒度 + 重定向/here-doc/管道/逻辑操作符 → 先检查全局开关，再使用增强的确认逻辑
+    - 人类在家目录下 → 静默跳过
+    - low/mid AI: 细颗粒度 + 重定向/here-doc/管道/逻辑操作符 → 直接拒绝
+    - low/mid 人类: 弹确认框
+    - adv: 先检查全局开关，再使用增强的确认逻辑
     
     advanced_types 字典包含：has_redirect, has_here_doc, has_pipeline, has_logical_operators
     
@@ -872,6 +907,14 @@ def check_fine_grained_advanced_syntax(phys_paths: List[str], root_dir: str, use
     """
     if not phys_paths:
         return True
+    
+    # ── 人类在家目录下操作 → 静默跳过 ──
+    if not is_ai_call and user_home:
+        safe_home = os.path.abspath(user_home).rstrip('/')
+        for p in phys_paths:
+            if p and os.path.abspath(p).rstrip('/').startswith(safe_home):
+                _debug_print(f"人类命令，路径 {p} 在家目录下，静默跳过高级语法检查")
+                return True
     
     if user_mode and hasattr(user_mode, 'current_mode'):
         current_mode = user_mode.current_mode
@@ -940,21 +983,48 @@ def check_fine_grained_advanced_syntax(phys_paths: List[str], root_dir: str, use
             force_confirm=force_confirm
         )
     else:
-        # low/mid 直接拒绝
-        deny_msg = _get_msg(deny_key)
-        print(Fore.RED + deny_msg + Style.RESET_ALL)
-        if log_error_func:
-            log_error_func(f"细颗粒度拦截：{current_mode}模式不允许高级语法，命中路径 {hit_path}", request_id)
-        return False
+        if is_ai_call:
+            # AI 调用直接拒绝
+            deny_msg = _get_msg(deny_key)
+            print(Fore.RED + deny_msg + Style.RESET_ALL)
+            if log_error_func:
+                log_error_func(f"细颗粒度拦截：{current_mode}模式不允许高级语法，命中路径 {hit_path}", request_id)
+            return False
+        else:
+            # 人类调用弹确认框
+            warning_msg = _get_msg(deny_key)
+            print(Fore.YELLOW + warning_msg + Style.RESET_ALL)
+            try:
+                confirm = input(Fore.YELLOW + _get_msg("adv_confirm_exec") + Style.RESET_ALL).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return False
+            if confirm in ('y', 'yes'):
+                _debug_print(f"人类用户确认执行高级语法命令")
+                return True
+            print(Fore.RED + _get_msg("user_cancelled") + Style.RESET_ALL)
+            return False
 
 
 def is_command_allowed_in_mode(cmd_name: str, mode: str, global_config: dict, 
                                log_error_func=None, request_id: str = None) -> bool:
-    """根据 cmdal.json 的 perm_limit 判断当前命令是否允许在当前模式下执行"""
+    """根据 cmdal.json 的 perm_limit 判断当前命令是否允许在当前模式下执行
+    
+    宽松规则：
+    - perm_limit 未配置时默认允许所有
+    - 单字符命令（可能是误触/不完整输入）放行
+    - 明确在 allow_commands 中的放行
+    - 不在列表中的命令在 low/mid 模式下拦截
+    """
     try:
         perm_config = global_config.get("mode_config", {}).get("perm_limit", {}).get(mode, {})
         allow_commands = perm_config.get("allow_commands", [])
         
+        # perm_limit 未配置 → 放行（不阻塞任何命令）
+        if not perm_config:
+            return True
+        
+        # allow_commands 为 * 通配 → 放行所有
         if allow_commands == "*":
             return True
         
@@ -962,15 +1032,22 @@ def is_command_allowed_in_mode(cmd_name: str, mode: str, global_config: dict,
             allow_commands = []
         
         cmd_lower = cmd_name.lower()
+        
+        # 单字符命令（可能是误触、不完整输入）→ 放行，让 bash 处理
+        if len(cmd_name) <= 2:
+            return True
+        
+        # 明确在 allow_commands 中的放行
         for allowed in allow_commands:
             if allowed.lower() == cmd_lower:
                 return True
         
+        # 不在列表中 → 拦截
         return False
     except Exception as e:
         if log_error_func:
             log_error_func(f"检查命令权限时出错：{str(e)}", request_id)
-        return False
+        return True  # 异常时放行，不阻塞用户操作
 
 
 def is_in_protected_dir(root_dir: str, get_virtual_path_func=None) -> Tuple[bool, str, List[str]]:

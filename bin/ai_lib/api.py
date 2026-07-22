@@ -26,8 +26,15 @@ from .storage import (
     load_chat_memory_for_context, get_previous_session_uuid,
     load_memory_by_uuid, get_latest_ai_session,
 )
-from .mcp_state import _AI_INTERRUPTED, _MCP_DEBUG_START
+from .mcp_state import _MCP_DEBUG_START
 from .mcp_state import _mcp_debug as _mcp_debug_fn
+
+# ── 当前活跃 HTTP 响应（用于 Ctrl+C 强制关闭）──
+_ACTIVE_RESPONSE = None
+
+# ── 持久记忆缓存（模块级，避免每轮读盘）──
+_ONYX_AI_PROMPT_CACHE: Optional[Tuple[str, float]] = None  # (content, mtime)
+from . import mcp_state as _mcp_state
 
 
 def _convert_tools_for_anthropic(openai_tools: list) -> list:
@@ -124,8 +131,6 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
                     "- No available tools (import failed or not initialized)" if lang == "english" else "- 无可用工具（导入失败或未初始化）"]
     tool_count = len(tool_list) if tool_list and tool_list[0] not in prompt_items else 0
 
-    current_time = datetime.now().strftime('%Y-%m-%d %H:%M')
-
     system_label = "System"
     env_label = "Environment"
     user_label = "User"
@@ -142,14 +147,20 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
     if onyx_module and hasattr(onyx_module, "user_mode"):
         onyx_mode = onyx_module.user_mode.current_mode
 
-    # 加载 .ai_s/onyx_ai.md（最高指示/持久记忆）
+    # 加载 .ai_s/onyx_ai.md（最高指示/持久记忆）— 模块级缓存，避免每轮读盘
     onyx_ai_prompt = ""
+    global _ONYX_AI_PROMPT_CACHE
     try:
         _prompt_home = user_home_dir if user_home_dir else os.path.expanduser("~")
         ai_prompt_file = os.path.join(_prompt_home, ".ai_s", "onyx_ai.md")
         if os.path.exists(ai_prompt_file):
-            with open(ai_prompt_file, "r", encoding="utf-8") as _apf:
-                onyx_ai_prompt = _apf.read().strip()
+            _file_mtime = os.path.getmtime(ai_prompt_file)
+            if _ONYX_AI_PROMPT_CACHE and _ONYX_AI_PROMPT_CACHE[1] == _file_mtime:
+                onyx_ai_prompt = _ONYX_AI_PROMPT_CACHE[0]
+            else:
+                with open(ai_prompt_file, "r", encoding="utf-8") as _apf:
+                    onyx_ai_prompt = _apf.read().strip()
+                _ONYX_AI_PROMPT_CACHE = (onyx_ai_prompt, _file_mtime)
     except Exception:
         pass
 
@@ -163,8 +174,7 @@ Onyx Mode: {onyx_mode}
 {chr(10).join(tool_list)}
 {ai_tools_prompt}"""
 
-    _dynamic_suffix = f"""#Current time: {current_time}
-#Working directory: {os.getcwd()}
+    _dynamic_suffix = f"""#Working directory: {os.getcwd()}
 #Persistent memory
 {onyx_ai_prompt if onyx_ai_prompt else '(none)'}
 
@@ -207,6 +217,11 @@ Onyx Mode: {onyx_mode}
         _messages.append({"role": "user", "content": env_info})
     else:
         _messages = messages
+
+    # 保留 reasoning_content（DeepSeek thinking 模式要求回传）
+    # 仅对不支持 thinking 的平台剥离该字段
+    if not plat_info.get("thinking"):
+        _messages = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in _messages]
 
     headers = {
         "Content-Type": "application/json",
@@ -332,8 +347,8 @@ Onyx Mode: {onyx_mode}
     base_delay = 2
     last_error = None
 
-    # 重置中断标志
-    _AI_INTERRUPTED = False
+    # 重置中断标志（使用模块引用以让信号处理器的修改可见）
+    _mcp_state._AI_INTERRUPTED = False
 
     for retry in range(max_retries):
         try:
@@ -346,15 +361,14 @@ Onyx Mode: {onyx_mode}
 
             if response.status_code in (400, 422):
                 _detail = response.text[:500]
-                _mcp_debug_fn(f"HTTP {response.status_code} body: {_detail}")
-                # 400/422 可能是临时状态问题，等待后重试
-                last_error = f"请求参数错误 ({response.status_code})"
-                if retry < max_retries - 1:
-                    _wait = base_delay * (retry + 1)
-                    _mcp_debug_fn(f"将在 {_wait}s 后重试 (attempt {retry+1}/{max_retries})")
-                    time.sleep(_wait)
-                    continue
-                return {"error": f"请求参数错误 ({response.status_code}): {_detail}", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+                console.print(f"[red]❌ API 请求错误 ({response.status_code}): {_detail[:200]}[/]")
+                return {
+                    "error": f"请求参数错误 ({response.status_code}): {_detail}",
+                    "txt": f"❌ **API 请求失败 (HTTP {response.status_code})**\n\n{_detail[:500]}",
+                    "analysis": f"HTTP {response.status_code} 表示请求参数有问题（如 API Key、模型名或消息格式错误）。这不是临时故障，重试也无法解决，请检查配置。",
+                    "answer": "yes",
+                    "ask": ""
+                }
             if response.status_code == 401:
                 return {"error": "API key 无效 (401)", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code == 402:
@@ -363,7 +377,7 @@ Onyx Mode: {onyx_mode}
                 last_error = "请求过于频繁 (429)"
                 if retry < max_retries - 1:
                     _wait = base_delay * (retry + 1) * 2
-                    _mcp_debug_fn(f"429 限流，等待 {_wait}s 后重试")
+                    console.print(f"[yellow]⚠️ API 限流 (429)，{_wait}秒后重试 (第 {retry+1}/{max_retries} 次)...[/]")
                     time.sleep(_wait)
                     continue
                 return {"error": "请求过于频繁 (429)，请稍后再试 | Rate limit reached, please retry later", "answer": "no", "ask": "", "txt": "", "analysis": ""}
@@ -371,7 +385,7 @@ Onyx Mode: {onyx_mode}
                 last_error = f"AI 服务暂时不可用 ({response.status_code})"
                 if retry < max_retries - 1:
                     _wait = base_delay * (retry + 1) * 3
-                    _mcp_debug_fn(f"{response.status_code} 服务不可用，等待 {_wait}s 后重试")
+                    console.print(f"[yellow]⚠️ AI 服务暂时不可用 ({response.status_code})，{_wait}秒后重试 (第 {retry+1}/{max_retries} 次)...[/]")
                     time.sleep(_wait)
                     continue
                 return {"error": f"AI 服务暂时不可用 ({response.status_code})，请稍后再试", "answer": "no", "ask": "", "txt": "", "analysis": ""}
@@ -385,10 +399,15 @@ Onyx Mode: {onyx_mode}
             _anthropic_tool_acc: Dict[int, Dict] = {}
             _reasoning_display: List[str] = []
 
+            # 保存活跃 response 引用（允许 Ctrl+C 强制关闭）
+            global _ACTIVE_RESPONSE
+            _ACTIVE_RESPONSE = response
+
             if stream_fmt == "openai":
                 for line in response.iter_lines(decode_unicode=True):
-                    if _AI_INTERRUPTED:
+                    if _mcp_state._AI_INTERRUPTED:
                         response.close()
+                        _ACTIVE_RESPONSE = None
                         return {"txt": "", "analysis": "", "answer": "yes", "ask": "", "_interrupted": True}
                     if not line or not line.startswith("data: "):
                         continue
@@ -447,7 +466,7 @@ Onyx Mode: {onyx_mode}
             else:
                 # Anthropic SSE 格式解析，支持 tool_use
                 for line in response.iter_lines(decode_unicode=True):
-                    if _AI_INTERRUPTED:
+                    if _mcp_state._AI_INTERRUPTED:
                         response.close()
                         return {"txt": "", "analysis": "", "answer": "yes", "ask": "", "_interrupted": True}
                     if not line or not line.startswith("data: "):
@@ -512,6 +531,9 @@ Onyx Mode: {onyx_mode}
 
                     except json.JSONDecodeError:
                         continue
+
+            # 流式读取完毕，清除活跃 response 引用
+            _ACTIVE_RESPONSE = None
 
             raw_full = full_content
             if full_content:
@@ -595,7 +617,8 @@ Onyx Mode: {onyx_mode}
             return result
 
         except KeyboardInterrupt:
-            _AI_INTERRUPTED = True
+            _mcp_state._AI_INTERRUPTED = True
+            _ACTIVE_RESPONSE = None
             try:
                 response.close()
             except Exception:
@@ -642,6 +665,8 @@ def process_ai_result_fields(ai_result: Dict[str, Any]) -> Dict[str, Any]:
         result["sleep"] = None
     if "class" not in result:
         result["class"] = "1"
+    if "markup_blocks" not in result:
+        result["markup_blocks"] = []
     return result
 
 

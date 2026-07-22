@@ -4089,17 +4089,33 @@ def handle_ai(
             log_error(f"AI parameter error: {content}", request_id)
         return
 
+    if content_type == "interactive":
+        # 裸模式切换（ai plan / ai normal）→ 进入交互式 REPL
+        from bin.ai_interactive import ai_interactive_session as _repl
+        _repl(
+            user_home_dir=user_home_dir,
+            onyx_module=onyx_module,
+            global_config=global_config,
+            user_info=user_info,
+            user_mode=user_mode,
+            parse_and_execute=parse_and_execute,
+        )
+        return
+
     # ── TUI 模式已移除（-tui 参数不再支持）──
 
     # Ctrl+C 打断思考：直接抛出 KeyboardInterrupt 向上传播
     import signal as _signal
+    _original_sigint = _signal.getsignal(_signal.SIGINT)
 
     def _on_interrupt(signum, frame):
         global _AI_INTERRUPTED
         _AI_INTERRUPTED = True
+        # 立即恢复原始 SIGINT 处理器（避免泄漏）
+        _signal.signal(_signal.SIGINT, _original_sigint)
         raise KeyboardInterrupt("User interrupted")
 
-    _original_sigint = _signal.signal(_signal.SIGINT, _on_interrupt)
+    _signal.signal(_signal.SIGINT, _on_interrupt)
 
     # 重置中断标志（避免上次 Ctrl+C 残留导致本次立即中断）
     global _AI_INTERRUPTED
@@ -4747,6 +4763,27 @@ def handle_ai(
         
         # 启动 Live Panel：动画 spinner + 流式展示
         from rich.spinner import Spinner
+        
+        # ── SIGINT 强制中断处理：安装专用 handler 让 Ctrl+C 能立即起作用 ──
+        import signal as _signal
+        _original_sigint = _signal.getsignal(_signal.SIGINT)
+        _original_sigint_for_close = _original_sigint
+        from .ai_lib import mcp_state as _mcp_state_mod
+        def _interrupt_handler(sig, frame):
+            """Ctrl+C 强制中断：立即设置标记 + close HTTP 连接 + 显示提示"""
+            _mcp_state_mod._AI_INTERRUPTED = True
+            import sys as _sys
+            _sys.stderr.write("\n⚠️ 强制中断中...\n")
+            _sys.stderr.flush()
+            # 如果有活动的 HTTP 请求，关闭连接以减少响应延迟
+            try:
+                from .ai_lib.api import _ACTIVE_RESPONSE
+                if _ACTIVE_RESPONSE is not None:
+                    _ACTIVE_RESPONSE.close()
+            except Exception:
+                pass
+        _signal.signal(_signal.SIGINT, _interrupt_handler)
+        
         spinner = Spinner("dots", text=_mcp_t(" 思考中...", " Thinking..."), style="bold cyan")
         initial_panel = Panel(spinner, title="🤖 AI", border_style="green", box=ROUNDED)
         
@@ -4800,7 +4837,8 @@ def handle_ai(
                         """流式检测到工具调用时立即更新面板"""
                         # 不展示工具调用信息给用户，保持界面清爽
                     # Plan 模式：未确认前只暴露计划相关工具，禁止 AI 探索/执行
-                    if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed:
+                    # 但前 2 轮交互允许所有工具，让 AI 先探索代码库再制定计划
+                    if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed and interaction_count > 2:
                         _plan_only = {"submit_plan", "mark_step_complete", "ExitPlanMode", "choose_ask",
                                        "py_diagnostics", "py_symbols", "py_definition"}
                         _active_tools = [t for t in native_tools
@@ -4860,6 +4898,12 @@ def handle_ai(
         finally:
             loading_flag[0] = False
             live_ref[0] = None
+            # 恢复原始 SIGINT 处理器（避免影响后续操作）
+            try:
+                import signal as _sig_res
+                _sig_res.signal(_sig_res.SIGINT, _original_sigint)
+            except Exception:
+                pass
         
         ai_result = process_ai_result_fields(ai_result)
 
@@ -4887,7 +4931,37 @@ def handle_ai(
         tool_calls = ai_result.get("tool_calls", [])
         sleep_value = ai_result.get("sleep")
         class_level = ai_result.get("class", "1")
-        
+
+        # ── 处理标记块（[VIEW:]、[EDIT:]、[WRITE:] 等 AI 文件操作）──
+        _markup_blocks = ai_result.get("markup_blocks", [])
+        if _markup_blocks and not has_error:
+            try:
+                from lib.native_fs import process_blocks as _process_blocks
+                # 确定沙箱根目录
+                _sb_root = None
+                try:
+                    from core.context import get_ctx as _get_ctx
+                    _ctx_sb = _get_ctx()
+                    if _ctx_sb._SANDBOX_ENABLED:
+                        _sb_root = _ctx_sb.ROOT_DIR
+                except Exception:
+                    pass
+                _mb_results = _process_blocks(
+                    _markup_blocks,
+                    cwd=os.getcwd(),
+                    user_mode=user_mode.current_mode if user_mode else "mid",
+                    sandbox_root=_sb_root,
+                )
+                for _r in _mb_results:
+                    _icon = "✅" if _r.success else "❌"
+                    _type_label = _r.type.upper()
+                    console.print(f"  {_icon} [{_type_label}] {_r.path}: {_r.message}", style="bold white")
+                # 将标记块执行结果合并到 ai_result，供后续记录
+                ai_result["_markup_results"] = [r.to_dict() for r in _mb_results if hasattr(r, 'to_dict')]
+            except Exception as _mb_e:
+                if debug_mode:
+                    console.print(f"  [dim]markup_blocks 处理异常: {_mb_e}[/]")
+
         sleep_seconds = 0
         if sleep_value is not None:
             try:
@@ -5037,9 +5111,21 @@ def handle_ai(
             _completion = _usage_info.get("completion_tokens", 0)
             _cache_hit = _usage_info.get("prompt_cache_hit_tokens", 0)
             _cache_miss = _usage_info.get("prompt_cache_miss_tokens", 0)
-            # 存下精确 prompt_tokens（末尾显示用，纯磁盘架构不依赖内存 tracker）
+            # 存下精确 token 值（末尾显示用，纯磁盘架构不依赖内存 tracker）
             if _prompt:
                 _thread_locals.last_prompt_tokens = _prompt
+            _thread_locals.last_completion_tokens = _completion or 0
+            _thread_locals.last_cache_hit = _cache_hit or 0
+            _thread_locals.last_cache_miss = _cache_miss or 0
+            # 累计 token（供交互式会话 /tokens /stats 使用）
+            if not hasattr(_thread_locals, 'session_total_prompt'):
+                _thread_locals.session_total_prompt = 0
+                _thread_locals.session_total_completion = 0
+                _thread_locals.session_total_cache_hit = 0
+            _thread_locals.session_total_prompt += _prompt
+            _thread_locals.session_total_completion += _completion
+            _thread_locals.session_total_cache_hit += _cache_hit
+            _thread_locals.session_round_count = getattr(_thread_locals, 'session_round_count', 0) + 1
             parts = [f"⚡ {_total} tokens"]
             if _cache_hit:
                 saved_pct = _cache_hit / (_cache_hit + _cache_miss) * 100 if (_cache_hit + _cache_miss) else 0
@@ -5092,7 +5178,8 @@ def handle_ai(
 
         # Plan 模式安全限制：未确认计划前，拦截所有命令执行和工具调用
         # 既支持 mode=="plan"（用户输入 ai plan），也支持 _PLAN_MODE_ACTIVE（AI 调用 EnterPlanMode）
-        if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed:
+        # 前 2 轮交互不拦截，让 AI 有机会探索代码库并生成计划
+        if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed and interaction_count > 2:
             if ai_commands or tool_calls:
                 console.print(lang_text.get("plan_blocked",
                     "⛔ Plan 模式：AI 命令/工具调用已被拦截。请先确认计划。"), style="bold red")
@@ -5669,10 +5756,11 @@ def handle_ai(
             # AI 可以主动用 [ANSWER]yes 表示完成。但如果 AI 写了 [ANSWER]no
             # 却没给任何命令/工具，说明它只是习惯性写 no，实际已无事可做。
             # 此时忽略 answer，直接停止循环 + 显示 ESC 门控让用户决定后续。
-            # ── 显示 token 量 ──
+            # ── 显示 token 量（优先 API 精确值，其次估算）──
             _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
-            if _pt:
-                console.print(f"  [dim]📊 上下文 ~{_pt} tokens（API 精确值）[/]")
+            _ct = getattr(_thread_locals, "last_completion_tokens", 0)
+            if _pt or _ct:
+                console.print(f"  [dim]📊 本轮 prompt {_pt} + completion {_ct} = {_pt + _ct} tokens（API 精确值）[/]")
             elif conversation_history:
                 _total_chars = sum(len(m.get("content", "") or "") for m in conversation_history)
                 _est_tokens = _total_chars // 3 + 1500

@@ -1631,7 +1631,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 if not check_path_permission_for_cmd(
                     actual_head_simple, resolved_paths, username, user_mode,
                     log_info_func, log_error_func, request_id, msg,
-                    USER_HOME_DIR
+                    USER_HOME_DIR, is_ai_call=is_ai_triggered
                 ):
                     return
             
@@ -1640,7 +1640,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 if not check_fine_grained_advanced_syntax(
                     resolved_paths, ROOT_DIR, username, user_mode,
                     advanced_syntax, log_info_func, log_error_func, request_id,
-                    USER_HOME_DIR
+                    USER_HOME_DIR, is_ai_call=is_ai_triggered
                 ):
                     return
             
@@ -1701,7 +1701,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                     if not check_fine_grained_advanced_syntax(
                         resolved_paths, ROOT_DIR, username, user_mode,
                         advanced_syntax, log_info_func, log_error_func, request_id,
-                        USER_HOME_DIR
+                        USER_HOME_DIR, is_ai_call=is_ai_triggered
                     ):
                         return
                 
@@ -1709,7 +1709,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                     if not check_path_permission_for_cmd(
                         actual_head_simple, resolved_paths, username, user_mode,
                         log_info_func, log_error_func, request_id, msg,
-                        USER_HOME_DIR
+                        USER_HOME_DIR, is_ai_call=is_ai_triggered
                     ):
                         return
                 
@@ -1741,7 +1741,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 if not check_path_permission_for_cmd(
                     actual_head_simple, resolved_paths, username, user_mode,
                     log_info_func, log_error_func, request_id, msg,
-                    USER_HOME_DIR
+                    USER_HOME_DIR, is_ai_call=is_ai_triggered
                 ):
                     return
             
@@ -1750,7 +1750,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 if not check_fine_grained_advanced_syntax(
                     resolved_paths, ROOT_DIR, username, user_mode,
                     advanced_syntax, log_info_func, log_error_func, request_id,
-                    USER_HOME_DIR
+                    USER_HOME_DIR, is_ai_call=is_ai_triggered
                 ):
                     return
             
@@ -1878,14 +1878,14 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_fine_grained_advanced_syntax(
                 resolved_paths, ROOT_DIR, username, user_mode,
                 advanced_syntax, log_info_func, log_error_func, request_id,
-                USER_HOME_DIR
+                USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
             
             if not check_path_permission_for_cmd(
                 'bash_structure', resolved_paths, username, user_mode,
                 log_info_func, log_error_func, request_id, msg,
-                USER_HOME_DIR
+                USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
         
@@ -2063,7 +2063,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_path_permission_for_cmd(
                 actual_cmd_head, resolved_paths, username, user_mode,
                 log_info_func, log_error_func, request_id, msg,
-                USER_HOME_DIR
+                USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
         
@@ -2094,7 +2094,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_path_permission_for_cmd(
                 actual_cmd_head, resolved_paths, username, user_mode,
                 log_info_func, log_error_func, request_id, msg,
-                USER_HOME_DIR
+                USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
         
@@ -2103,7 +2103,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_fine_grained_advanced_syntax(
                 resolved_paths, ROOT_DIR, username, user_mode,
                 advanced_syntax, log_info_func, log_error_func, request_id,
-                USER_HOME_DIR
+                USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
         
@@ -2187,7 +2187,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_fine_grained_advanced_syntax(
                 resolved_paths, ROOT_DIR, username, user_mode,
                 advanced_syntax, log_info_func, log_error_func, request_id,
-                USER_HOME_DIR
+                USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
         
@@ -2195,7 +2195,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_path_permission_for_cmd(
                 actual_cmd_head, resolved_paths, username, user_mode,
                 log_info_func, log_error_func, request_id, msg,
-                USER_HOME_DIR
+                USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
         
@@ -2228,7 +2228,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_path_permission_for_cmd(
                 actual_cmd_head, resolved_paths, username, user_mode,
                 log_info_func, log_error_func, request_id, msg,
-                USER_HOME_DIR
+                USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
         
@@ -2237,7 +2237,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_fine_grained_advanced_syntax(
                 resolved_paths, ROOT_DIR, username, user_mode,
                 advanced_syntax, log_info_func, log_error_func, request_id,
-                USER_HOME_DIR
+                USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
         
@@ -2247,14 +2247,15 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
         ):
             return
         
-        if user_mode and hasattr(user_mode, 'current_mode') and user_mode.current_mode != "adv":
+        # `_unknown_origin` 的命令（原本 unknown，让 shell 判断）跳过模式权限检查
+        if not _unknown_origin and user_mode and hasattr(user_mode, 'current_mode') and user_mode.current_mode != "adv":
             if global_config and not is_command_allowed_in_mode(
                 actual_cmd_head, user_mode.current_mode, global_config, log_error_func, request_id
             ):
                 print(Fore.RED + msg["mode_deny"].format(mode=user_mode.current_mode, cmd=actual_cmd_head) + Style.RESET_ALL)
                 return
         
-        if user_mode and hasattr(user_mode, 'current_mode') and user_mode.current_mode != "adv":
+        if not _unknown_origin and user_mode and hasattr(user_mode, 'current_mode') and user_mode.current_mode != "adv":
             for path in all_paths:
                 if path and path != 'STDOUT':
                     if check_sandbox_path_func and not check_sandbox_path_func(path, request_id):

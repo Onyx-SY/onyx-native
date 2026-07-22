@@ -175,7 +175,7 @@ def _setup_key_conf_interactive(lang: str = "chinese") -> dict:
     return {"platform": platform, "api_key": key, "model": model, "params": params}
 
 def _render_edit_diff(old_text: str, new_text: str, context_lines: int = 2):
-    """渲染彩色 diff：整行底色变色"""
+    """渲染柔和 diff：淡色 + 行号前 +/- 标记"""
     import difflib, shutil
     old_lines = old_text.split("\n")
     new_lines = new_text.split("\n")
@@ -189,23 +189,23 @@ def _render_edit_diff(old_text: str, new_text: str, context_lines: int = 2):
                 show_range = range(i1, i2)
             else:
                 show_range = list(range(i1, i1 + context_lines)) + list(range(i2 - context_lines, i2))
-                console.print(f"       [dim white]... {total - context_lines * 2} 行未变化 ...[/]")
+                console.print(f"       [dim]... {total - context_lines * 2} 行未变化 ...[/]")
             for idx in show_range:
-                console.print((f"  {idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="dim white")
+                console.print((f"   {idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="bright_black")
             if total > context_lines * 2 + 1:
                 continue
         elif op == "delete":
             for idx in range(i1, i2):
-                console.print((f"  {idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="white on red")
+                console.print((f"  -{idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="#ff6b6b on #2d0000")
         elif op == "replace":
             for idx in range(i1, i2):
-                console.print((f"  {idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="white on blue")
+                console.print((f"  -{idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="#6b9fff on #1a1a3a")
             for idx in range(j1, j2):
-                console.print((f"  {idx + 1:>4} │ {new_lines[idx]}").ljust(_w), style="black on yellow")
+                console.print((f"  +{idx + 1:>4} │ {new_lines[idx]}").ljust(_w), style="#ffd700 on #3a3a1a")
         elif op == "insert":
             for idx in range(j1, j2):
-                console.print((f"  {idx + 1:>4} │ {new_lines[idx]}").ljust(_w), style="black on green")
-    console.print(f"  [dim white]────────────────[/]")
+                console.print((f"  +{idx + 1:>4} │ {new_lines[idx]}").ljust(_w), style="#6bff6b on #1a3a1a")
+    console.print(f"  [dim]────────────────[/]")
 
 # -------------------------- 辅助函数：获取服务器地址 --------------------------
 def get_server_url() -> str:

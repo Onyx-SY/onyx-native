@@ -3288,8 +3288,6 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
             handle_manage(["manage", "-q"], request_id)
         record_step("30.handle_manage")
 
-        record_step("31.init_oppath")
-
         # 21. 加载自启命令
         load_autocmd()
         record_step("32.load_autocmd")
@@ -3533,7 +3531,7 @@ def main_loop() -> None:
         stage_start = time.perf_counter()
         log_info(f"   阶段3-导入Banner模块: 开始...", request_id)
         
-        from lib.start_banner import show_start_banner, show_ready_prompt
+        from lib.start_banner import show_start_banner, show_ready_prompt, show_random_tip
         
         import_banner_ms = (time.perf_counter() - stage_start) * 1000
         log_info(f"   阶段3-导入Banner模块: 完成 (耗时: {import_banner_ms:.2f}ms)", request_id)
@@ -3570,8 +3568,11 @@ def main_loop() -> None:
         rc_files_ms = (time.perf_counter() - stage_start) * 1000
         log_info(f"   阶段5-执行RC文件: 完成 (耗时: {rc_files_ms:.2f}ms)", request_id)
 
-        # ========== 阶段6: 显示就绪提示 ==========
+        # ========== 阶段6: 显示启动小贴士 + 就绪提示 ==========
         stage_start = time.perf_counter()
+        
+        # 随机显示一条功能小贴士（类似游戏加载提示）
+        show_random_tip(language=current_lang)
         
         show_ready_prompt(language=current_lang)
         

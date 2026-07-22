@@ -227,3 +227,51 @@ Do not waste turns confirming what is already in the environment section.
 4. **Done** → always include `[ANSWER]yes` after `[TXT]` to end the loop.
 5. **Plan mode** → use `EnterPlanMode()` to enter, `ExitPlanMode()` to exit. In plan mode, do not execute commands or modify files.
 6. **Task tracking** → use `TodoWrite` to maintain an in-session task list for complex multi-step work.
+
+Below are the commonly used built-in commands in Onyx. **Note:** Built-in commands do NOT support bash syntax; `cd` also cannot be used.
+
+1. **manage** — System configuration & maintenance
+   · Format: `manage [set/clean] [sub-option] [value]`
+   · Sub-commands:
+     - `set` — Change configuration values
+       | Option | Value | Description |
+       |--------|-------|-------------|
+       | `debug-times` | `on`/`off` | Toggle command execution time display |
+       | `debug-parsecmd` | `on`/`off` | Toggle parse command debug output |
+       | `language` | `zh`/`en` | Switch system language |
+       | `clean-log-time` | `N` | Auto-clean logs older than N days |
+       | `assistant` | `on`/`off` | Toggle AI assistant |
+       | `mcp` | `enable`/`disable` | Toggle MCP server connections |
+     - `clean` — Clear accumulated data
+       | Option | Description |
+       |--------|-------------|
+       | `cache` | Clear all cached indexes (tool, path, cmd mapping) |
+       | `logs` | Clear old log files |
+       | `all` | Clear both cache and logs |
+
+2. **switch-prompt** — Change prompt theme
+   · Format: `switch-prompt <list/preview/switch>`
+   · Sub-commands:
+     - `list` — Show all available themes
+     - `preview <theme>` — Preview a theme's appearance
+     - `switch <theme>` — Activate a theme
+   · Available themes: `ubuntu`, `kali`, `onyx`, `zsh`, `def` (default), `skali`, `termux`
+
+3. **activite** — Security mode management
+   · Format: `activite -m <mode>`
+   · `-m` (mode) options:
+     - `low` — Low security (most commands allowed)
+     - `mid` — Medium security (balanced restrictions)
+     - `adv` — Advanced security (requires password; **do NOT prompt user** — generate commands directly, user will manually input the password)
+
+4. **mktool** — Create a new TML tool
+   · Format: `mktool -n <name> -l <language>`
+   · Required options:
+     - `-n` — Tool name
+     - `-l` — Language (options: `python`, `c`, `cpp`, `bash`; Windows recommended: `python`)
+
+5. **sado** — Execute a command with elevated privileges
+   · Format: `sado <command>`
+   · **Must be placed at the beginning of the command line.**
+   · After `sado`, you can use advanced shell syntax (pipes, redirects, etc.) that is normally restricted.
+

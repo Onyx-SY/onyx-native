@@ -51,121 +51,37 @@ ICON_OK = "✅"
 
 class PanelManager:
     """
-    面板管理器 — 管理面板的三段式生命周期。
-
-    用法:
-        pm = PanelManager()
-        with pm.show_panel(panel, dim_panel) as live:
-            # 操作期间面板是彩色的
-            pass
-        # 退出 → 自动变灰 → 1.5s 后消失
+    面板管理器 — 简化版：直接打印摘要信息，不占屏幕。
     """
 
-    def __init__(self, console: Console = None, collapse_delay: float = 1.5):
+    def __init__(self, console: Console = None):
         self.console = console or Console()
-        self.collapse_delay = collapse_delay
-        self._last_live: Optional[Live] = None
-        self._timer: Optional[threading.Timer] = None
-        self._live_ref: list = [None]  # mutable ref for timer callback
-
-    def clear_previous(self):
-        """清除上一个面板（如果还显示着）"""
-        self._cancel_timer()
-        if self._last_live is not None:
-            try:
-                self._last_live.stop()
-            except Exception:
-                pass
-            self._last_live = None
-
-    def _cancel_timer(self):
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
 
     @contextmanager
     def show_panel(self, panel, dim_panel=None):
         """
-        显示一个面板并管理其生命周期。
-
-        参数:
-            panel:     操作中的彩色 Rich Panel
-            dim_panel: 操作完成后的灰色摘要 Panel（None 则自动生成）
-
-        生命周期:
-            [进入]  打印彩色面板
-            [退出]  替换为灰色摘要 → 等待 collapse_delay 秒 → 清除
+        显示操作摘要 — 仅打印一行状态信息。
         """
-        # 清除上一个
-        self.clear_previous()
-
-        live = Live(
-            panel,
-            console=self.console,
-            refresh_per_second=10,
-            auto_refresh=False,
-            transient=True,  # 退出时清除
-            vertical_overflow="visible",
-        )
-
-        try:
-            with live:
-                self._last_live = live
-                live.update(panel)
-                live.refresh()
-                yield live
-        finally:
-            # 操作完成 → 立刻变灰
-            if dim_panel is None:
-                dim_panel = self._make_dim_summary(panel)
-
-            try:
-                live.update(dim_panel)
-                live.refresh()
-            except Exception:
-                pass
-
-            # 1.5s 后自动消失（Live 退出 = 区域清除）
-            self._schedule_collapse(live)
-
-    def _make_dim_summary(self, panel) -> Panel:
-        """将彩色面板转为灰色摘要面板（保留标题 + 一行摘要）"""
-        # 提取原标题或生成默认
-        title = getattr(panel, "title", "") or ""
-        # 取标题第一行
-        if isinstance(title, str):
-            title_line = title.split("\n")[0] if title else "操作完成"
+        # 直接 yield，不管理复杂生命周期
+        yield None
+        # 操作完成 → 打印摘要
+        if dim_panel is not None:
+            if isinstance(dim_panel, Panel):
+                body = dim_panel.renderable if hasattr(dim_panel, 'renderable') else ""
+                self.console.print(f"  {body}")
+            else:
+                self.console.print(dim_panel)
         else:
-            title_line = "操作完成"
-
-        return Panel(
-            Text("✅ 操作完成", style=C_DIM),
-            title=Text(title_line, style=C_DIM),
-            border_style=C_DIM,
-            box=ROUNDED,
-            padding=(0, 1),
-        )
-
-    def _schedule_collapse(self, live: Live):
-        """安排面板自动清除"""
-        self._cancel_timer()
-
-        def _do_collapse():
-            try:
-                live.stop()
-            except Exception:
-                pass
-            if self._last_live is live:
-                self._last_live = None
-
-        self._timer = threading.Timer(self.collapse_delay, _do_collapse)
-        self._timer.daemon = True
-        self._timer.start()
+            self.console.print("  ✅ 完成")
 
     def show_static(self, panel):
-        """打印一个静态面板（不管理生命周期）"""
-        self.clear_previous()
-        self.console.print(panel)
+        """打印静态消息（一行摘要）"""
+        if isinstance(panel, Panel):
+            title = getattr(panel, "title", "") or ""
+            title_str = str(title.plain if hasattr(title, 'plain') else title)
+            self.console.print(f"  {'⚠️' if '失败' in str(panel) else 'ℹ️'} {title_str}")
+        else:
+            self.console.print(panel)
 
 
 # ═══════════════════════════════════════════

@@ -285,8 +285,11 @@ def render_warning_panel(title: str, body: str) -> Panel:
 
 
 def render_ai_panel(text: str, title: str = "🤖 AI") -> Panel:
-    """渲染 AI 回答 — 纯文本无框（绿色框已移除）"""
-    md = Markdown(text.strip()) if text.strip() else Text("(无内容)")
+    """渲染 AI 回答 — 加大圆点前缀 + 极简风格"""
+    content = text.strip()
+    if content:
+        content = "● " + content
+    md = Markdown(content) if content else Text("(无内容)")
     return Panel(
         md,
         title=title,
@@ -372,6 +375,8 @@ class StreamingDisplay:
 
     def feed(self, text: str):
         """追加流式文本并刷新"""
+        if not self._streamed and text.strip():
+            text = "● " + text
         self._streamed += text
         self._spinning = False
         if self._live:
@@ -392,6 +397,8 @@ class StreamingDisplay:
         if final:
             self._spinning = False
             if self._live:
+                if not final.startswith("● "):
+                    final = "● " + final
                 self._live.update(Panel(
                     Markdown(final),
                     title="🤖 AI",

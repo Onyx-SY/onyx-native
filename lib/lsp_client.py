@@ -220,25 +220,31 @@ class LspClient:
             self._proc.stdin.write(body.encode())
             self._proc.stdin.flush()
 
-    def _request(self, method: str, params: dict) -> Optional[dict]:
-        """发送请求，等待响应。"""
-        with self._lock:
-            self._req_id += 1
-            req_id = self._req_id
-        msg = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": method,
-            "params": params,
-        }
-        event = threading.Event()
-        with self._lock:
-            self._pending[req_id] = event
-        self._send(msg)
-        event.wait(timeout=10)  # 10 秒超时
-        with self._lock:
-            self._pending.pop(req_id, None)
-            return self._responses.pop(req_id, None)
+    def _request(self, method: str, params: dict, retries: int = 3) -> Optional[dict]:
+        """发送请求，等待响应。支持 ContentModified (-32801) 自动重试。"""
+        for attempt in range(retries):
+            with self._lock:
+                self._req_id += 1
+                req_id = self._req_id
+            msg = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": method,
+                "params": params,
+            }
+            event = threading.Event()
+            with self._lock:
+                self._pending[req_id] = event
+            self._send(msg)
+            event.wait(timeout=10)
+            with self._lock:
+                self._pending.pop(req_id, None)
+                result = self._responses.pop(req_id, None)
+            # 检查是否 ContentModified（服务器索引未就绪）
+            if result is None and attempt < retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            return result
 
     def _notify(self, method: str, params: dict):
         """发送通知（无需响应）。"""
@@ -283,8 +289,43 @@ class LspClient:
                             event.set()
                         else:
                             self._responses[data["id"]] = data.get("result")
-            except Exception:
-                pass
+                elif "method" in data:
+                    method = data.get("method")
+                    params = data.get("params", {})
+                    if method == "textDocument/publishDiagnostics":
+                        # 监听诊断推送通知
+                        self._handle_diagnostics_notification(params)
+            except Exception as e:
+                import sys as _sys
+                _sys.stderr.write(f"[LSP] reader error: {e}\n")
+
+    def _handle_diagnostics_notification(self, params: dict):
+        """处理 textDocument/publishDiagnostics 通知。"""
+        uri = params.get("uri", "")
+        path = uri.replace("file://", "") if uri.startswith("file://") else uri
+        # URL 解码路径
+        from urllib.parse import unquote
+        path = unquote(path)
+        diagnostics = params.get("diagnostics", [])
+        parsed = []
+        for d in diagnostics:
+            r = d.get("range", {})
+            start = r.get("start", {})
+            sev = d.get("severity", 0)
+            sev_map = {1: "error", 2: "warning", 3: "info", 4: "hint"}
+            parsed.append(LspDiagnostic(
+                path=path,
+                line=start.get("line", 0) + 1,
+                character=start.get("character", 0),
+                severity=sev_map.get(sev, "unknown"),
+                message=d.get("message", ""),
+                source=d.get("source"),
+            ))
+        with self._lock:
+            # 按路径缓存诊断结果
+            if not hasattr(self, '_diagnostics_cache'):
+                self._diagnostics_cache = {}
+            self._diagnostics_cache[path] = parsed
 
     def did_open(self, file_path: str, text: str = None):
         """textDocument/didOpen 通知。"""
@@ -317,14 +358,17 @@ class LspClient:
     # ── LSP 操作 ──
 
     def diagnostics(self, file_path: str) -> list[LspDiagnostic]:
-        """获取文件诊断（通过 didOpen 触发推送）。"""
+        """获取文件诊断（通过 didOpen 触发服务器推送诊断）。"""
         uri = self.did_open(file_path)
-        # 发送一个无操作请求触发推送诊断
+        from urllib.parse import unquote
+        abs_path = os.path.abspath(file_path)
+        # 发送 semanticTokens/full 请求以触发推送（服务器不支持则静默失败）
         self._request("textDocument/semanticTokens/full", {
             "textDocument": {"uri": uri},
         })
-        # 简单返回：实际应该监听 publishDiagnostics 通知
-        return []
+        time.sleep(0.5)  # 给服务器一点时间推送诊断
+        cache = getattr(self, '_diagnostics_cache', {})
+        return cache.get(unquote(abs_path), [])
 
     def hover(self, file_path: str, line: int, character: int) -> Optional[LspHoverResult]:
         """获取悬停提示。"""
@@ -362,7 +406,7 @@ class LspClient:
         locations = result if isinstance(result, list) else [result]
         def _parse_loc(loc: dict) -> LspLocation:
             target_uri = loc.get("uri", "")
-            target_path = target_uri.replace("file://", "") if target_uri.startswith("file://") else target_uri
+            target_path = self._uri_to_path(target_uri)
             r = loc.get("range", {})
             start = r.get("start", {})
             end = r.get("end", {})
@@ -397,7 +441,7 @@ class LspClient:
             return None
         def _parse_loc(loc: dict) -> LspLocation:
             target_uri = loc.get("uri", "")
-            target_path = target_uri.replace("file://", "") if target_uri.startswith("file://") else target_uri
+            target_path = self._uri_to_path(target_uri)
             r = loc.get("range", {})
             start = r.get("start", {})
             end = r.get("end", {})
@@ -473,6 +517,18 @@ class LspClient:
             result.extend(self._flatten_symbol(child, file_path, depth + 1))
         return result
 
+    @staticmethod
+    def _uri_to_path(uri: str) -> str:
+        """将 file:// URI 转换为本地路径，处理 URL 编码。"""
+        from urllib.parse import unquote, urlparse
+        if uri.startswith("file://"):
+            parsed = urlparse(uri)
+            path = parsed.path
+            if path.startswith("/") and len(path) > 2 and path[2] == ":":
+                path = path[1:]
+            return unquote(path)
+        return unquote(uri)
+
     def format(self, file_path: str) -> Optional[str]:
         """格式化文档。"""
         uri = f"file://{os.path.abspath(file_path)}"
@@ -482,24 +538,43 @@ class LspClient:
         })
         if not result:
             return None
-        # 应用 edits
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 text = f.read()
             lines = text.split("\n")
-            # 从后往前应用 edits（避免行号偏移）
-            edits = sorted(result, key=lambda e: e.get("range", {}).get("start", {}).get("line", 0), reverse=True)
+            edits = sorted(result, key=lambda e: (
+                e.get("range", {}).get("start", {}).get("line", 0),
+                e.get("range", {}).get("start", {}).get("character", 0),
+            ), reverse=True)
             for edit in edits:
                 r = edit.get("range", {})
                 start = r.get("start", {})
                 end = r.get("end", {})
-                start_line, start_char = start.get("line", 0), start.get("character", 0)
-                end_line, end_char = end.get("line", 0), end.get("character", 0)
+                sl = start.get("line", 0)
+                sc = start.get("character", 0)
+                el = end.get("line", 0)
+                ec = end.get("character", 0)
                 new_text = edit.get("newText", "")
-                # 简单实现：替换整个文件
-                pass
-            return text
-        except Exception:
+                if sl == el:
+                    if sl < len(lines):
+                        old = lines[sl]
+                        lines[sl] = old[:sc] + new_text + old[ec:]
+                else:
+                    before = lines[:sl]
+                    middle = new_text.split("\n")
+                    after = lines[el + 1:] if el + 1 < len(lines) else []
+                    first_part = lines[sl][:sc] if sl < len(lines) else ""
+                    last_part = lines[el][ec:] if el < len(lines) else ""
+                    if middle:
+                        middle[0] = first_part + middle[0]
+                        middle[-1] = middle[-1] + last_part
+                    else:
+                        middle = [first_part + last_part]
+                    lines = before + middle + after
+            return "\n".join(lines)
+        except Exception as e:
+            import sys as _sys
+            _sys.stderr.write(f"[LSP] format error: {e}\n")
             return None
 
     def shutdown(self):

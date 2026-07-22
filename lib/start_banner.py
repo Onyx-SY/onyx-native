@@ -18,6 +18,7 @@
 
 import os
 import sys
+import json
 import functools
 from typing import Dict, Any, Optional, Tuple
 
@@ -526,6 +527,75 @@ def show_warning_banner(message: str, title: Optional[str] = None, language: str
     _console.print()
     _console.print(warning_panel)
     _console.print()
+
+
+# ==================== 启动小贴士 ====================
+
+_TIPS_CACHE = None  # tips.json 缓存
+
+def _load_tips(language: str) -> list:
+    """从 etc/tips.json 加载小贴士列表"""
+    global _TIPS_CACHE
+    
+    if _TIPS_CACHE is not None:
+        tips_data = _TIPS_CACHE
+    else:
+        try:
+            tips_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "etc", "tips.json")
+            with open(tips_path, "r", encoding="utf-8") as f:
+                _TIPS_CACHE = json.load(f)
+            tips_data = _TIPS_CACHE
+        except Exception:
+            return []
+    
+    lang_key = "chinese" if language == "chinese" else "english"
+    return tips_data.get("tips", {}).get(lang_key, [])
+
+
+def show_random_tip(language: str = "chinese") -> None:
+    """
+    从 etc/tips.json 随机选取一条小贴士并显示。
+    类似游戏加载界面的 tips，帮助用户了解 Onyx 功能。
+    
+    Args:
+        language: 语言 (chinese/english)
+    """
+    import random
+    
+    tips = _load_tips(language)
+    if not tips:
+        return
+    
+    tip = random.choice(tips)
+    
+    if not _init_rich():
+        # fallback: 纯文本输出
+        from lib.terminal.colors import Fore, Style
+        terminal_width = _get_terminal_width()
+        print()
+        print(Fore.CYAN + "─" * min(terminal_width, 60) + Style.RESET_ALL)
+        print(Fore.YELLOW + tip + Style.RESET_ALL)
+        print(Fore.CYAN + "─" * min(terminal_width, 60) + Style.RESET_ALL)
+        print()
+        return
+    
+    terminal_width = _get_terminal_width()
+    panel_width = max(min(terminal_width - 4, 120), 50)
+    
+    # 使用 Text 构建内容
+    content = _Text()
+    content.append(tip, style="bold yellow")
+    
+    tip_panel = _Panel(
+        _Align.center(content),
+        border_style="yellow",
+        box=_box.ROUNDED,
+        padding=(0, 3),
+        width=panel_width
+    )
+    
+    _console.print()
+    _console.print(_Align.center(tip_panel))
 
 
 # ==================== 性能优化辅助函数 ====================

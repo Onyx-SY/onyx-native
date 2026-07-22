@@ -48,6 +48,70 @@ python3 man.py           # Rebuild man index / 重建 man 命令索引
 | `which <cmd>` | Find command location / 查找命令位置 |
 | `sado <cmd>` | Run command with elevated permissions (sudo-like, via Onyx permission system) / 以高级权限运行命令 |
 | `nanosado` | Lightweight privilege escalation / 轻量权限提升 |
+| `alias <name>=<cmd>` | Create command alias (persists across restarts) / 创建命令别名（重启后依然有效） |
+| `history` | Show command history / 查看命令历史 |
+| `alias` | List all defined aliases / 列出所有定义的别名 |
+
+## Sub-commands / 子命令详情
+
+### `manage` — Config Manager / 配置管理
+
+| Sub-command / 子命令 | Description / 说明 |
+|------|------|
+| `manage set <key> <val>` | Set a config item / 设置配置项 |
+| `manage get <key>` | Get a config item / 获取配置项值 |
+| `manage set language english` | Switch to English UI / 切换为英文界面 |
+| `manage set language chinese` | Switch to Chinese UI / 切换为中文界面 |
+| `manage set debug-times true` | Enable command execution timing / 开启命令耗时显示 |
+| `manage set debug-parsecmd true` | Enable command parsing debug output / 启用命令解析调试输出 |
+| `manage set clean-log-time <days>` | Set log auto-clean interval / 设置日志自动清理天数 |
+
+### `activite` — Security Mode / 安全模式切换
+
+| Flag / 参数 | Description / 说明 |
+|------|------|
+| `activite -m low` | Strict mode — whitelist only / 严格模式，仅允许白名单命令 |
+| `activite -m mid` | Moderate mode — relaxed permission / 宽松拦截 |
+| `activite -m adv` | Advanced mode — dialog confirm + argon2id password / 弹框确认 + 密码验证 |
+
+### `switch-prompt` — Prompt Styles / 提示符风格
+
+| Style / 风格 | Description / 说明 |
+|------|------|
+| `switch-prompt kali` | Kali Linux style prompt / Kali Linux 风格 |
+| `switch-prompt ubuntu` | Ubuntu style prompt / Ubuntu 风格 |
+| `switch-prompt zsh` | Z shell style prompt / Zsh 风格 |
+| `switch-prompt onyx` | Onyx default style / Onyx 默认风格 |
+| `switch-prompt termux` | Termux style prompt / Termux 风格 |
+| `switch-prompt def` | Default minimalist prompt / 默认简约风格 |
+| `switch-prompt skali` | Simplified Kali prompt / 简化版 Kali 风格 |
+
+## MCP (Model Context Protocol) / MCP 集成
+
+Onyx supports MCP for AI tool integration:
+- `etc/mcp/mcp.json` — MCP server configuration / MCP 服务器配置
+- `bin/ai_lib/mcp_client.py` — MCP client implementation / MCP 客户端实现
+- `bin/ai_lib/mcp_registry.py` — Tool registry for MCP tools / MCP 工具注册
+- `bin/ai_lib/mcp_transport.py` — Transport layer (SSE/stdio) / 传输层实现
+
+> MCP 允许 AI 通过标准协议调用外部工具，扩展 AI 能力边界。
+
+## Task System / 任务系统
+
+Onyx includes a built-in task system (`lib/task_system/`):
+- **Task Registry** — Register and manage tasks / 任务注册与管理
+- **Cron Registry** — Scheduled task execution / 定时任务调度
+- **Team Registry** — Team-based task coordination / 团队协作任务
+- **Task Packet** — Structured task definitions / 结构化任务定义
+
+## TBS vs OS Mode / TBS 与 OS 模式
+
+| Mode / 模式 | Behavior / 行为 |
+|------|------|
+| **TBS** | Virtual sandbox — all operations stay within the virtual root. Real system untouched. / 虚拟沙箱，所有操作在虚拟根目录内，不影响真实系统 |
+| **OS** | Full system access — virtual root = system root. Full read/write. / 完整系统访问，虚拟根目录 = 系统根目录 |
+
+Onyx auto-detects which mode to use. When `ROOT_DIR` equals the system root (`/` or `C:\`), OS mode is activated.
 
 ## Security Modes / 安全模式
 

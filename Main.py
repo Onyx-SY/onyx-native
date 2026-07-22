@@ -186,6 +186,8 @@ class TimeIt:
 MAIN_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 不再强制切换目录，使用 __file__ 相对路径
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# 记录系统原始 HOME（在 sandbox 更改之前捕获）
+_ORIGINAL_HOME = os.environ.get("HOME", "")
 
 # 获取当前登录用户名
 try:
@@ -244,8 +246,15 @@ LOG_FILE = get_log_file_path()
 
 def log_print(content: str, is_error: bool = False, **kwargs):
     """写入日志，仅is_error=True时输出到控制台"""
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {content}\n")
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    except Exception:
+        pass  # 目录创建失败时静默跳过
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {content}\n")
+    except (OSError, IOError):
+        pass  # 日志写入失败不阻碍主流程
     if is_error:
         print(content, file=sys.stderr, **kwargs)
 
@@ -261,6 +270,7 @@ REQUIRED_DEPENDENCIES: Dict[str, List[str]] = {
         "tqdm",
         "colorama",
         "prompt_toolkit",
+        "InquirerPy",
         "aiofiles", 
         "rich",
         "pyreadline3;platform_system=='Windows'",
@@ -285,7 +295,8 @@ LANGUAGE_TEXT = {
             "Python依赖库检查与安装",
             "Windows PTY支持检查",
             "PYC文件有效性检测", "核心PY文件检查", 
-            "config.json验证", "Main启动文件确认"
+            "config.json验证", "Main启动文件确认",
+            "MCP filesystem 服务器安装"
         ],
         "messages": {
             "start_check": "🚀 开始全面环境检查...",
@@ -390,7 +401,8 @@ LANGUAGE_TEXT = {
             "Python Library Check and Installation",
             "Windows PTY Support Check",
             "PYC File Validation", "Core PY Files Check", 
-            "config.json Verification", "Main Startup File Confirmation"
+            "config.json Verification", "Main Startup File Confirmation",
+            "MCP filesystem Server Installation"
         ],
         "messages": {
             "start_check": "🚀 Starting comprehensive environment check...",
@@ -824,20 +836,48 @@ class UltraFastEnvironmentChecker:
             return False
     
     @timer("parallel_install_libs")
-    def parallel_install_libs(self, libs: List[str]) -> bool:
-        """并行安装多个库"""
+    def parallel_install_libs(self, libs: List[str], show_detail: bool = True) -> Tuple[List[str], List[str]]:
+        """逐个安装缺失库，显示进度和每个库的成功/失败状态
+        
+        Returns:
+            (succeeded_libs, failed_libs) — 两个列表
+        """
         if not libs:
-            return True
+            return [], []
         
         best_mirror = self.test_mirror_speed()
+        total = len(libs)
+        succeeded: List[str] = []
+        failed: List[str] = []
         
-        try:
-            pip_cmd = [self.python_exe, "-m", "pip", "install", "--no-cache-dir", "-i", best_mirror] + libs
-            result = subprocess.run(pip_cmd, check=False, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, timeout=60)
-            return result.returncode == 0
-        except:
-            return False
+        for i, lib in enumerate(libs, 1):
+            if show_detail:
+                print(f"    [{i}/{total}] 正在安装 {lib}...")
+            try:
+                pip_cmd = [self.python_exe, "-m", "pip", "install",
+                          "--no-cache-dir", "-i", best_mirror, lib]
+                result = subprocess.run(pip_cmd, check=False,
+                                       stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, timeout=120)
+                if result.returncode == 0:
+                    if show_detail:
+                        print(f"      ✓ {lib} 安装成功")
+                    succeeded.append(lib)
+                else:
+                    if show_detail:
+                        print(f"      ✗ {lib} 安装失败")
+                    failed.append(lib)
+            except Exception as e:
+                if show_detail:
+                    print(f"      ✗ {lib} 安装异常: {e}")
+                failed.append(lib)
+        
+        if show_detail:
+            s = len(succeeded)
+            f = len(failed)
+            print(f"    📊 结果: {s} 个成功, {f} 个失败 / 共 {total} 个")
+        
+        return succeeded, failed
     
     @timer("check_and_install_windows_pty")
     def check_and_install_windows_pty(self) -> bool:
@@ -851,7 +891,8 @@ class UltraFastEnvironmentChecker:
         if not missing_pty_libs:
             return True
         else:
-            return self.parallel_install_libs(missing_pty_libs)
+            succeeded, failed = self.parallel_install_libs(missing_pty_libs, show_detail=False)
+            return len(failed) == 0
     
     def quick_file_check(self, files: List[str]) -> List[str]:
         """快速文件检查"""
@@ -1368,15 +1409,21 @@ class UltraFastEnvironmentChecker:
         log_print("✅ 永久缓存和极致启动标记已清除")
 
     def _clear_onyx_cache(self):
-        """清除 ~/.cache/onyx 目录（Python 环境变更时调用）"""
-        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "onyx")
-        if os.path.exists(cache_dir):
-            try:
-                import shutil
-                shutil.rmtree(cache_dir)
-                log_print(f"🧹 已清除缓存目录: {cache_dir}")
-            except Exception as e:
-                log_print(f"⚠️ 清除缓存目录失败: {e}")
+        """清除 ~/.cache/onyx 目录（检查虚拟 HOME 和系统原始 HOME）"""
+        candidates = set()
+        # 当前 HOME（可能是虚拟 HOME）
+        candidates.add(os.path.join(os.path.expanduser("~"), ".cache", "onyx"))
+        # 系统原始 HOME（sandbox 前的 HOME）
+        if _ORIGINAL_HOME:
+            candidates.add(os.path.join(_ORIGINAL_HOME, ".cache", "onyx"))
+        for cache_dir in candidates:
+            if os.path.exists(cache_dir):
+                try:
+                    import shutil
+                    shutil.rmtree(cache_dir)
+                    log_print(f"🧹 已清除缓存目录: {cache_dir}")
+                except Exception as e:
+                    log_print(f"⚠️ 清除缓存目录失败 ({cache_dir}): {e}")
 
     @timer("jump_to_main_immediately")
     def jump_to_main_immediately(self, cached_results: dict):
@@ -1393,8 +1440,7 @@ class UltraFastEnvironmentChecker:
             
             self.ensure_c_files_for_termux()
 
-            self._ensure_rich()
-
+            # _ensure_rich 已移除（不阻塞启动，缺失时直接放行）
             onyx_import_start = time.perf_counter()
             from Onyx import main_loop
             onyx_import_cost = round((time.perf_counter() - onyx_import_start) * 1000, 3)
@@ -1702,24 +1748,26 @@ class UltraFastEnvironmentChecker:
                 REQUIRED_DEPENDENCIES["python_libs"]
             )
             if missing_libs:
-                # 缓存可能指向错误的 Python 环境，清除后下一轮重新检测
                 self._clear_onyx_cache()
                 print(f"  {self.t('missing_libs')}: {', '.join(missing_libs)}")
-                ok = self.parallel_install_libs(missing_libs)
-                if ok:
-                    print(f"  {self.t('parallel_success')}")
+                succeeded, failed = self.parallel_install_libs(missing_libs)
+                if not failed:
+                    print(f"  ✓ 所有 {len(succeeded)} 个库安装成功")
                     self._print_stage_result(3, total, steps[2], True)
                 else:
-                    print(f"  {self.t('parallel_failed')}")
+                    if succeeded:
+                        print(f"  ✓ 安装成功: {', '.join(succeeded)}")
+                    print(f"  ✗ 安装失败: {', '.join(failed)}")
+                    print(f"  ⚠ 部分库安装失败 — 继续启动")
                     self._print_stage_result(3, total, steps[2], False)
-                    all_pass = False
             else:
                 print(f"  {self.t('libs_ready')}")
                 self._print_stage_result(3, total, steps[2], True)
             results['libs_installed'] = not bool(missing_libs)
         except Exception as e:
+            self._clear_onyx_cache()
+            print(f"  ✗ Stage 3 异常: {e} — 继续启动")
             self._print_stage_result(3, total, steps[2], False, str(e))
-            all_pass = False
 
         # ── Stage 4: Windows PTY Support Check ────────────────────────────
         self._print_stage_header(4, total, steps[3])
@@ -1822,6 +1870,43 @@ class UltraFastEnvironmentChecker:
             self._print_stage_result(8, total, steps[7], False, str(e))
             all_pass = False
 
+        # ── Stage 9: MCP filesystem Server Installation ───────────────────
+        self._print_stage_header(9, total, steps[8])
+        try:
+            # 检查 npx 是否可用
+            import subprocess as _sp
+            _npx_ok = _sp.run(["npx", "--version"], capture_output=True, text=True, timeout=10).returncode == 0
+            if not _npx_ok:
+                print(f"  {self.t('first_run_skip')}  (npx not found, Node.js required)")
+                self._print_stage_result(9, total, steps[8], True, skipped=True)
+            else:
+                print(f"  ✓ npx 可用 (Node.js 已安装)")
+                # 安装 MCP filesystem server
+                from bin.ai_cmd import install_mcp_server_cmd
+                print(f"  📦 正在安装 MCP filesystem server...（首次安装需要下载 npm 包，约 10-30 秒）")
+                sys.stdout.flush()
+                _start = time.time()
+                result = install_mcp_server_cmd("filesystem", "@modelcontextprotocol/server-filesystem")
+                _elapsed = time.time() - _start
+                print(f"  ⏱ 耗时: {_elapsed:.0f}s")
+                if "❌" in result and "already installed" not in result.lower():
+                    print(f"  ⚠ MCP 安装输出: {result[:100]}")
+                    self._print_stage_result(9, total, steps[8], False)
+                else:
+                    print(f"  ✓ filesystem server 已就绪")
+                    # 标记 MCP 预加载已完成（不必后台再装一次）
+                    try:
+                        _flag_dir = os.path.join(os.path.expanduser("~"), ".cache", "onyx")
+                        os.makedirs(_flag_dir, exist_ok=True)
+                        with open(os.path.join(_flag_dir, "mcp_preloaded.flag"), "w") as _f:
+                            _f.write(str(time.time()))
+                    except Exception:
+                        pass
+                    self._print_stage_result(9, total, steps[8], True)
+        except Exception as e:
+            print(f"  ⚠ MCP 安装异常: {e} — 可稍后通过 ai -mcp install filesystem 手动安装")
+            self._print_stage_result(9, total, steps[8], False, str(e))
+
         # ── Persist cache + flag ──────────────────────────────────────────
         results['status'] = 'success'
         results['timestamp'] = time.time()
@@ -1883,29 +1968,19 @@ class UltraFastEnvironmentChecker:
         try:
             log_print(f"{self.t('start_check')}")
             
-            with TimeIt("并行检查-系统/库/文件"):
-                with ThreadPoolExecutor(max_workers=3) as executor:
+            with TimeIt("并行检查-系统/文件"):
+                with ThreadPoolExecutor(max_workers=2) as executor:
                     future_system = executor.submit(lambda: (
                         self.system_type,
                         self.get_system_boot_timestamp()
                     ))
-                    future_libs = executor.submit(
-                        self.parallel_check_libs_fast,
-                        REQUIRED_DEPENDENCIES["python_libs"]
-                    )
                     future_files = executor.submit(
                         self.quick_file_check,
                         [os.path.join(ROOT_DIR, "onyx", f) for f in REQUIRED_DEPENDENCIES["required_py_files"]]
                     )
                     
                     self.system_type, boot_time = future_system.result()
-                    missing_libs = future_libs.result()
                     missing_files = future_files.result()
-            
-            if missing_libs:
-                self._clear_onyx_cache()
-                with TimeIt("安装缺失库"):
-                    self.parallel_install_libs(missing_libs)
             
             with TimeIt("检查Windows PTY支持"):
                 self.check_and_install_windows_pty()
@@ -1919,7 +1994,6 @@ class UltraFastEnvironmentChecker:
                 'system_type': self.system_type,
                 'python_exe': self.python_exe,
                 'pip_exe': self.pip_exe,
-                'libs_installed': not bool(missing_libs),
                 'config_valid': config_valid,
                 'timestamp': time.time()
             }

@@ -401,13 +401,30 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
         content.append(cmd_result or f"*{('No output' if md else '无输出')}*")
         content.append("")
     
-    # 工具调用
+    # 工具调用（含简略参数）
     if tool_calls:
         content.append(f"### {'Tool Calls' if md else '工具调用'}")
         for tc in tool_calls:
             if isinstance(tc, dict):
                 tc_name = tc.get("name", "?")
-                content.append(f"- `{tc_name}`")
+                tc_params = tc.get("params_str", "")
+                _param_summary = ""
+                if tc_params:
+                    try:
+                        _parsed = json.loads(tc_params)
+                        _key_keys = ["path", "pattern", "name", "query", "url", "prompt"]
+                        _parts = []
+                        for _k in _key_keys:
+                            _v = _parsed.get(_k, "")
+                            if _v:
+                                _short = str(_v)[:60]
+                                _parts.append(f"{_k}={_short}")
+                        if _parts:
+                            _param_summary = " (" + ", ".join(_parts) + ")"
+                    except (json.JSONDecodeError, ValueError):
+                        _short_params = tc_params[:80]
+                        _param_summary = f" params={_short_params}"
+                content.append(f"- `{tc_name}{_param_summary}`")
             else:
                 content.append(f"- `{str(tc)[:80]}`")
         content.append("")

@@ -56,24 +56,47 @@ def load_config(ctx: "AppContext") -> bool:
         return False
 
     # 3. cmdal.json
+    _DEFAULT_LOW_ALLOW = [
+        "ls","cd","cat","echo","pwd","clear","history","exit","help",
+        "ai","pip","python3","bash","sh","less","more","head","tail",
+        "grep","find","sort","uniq","wc","diff","tee","mkdir","rm",
+        "cp","mv","touch","chmod","chown","tar","gzip","gunzip",
+        "unzip","zip","ssh","curl","wget","git","make","nano","vim",
+        "sudo","date","whoami","id","uname","which","whereis",
+        "ps","top","htop","df","du","free","uptime","ping",
+        "ip","ss","netstat","systemctl","journalctl","service",
+        "docker","kubectl","man","info","stat","file","time",
+    ]
+    _DEFAULT_PERM_LIMIT = {
+        "low": {"max_tool_perm": 2, "allow_commands": _DEFAULT_LOW_ALLOW, "block_advanced": True},
+        "mid": {"max_tool_perm": 3, "allow_commands": "*", "block_advanced": False},
+        "adv": {"max_tool_perm": 5, "allow_commands": "*", "block_advanced": False},
+    }
+
     cmdal_path = os.path.join(ctx.ROOT_DIR, "onyx", "etc", "cmdal.json")
+    ctx.global_config.setdefault("mode_config", {})
     if not os.path.exists(cmdal_path):
-        print(ctx.Fore.RED + _t("config_not_found", path=cmdal_path) + ctx.Style.RESET_ALL)
-        return False
-    try:
-        with open(cmdal_path, "r", encoding="utf-8") as f:
-            cmdal = json.load(f)
-        if "perm_limit" not in cmdal:
-            print(ctx.Fore.RED + _t("missing_required_nodes", file="cmdal.json", nodes="perm_limit") + ctx.Style.RESET_ALL)
-            return False
-        ctx.global_config.setdefault("mode_config", {})
-        ctx.global_config["mode_config"]["perm_limit"] = cmdal["perm_limit"]
-    except json.JSONDecodeError as e:
-        print(ctx.Fore.RED + _t("config_format_error", file="cmdal.json", err=str(e), line=e.lineno, col=e.colno) + ctx.Style.RESET_ALL)
-        return False
-    except Exception as e:
-        print(ctx.Fore.RED + _t("config_read_fail", file="cmdal.json", err=str(e)) + ctx.Style.RESET_ALL)
-        return False
+        print(ctx.Fore.YELLOW + _t("config_not_found", path=cmdal_path) + ctx.Style.RESET_ALL)
+        print(ctx.Fore.YELLOW + "⚠️ 使用默认权限配置（low 模式基础命令白名单）" + ctx.Style.RESET_ALL)
+        ctx.global_config["mode_config"]["perm_limit"] = _DEFAULT_PERM_LIMIT
+    else:
+        try:
+            with open(cmdal_path, "r", encoding="utf-8") as f:
+                cmdal = json.load(f)
+            if "perm_limit" not in cmdal:
+                print(ctx.Fore.YELLOW + _t("missing_required_nodes", file="cmdal.json", nodes="perm_limit") + ctx.Style.RESET_ALL)
+                print(ctx.Fore.YELLOW + "⚠️ 使用默认权限配置" + ctx.Style.RESET_ALL)
+                ctx.global_config["mode_config"]["perm_limit"] = _DEFAULT_PERM_LIMIT
+            else:
+                ctx.global_config["mode_config"]["perm_limit"] = cmdal["perm_limit"]
+        except json.JSONDecodeError as e:
+            print(ctx.Fore.YELLOW + _t("config_format_error", file="cmdal.json", err=str(e), line=e.lineno, col=e.colno) + ctx.Style.RESET_ALL)
+            print(ctx.Fore.YELLOW + "⚠️ cmdal.json 格式错误，使用默认权限配置" + ctx.Style.RESET_ALL)
+            ctx.global_config["mode_config"]["perm_limit"] = _DEFAULT_PERM_LIMIT
+        except Exception as e:
+            print(ctx.Fore.YELLOW + _t("config_read_fail", file="cmdal.json", err=str(e)) + ctx.Style.RESET_ALL)
+            print(ctx.Fore.YELLOW + "⚠️ cmdal.json 读取失败，使用默认权限配置" + ctx.Style.RESET_ALL)
+            ctx.global_config["mode_config"]["perm_limit"] = _DEFAULT_PERM_LIMIT
 
     # Termux OS 模式适配
     if ctx.sys_type == "Termux" and ctx.OS_OR_TBS == "OS":

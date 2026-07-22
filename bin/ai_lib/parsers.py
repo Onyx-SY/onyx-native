@@ -430,6 +430,7 @@ def _parse_ai_raw_response(raw_text: str) -> Dict[str, Any]:
         "plan": "",
         "class": "",
         "tool_calls": [],
+        "fields": {},
     }
 
     lines = raw_text.split('\n')

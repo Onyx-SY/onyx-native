@@ -178,6 +178,55 @@ def extract_summary(help_text: str) -> str:
             return line.replace("Function:", "").strip()
     return "无详细描述"
 
+# ====================== 命令分类映射 ======================
+COMMAND_CATEGORIES: Dict[str, List[str]] = {
+    "files": ["cat", "cp", "echo", "ls", "mkdir", "mv", "pwd", "rm", "touch"],
+    "navigation": ["cd", "source", "export", "history", "alias", "unalias"],
+    "system": ["activite", "manage", "import", "run", "refresh"],
+    "ai": ["ai", "mktool"],
+    "security": ["sado", "nanosado", "set-adv-pwd"],
+    "help_utils": ["help", "clear", "exit", "switch-prompt", "autocmd"],
+}
+
+CATEGORY_NAMES_CN = {
+    "files": "📁 文件操作",
+    "navigation": "🧭 导航与Shell",
+    "system": "⚙️ 系统管理",
+    "ai": "🤖 AI与工具",
+    "security": "🔒 安全",
+    "help_utils": "💡 帮助与实用",
+}
+
+CATEGORY_NAMES_EN = {
+    "files": "📁 File Operations",
+    "navigation": "🧭 Navigation & Shell",
+    "system": "⚙️ System Management",
+    "ai": "🤖 AI & Tools",
+    "security": "🔒 Security",
+    "help_utils": "💡 Help & Utilities",
+}
+
+CATEGORY_COLORS = {
+    "files": "CYAN",
+    "navigation": "BLUE",
+    "system": "YELLOW",
+    "ai": "MAGENTA",
+    "security": "RED",
+    "help_utils": "WHITE",
+}
+
+QUICK_START_CN = """  {green}ls{RESET}      查看目录内容
+  {green}cd{RESET}       切换目录
+  {green}ai{RESET}       与AI对话（如：ai 如何创建Python文件）
+  {green}help{RESET}     查看帮助（如：help ls）
+  {green}manage{RESET}   系统设置（如：manage set language en）"""
+
+QUICK_START_EN = """  {green}ls{RESET}      List directory contents
+  {green}cd{RESET}       Change directory
+  {green}ai{RESET}       Chat with AI (e.g.: ai How to create a Python file)
+  {green}help{RESET}     Get help (e.g.: help ls)
+  {green}manage{RESET}   System settings (e.g.: manage set language en)"""
+
 # ====================== 核心帮助处理逻辑 ======================
 def handle_help(cmd_parts: List[str], request_id: str) -> None:
     lang = get_current_language()
@@ -188,46 +237,86 @@ def handle_help(cmd_parts: List[str], request_id: str) -> None:
     dynamic_tools = scan_tool_dirs()
     # 全局帮助（输入 help）
     if len(cmd_parts) == 1:
-        print(get_color_attr("CYAN") + "="*80 + get_color_attr("RESET", ""))
-        title = "                   Onyx Toolbox - 帮助手册（{}版）".format("Windows" if is_windows else "Linux/Termux") if lang == "Chinese" else "                   Onyx Toolbox - Help Manual（{} Version）".format("Windows" if is_windows else "Linux/Termux")
-        print(get_color_attr("GREEN") + title + get_color_attr("RESET", ""))
-        print(get_color_attr("CYAN") + "="*80 + get_color_attr("RESET", ""))
+        G = get_color_attr
+        RESET = G("RESET", "")
         
-        # 预设命令列表
-        cmd_title = "\n【📋 所有命令】" if lang == "Chinese" else "\n【📋 All Commands】"
-        print(get_color_attr("YELLOW") + cmd_title + get_color_attr("RESET", ""))
-        for cmd_name, cmd_info in cmd_help_info["命令"].items():
-            # 移除Windows专属命令过滤，仅保留Linux命令在非Windows系统显示
-            linux_only_cmds = ["sudo", "du", "chmod", "gzip"]
-            if is_windows and cmd_name in linux_only_cmds:
+        print(G("CYAN") + "="*80 + RESET)
+        title = "                   ██████╗ ███╗   ██╗██╗   ██╗██╗  ██╗" if lang == "Chinese" else "                   ██████╗ ███╗   ██╗██╗   ██╗██╗  ██╗"
+        print(G("GREEN") + title + RESET)
+        subtitle = "                   Onyx Toolbox - 帮助手册（{}版）".format("Windows" if is_windows else "Linux/Termux") if lang == "Chinese" else "                   Onyx Toolbox - Help Manual（{} Version）".format("Windows" if is_windows else "Linux/Termux")
+        print(G("GREEN") + subtitle + RESET)
+        print(G("CYAN") + "="*80 + RESET)
+        
+        # ===== 快速入门 =====
+        quick_title = "\n🚀 快速入门" if lang == "Chinese" else "\n🚀 Quick Start"
+        print(G("YELLOW") + quick_title + RESET)
+        qs = QUICK_START_CN if lang == "Chinese" else QUICK_START_EN
+        print(qs.format(green=G("GREEN"), RESET=RESET))
+        
+        # ===== 命令分类列表 =====
+        cat_names = CATEGORY_NAMES_CN if lang == "Chinese" else CATEGORY_NAMES_EN
+        linux_only_cmds = ["sudo", "du", "chmod", "gzip"]
+        
+        cat_title = "\n📋 命令分类" if lang == "Chinese" else "\n📋 Commands by Category"
+        print(G("YELLOW") + cat_title + RESET)
+        
+        for cat_key in ["files", "navigation", "system", "ai", "security", "help_utils"]:
+            cmds_in_cat = [c for c in COMMAND_CATEGORIES[cat_key] if c in cmd_help_info["命令"]]
+            if not cmds_in_cat:
                 continue
-            summary = extract_summary(cmd_info[lang])
-            system_note = "（Linux/Termux专属）" if cmd_name in linux_only_cmds and lang == "Chinese" else "（Linux/Termux-only）" if cmd_name in linux_only_cmds else ""
-            print(f"  {get_color_attr('GREEN')}{cmd_name:<15}{get_color_attr('RESET', '')} - {summary} {system_note}")
+            # Filter linux-only on Windows
+            visible_cmds = [c for c in cmds_in_cat if not (is_windows and c in linux_only_cmds)]
+            if not visible_cmds:
+                continue
+            color_key = CATEGORY_COLORS.get(cat_key, "WHITE")
+            print(f"\n  {G(color_key)}{cat_names[cat_key]}{RESET}")
+            for cmd_name in visible_cmds:
+                summary = extract_summary(cmd_help_info["命令"][cmd_name][lang])
+                snote = " (Linux)" if cmd_name in linux_only_cmds else ""
+                print(f"    {G('GREEN')}{cmd_name:<14}{RESET}{summary}{snote}")
         
-        # 动态工具列表
+        # ===== 动态工具 =====
         if dynamic_tools:
-            dynamic_tool_title = f"\n【🔍 动态工具】（共{len(dynamic_tools)}个）" if lang == "Chinese" else f"\n【🔍 Dynamic Tools】(Total {len(dynamic_tools)})"
-            print(get_color_attr("YELLOW") + dynamic_tool_title + get_color_attr("RESET", ""))
-            print(f"  {get_color_attr('BLUE')}" + ", ".join(dynamic_tools) + get_color_attr("RESET", ""))
+            dt_title = f"\n🔍 动态工具 ({len(dynamic_tools)})" if lang == "Chinese" else f"\n🔍 Dynamic Tools ({len(dynamic_tools)})"
+            print(G("YELLOW") + dt_title + RESET)
+            print(f"  {G('BLUE')}" + ", ".join(dynamic_tools) + RESET)
+            print(f"  {G('WHITE')}" + ("输入 help <工具名> 查看详情" if lang == "Chinese" else "Type help <toolname> for details") + RESET)
         
-        # 使用提示
-        tip_title = "\n【使用提示】：" if lang == "Chinese" else "\n【Usage Tips】："
-        print(get_color_attr("YELLOW") + tip_title + get_color_attr("RESET", ""))
+        # ===== 使用提示 =====
+        tip_title = "\n💡 使用提示" if lang == "Chinese" else "\n💡 Usage Tips"
+        print(G("YELLOW") + tip_title + RESET)
         if lang == "Chinese":
-            print("  1. 查看详情：help <名称>（如 help ls、help orca）")
-            print("  2. 系统适配：Linux命令仅在Linux/Termux下可用")
-            print("  3. 切换模式：activite -m adv（解锁高级功能）")
-            print("  4. 刷新工具：refresh（更新工具索引）")
-            print("  5. 快捷操作：help code-line 查看常用快捷键")  # 👈 已添加
+            tips = [
+                ("help <名称>", "查看命令/工具详情（如 help ls、help ai）"),
+                ("manage set language en", "一键切换为英文界面"),
+                ("ai -m plan <任务>", "AI计划模式，先规划再执行"),
+                ("help code-line", "查看快捷键大全"),
+                ("activite -m adv", "解锁高级功能"),
+                ("refresh", "重新扫描工具索引"),
+                ("manage clean cache", "清理缓存释放内存"),
+            ]
         else:
-            print("  1. View details：help <name> (e.g., help ls、help orca)")
-            print("  2. System adaption：Linux commands only available on Linux/Termux")
-            print("  3. Switch mode：activite -m adv (unlock advanced features)")
-            print("  4. Refresh tools：refresh (update tool index)")
-            print("  5. Shortcuts：help code-line to view common shortcuts")  # 👈 已添加
+            tips = [
+                ("help <name>", "View command/tool details (e.g., help ls, help ai)"),
+                ("manage set language zh", "Switch to Chinese interface"),
+                ("ai -m plan <task>", "AI plan mode — plan first, then execute"),
+                ("help code-line", "View keyboard shortcuts"),
+                ("activite -m adv", "Unlock advanced features"),
+                ("refresh", "Rescan tool index"),
+                ("manage clean cache", "Clear cache to free memory"),
+            ]
+        for i, (cmd, desc) in enumerate(tips, 1):
+            print(f"  {G('GREEN')}{i}. {cmd:<30}{RESET}{G('WHITE')}{desc}{RESET}")
         
-        print(get_color_attr("CYAN") + "\n" + "="*80 + get_color_attr("RESET", ""))
+        # ===== 分类参考 =====
+        if lang == "Chinese":
+            print(f"\n{G('YELLOW')}📖 分类参考{RESET}")
+            print(f"  {G('WHITE')}输入 help 查看全局说明   |   help <命令名> 查看命令详情{RESET}")
+        else:
+            print(f"\n{G('YELLOW')}📖 Reference{RESET}")
+            print(f"  {G('WHITE')}help - show this page   |   help <command> - detailed help{RESET}")
+        
+        print(G("CYAN") + "\n" + "="*80 + RESET)
         log_info("用户查看全局帮助信息", request_id)
         return
     

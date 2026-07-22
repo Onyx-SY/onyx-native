@@ -111,6 +111,7 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
     chat_param = None
     mode = "normal"
     times = 1
+    mode_explicitly_set = False  # 用户是否显式指定了模式
 
     i = 0
     while i < len(ai_args):
@@ -155,8 +156,9 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
                 return ("error", "Missing mode for -m parameter", None, auto_exec, new_key, None, None, mode, times)
             mode_val = ai_args[i+1].lower()
             if mode_val not in ["plan", "normal"]:
-                return ("error", "Invalid -m mode! Must be 'plan' or 'normal'", None, auto_exec, new_key, None, None, mode, times)
+                return ("error", lang_text.get("invalid_mode", "Invalid -m mode! Must be 'plan' or 'normal' | 无效 -m 模式，必须是 plan 或 normal"), None, auto_exec, new_key, None, None, mode, times)
             mode = mode_val
+            mode_explicitly_set = True
             i += 2
         elif arg == "-mode":
             if i + 1 >= len(ai_args):
@@ -238,7 +240,11 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
             mcp_args = ai_args[i + 2:] if i + 2 < len(ai_args) else []
             if mcp_sub in ("install", "remove", "list", "start"):
                 return ("mcp_command", mcp_sub, mcp_args, auto_exec, new_key, None, None, mode, times)
-            return ("error", f"Invalid mcp subcommand: {mcp_sub}. Use install/list/remove", None, auto_exec, new_key, None, None, mode, times)
+            return ("error", f"Invalid mcp subcommand: {mcp_sub}. Use install/list/remove | 无效 mcp 子命令: {mcp_sub}。使用 install/list/remove", None, auto_exec, new_key, None, None, mode, times)
+        elif arg in ("plan", "normal"):
+            mode = arg
+            mode_explicitly_set = True
+            i += 1
         elif arg.startswith("-"):
             i += 1
         else:
@@ -256,8 +262,11 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
         return ("chat_only", "", None, auto_exec, new_key, chat_action, chat_param, mode, times)
     if new_key is not None and not content:
         return ("key_only", "", None, auto_exec, new_key, None, None, mode, times)
-    if not content and new_key is None:
+    if not content and new_key is None and not mode_explicitly_set:
         return ("error", lang_text["param_error"], None, auto_exec, new_key, None, None, mode, times)
+    # 显式指定模式且无内容时进入交互模式
+    if not content and mode_explicitly_set:
+        return ("interactive", "", None, auto_exec, new_key, None, None, mode, times)
     return (content_type, content, extra_info, auto_exec, new_key, None, None, mode, times)
 
 

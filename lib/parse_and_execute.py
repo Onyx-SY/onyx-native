@@ -104,7 +104,7 @@ except ImportError:
 
 # === 导入持久化 Shell 的变量读取函数 ===
 try:
-    from onyx.lib.exe import get_var_from_shell, get_functions_from_shell, get_shell_cwd, is_shell_alive
+    from lib.terminal.exe import get_var_from_shell, get_functions_from_shell, get_shell_cwd, is_shell_alive
 except ImportError:
     def get_var_from_shell(var_name: str) -> Optional[str]:
         return None
@@ -655,37 +655,69 @@ def _write_heredoc_to_temp(here_doc_content: str) -> str:
 
 def _sync_cwd_from_shell(log_info_func=None, request_id: str = None, cmd_type: str = None):
     """
-    从持久化 Shell 进程中读取当前工作目录并同步到 Python 进程（带防抖）
-    
-    优化策略：
-    - builtin 命令不改变 cwd，直接跳过
-    - 距离上次同步 < _CWD_SYNC_COOLDOWN 且 cwd 未变，跳过 IPC
+    从持久化 Shell 进程中读取当前工作目录并同步到 Python 进程。
+
+    同步方向：Shell → Python（system 命令如 cd 可能改变 shell CWD）
+    builtin 命令在 Python 层直接 os.chdir，无需从 shell 同步。
     """
     global _LAST_CWD_SYNC_TIME, _LAST_SYNCED_CWD
-    
-    # builtin 命令不改变工作目录，跳过昂贵的 IPC
+
+    # builtin 命令不改变 shell CWD，跳过 IPC
     if cmd_type and cmd_type in _CWD_SYNC_SKIP_TYPES:
         return True
-    
+
     import time
     now = time.time()
-    
-    # 防抖：冷却时间内直接跳过（500ms 内外部 CWD 变化概率极低）
-    if _LAST_SYNCED_CWD is not None and (now - _LAST_CWD_SYNC_TIME) < _CWD_SYNC_COOLDOWN:
-        return True
-    
+
     try:
-        if is_shell_alive():
-            shell_cwd = get_shell_cwd()
-            if shell_cwd and os.path.isdir(shell_cwd):
-                current_cwd = os.getcwd()
-                if current_cwd != shell_cwd:
-                    os.chdir(shell_cwd)
+        # 直接读 shell CWD（优先 /proc/<pid>/cwd，不依赖 os.kill）
+        shell_cwd = get_shell_cwd()
+        if shell_cwd and os.path.isdir(shell_cwd):
+            current_cwd = os.getcwd()
+
+            # === 沙箱边界守卫：shell 不能跑出虚拟根目录 ===
+            try:
+                from lib.resolve_path import _is_in_virtual_root, ROOT_DIR as _SANDBOX_ROOT
+                if _SANDBOX_ROOT and not _is_in_virtual_root(shell_cwd):
+                    # shell 逃逸了 → 不把 Python 同步出去，反把 shell 拉回来
                     if log_info_func:
-                        log_info_func(f"已同步工作目录到: {shell_cwd}", request_id)
-                _LAST_SYNCED_CWD = shell_cwd
-                _LAST_CWD_SYNC_TIME = now
-                return True
+                        log_info_func(f"阻止越界同步: shell={shell_cwd}, 拉回沙箱根目录", request_id)
+                    try:
+                        from lib.terminal.exe import _get_persistent_shell
+                        ps = _get_persistent_shell()
+                        if ps is not None:
+                            ps.set_cwd(_SANDBOX_ROOT)
+                            ps.cwd = _SANDBOX_ROOT
+                    except ImportError:
+                        pass
+                    _LAST_SYNCED_CWD = _SANDBOX_ROOT
+                    _LAST_CWD_SYNC_TIME = now
+                    return True
+            except ImportError:
+                pass  # resolve_path 模块不可用时退化为无边界检查
+
+            if current_cwd != shell_cwd:
+                os.chdir(shell_cwd)
+                # 失效 exe 模块的 CWD 缓存，防止 _get_cwd_cached 读到旧值
+                try:
+                    from lib.terminal.exe import invalidate_cwd_cache
+                    invalidate_cwd_cache()
+                except ImportError:
+                    pass
+                # 同步 PersistentShell.cwd，防止下次 _get_persistent_shell
+                # 误判为不同步并用旧 cwd 覆盖 shell
+                try:
+                    from lib.terminal.exe import _get_persistent_shell
+                    ps = _get_persistent_shell()
+                    if ps is not None:
+                        ps.cwd = shell_cwd
+                except ImportError:
+                    pass
+                if log_info_func:
+                    log_info_func(f"已同步工作目录到: {shell_cwd}", request_id)
+            _LAST_SYNCED_CWD = shell_cwd
+            _LAST_CWD_SYNC_TIME = now
+            return True
     except Exception as e:
         if log_info_func:
             log_info_func(f"同步工作目录失败: {e}", request_id)
@@ -863,7 +895,7 @@ def _execute_command_unified(cmd_str: str, clean_cmd: str, redirect_config: Dict
             run_cmd_sync_func(full_cmd, request_id, show_output, perm,
                               passthrough=_use_passthrough)
         
-        # 命令执行成功后，同步工作目录（传入 cmd_type 用于防抖）
+        # 命令执行成功后，同步工作目录
         _sync_cwd_from_shell(log_info_func, request_id, cmd_type)
         
         return True, f"命令执行完成：{cmd_head}"
@@ -1193,8 +1225,9 @@ _REQUEST_COUNTER = 0
 _LAST_CWD_SYNC_TIME: float = 0.0
 _LAST_SYNCED_CWD: Optional[str] = None
 _CWD_SYNC_COOLDOWN: float = 0.5  # 500ms 最小同步间隔
-# builtin 命令不改变 cwd，跳过同步
-_CWD_SYNC_SKIP_TYPES = frozenset({'builtin', 'system'})
+# builtin 命令不改变 cwd，跳过同步（在 Python 层直接 os.chdir）
+# system 命令走 PTY shell，可能含 cd，必须同步 shell → Python
+_CWD_SYNC_SKIP_TYPES = frozenset({'builtin'})
 
 # 命令类型中文名映射（模块级常量，避免每次构造 dict）
 _CMD_TYPE_NAME_MAP = {
@@ -2295,7 +2328,14 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
         )
 
         # === 原为 unknown 的命令：bash 已尝试执行，若不存在则提示相似命令 ===
-        if _unknown_origin and actual_cmd_head:
+        # shell 内置命令（cd/echo/pwd/...）不在 PATH，跳过"未找到"提示
+        _SHELL_BUILTINS = frozenset({
+            'cd', 'echo', 'pwd', 'exit', 'export', 'alias', 'unalias',
+            'source', 'type', 'jobs', 'fg', 'bg', 'kill', 'wait',
+            'read', 'printf', 'test', 'true', 'false', 'exec', 'eval',
+            'set', 'unset', 'shift', 'umask', 'ulimit', 'history',
+        })
+        if _unknown_origin and actual_cmd_head and actual_cmd_head not in _SHELL_BUILTINS:
             import shutil as _shutil
             # bash 执行完了，用 which 快速判断命令是否真的不存在
             # （只查 PATH，shell 函数/alias 不在此列，但不影响体验）

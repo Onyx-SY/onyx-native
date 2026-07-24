@@ -42,6 +42,9 @@ _MCP_STDERR_LOCKS: Dict[int, threading.Lock] = {}
 # ── Plan 模式标记 ──
 _PLAN_MODE_ACTIVE = False
 
+# ── 手动压缩请求标志（/compact 命令设置，下一轮 API 调用前触发一次）──
+_MANUAL_COMPACT_REQUESTED = False
+
 # ── 线程局部存储 ──
 _thread_locals = threading.local()
 

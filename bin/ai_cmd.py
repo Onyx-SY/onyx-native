@@ -117,6 +117,8 @@ from .ai_lib.mcp_state import (
     _mcp_debug, _mcp_debug_enter, _mcp_debug_exit,
     _PLAN_MODE_ACTIVE, _thread_locals,
 )
+# _MANUAL_COMPACT_REQUESTED 通过 mcp_state 模块属性访问（避免 from-import 拷贝问题）
+from .ai_lib import mcp_state as _mcp_shared
 # MCP 客户端（协议 + 服务器管理）
 from .ai_lib import mcp_client
 
@@ -127,7 +129,7 @@ from .ai_lib import mcp_client
 #    - 工具列表中过滤 shell/bash 类工具（Onyx 已有 shell 接口）
 #    - edit_file/write_file 在 mid 及以上模式允许（low 禁止）
 #
-#    v2.7 — Reasonix 风格重构：
+#    v2.7 — 架构重构：
 #      - Transport 抽象层: bin/ai_lib/mcp_transport.py
 #      - Registry 模式:    bin/ai_lib/mcp_registry.py
 #      - Schema 缓存指纹:  加速冷启动
@@ -1343,11 +1345,12 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ),
         _make_tool(
             "memory",
-            "搜索或列出 library 历史会话。operation=search 按关键词搜索，operation=list 列出所有活跃记忆。",
+            "搜索/列出/读取 library 历史会话。operation=search 按关键词搜索；operation=list 列出活跃记忆；operation=read 用 session_id 读取完整记录。",
             {
-                "operation": {"type": "string", "enum": ["search", "list"], "description": "search 按关键词搜索；list 列出所有活跃记忆"},
-                "query": {"type": "string", "description": "搜索关键词（operation=search 时必填）"},
-                "filter": {"type": "string", "description": "可选过滤 class 等级（operation=list 时），如 '10' 只列永久保留的"},
+                "operation": {"type": "string", "enum": ["search", "list", "read"], "description": "search/list/read"},
+                "query": {"type": "string", "description": "搜索关键词（search 时必填）"},
+                "session_id": {"type": "string", "description": "会话 UUID（read 时必填）"},
+                "filter": {"type": "string", "description": "过滤 class 等级（list 时可选）"},
                 "limit": {"type": "integer", "description": "返回结果数，默认 8，最大 20"},
             },
             ["operation"],
@@ -2551,14 +2554,27 @@ def _exec_cron_delete(cron_id: str) -> str:
 # ═══════════════════════════════════════════════════════════
 
 def _resolve_memory_path(path: str) -> str:
-    """将记忆路径简写解析为完整文件路径。"""
+    """将记忆路径简写解析为完整文件路径。
+
+    接受格式:
+      library/<uuid>       → ~/.ai_s/library/<uuid>.txt
+      library/<uuid>.txt   → ~/.ai_s/library/<uuid>.txt  (兼容旧格式)
+      chat/<name>          → ~/.ai_s/chat/<name>.json
+      onyx_ai              → ~/.ai_s/onyx_ai.md
+    """
     home = os.path.expanduser("~")
     base = os.path.join(home, ".ai_s")
     if path.startswith("chat/"):
-        return os.path.join(base, "chat", path[5:] + ".json")
+        name = path[5:]
+        if name.endswith(".json"):
+            name = name[:-5]
+        return os.path.join(base, "chat", name + ".json")
     if path.startswith("library/"):
-        return os.path.join(base, "library", path[8:] + ".txt")
-    if path == "onyx_ai":
+        uuid_part = path[8:]
+        if uuid_part.endswith(".txt"):
+            uuid_part = uuid_part[:-4]
+        return os.path.join(base, "library", uuid_part + ".txt")
+    if path == "onyx_ai" or path == "onyx_ai.md":
         return os.path.join(base, "onyx_ai.md")
 
     # 完整路径直接返回
@@ -2676,7 +2692,7 @@ from .ai_lib.py_analysis import (
 # ═══════════════════════════════════════════════════════════
 
 def _exec_memory_read(path: str, range_str: str = None) -> str:
-    """读取记忆文件，支持行号范围。"""
+    """读取记忆文件，支持行号范围。返回带行号前缀的内容。"""
     try:
         file_path = _resolve_memory_path(path)
         if not os.path.exists(file_path):
@@ -2690,22 +2706,38 @@ def _exec_memory_read(path: str, range_str: str = None) -> str:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
 
+        all_lines = content.split("\n")
+        total_lines = len(all_lines)
+        start_line = 1
+        view_mode = "full"
+
         if range_str:
             try:
                 if "-" in range_str:
                     start, end = map(int, range_str.split("-", 1))
-                    lines = content.split("\n")
-                    lines = lines[max(0, start-1):end]
-                    content = "\n".join(lines)
+                    start_line = max(1, start)
+                    end_line = min(total_lines, end)
+                    selected = all_lines[start_line - 1:end_line]
+                    view_mode = f"range {start_line}-{end_line}"
                 else:
                     line_no = int(range_str)
-                    lines = content.split("\n")
-                    content = lines[min(line_no-1, len(lines)-1)]
+                    start_line = max(1, min(line_no, total_lines))
+                    selected = [all_lines[start_line - 1]]
+                    view_mode = f"line {start_line}"
             except (ValueError, IndexError):
-                pass
+                selected = all_lines
+        else:
+            selected = all_lines
 
-        total_lines = content.count("\n") + (1 if content else 0)
-        result = f"📄 {path}（{total_lines} 行）\n\n{content}"
+        # ── 添加行号（与 read_file 一致）──
+        from lib.native_fs.panels import number_lines as _num_lines
+        raw = "\n".join(selected)
+        numbered = _num_lines(raw, start=start_line)
+
+        # 不在此处截断 — AI 显式调用 MemoryRead 需要完整内容。
+        # 上层 _MAX_TOOL_OUTPUT (32KB) 统一切断，保证不撑爆上下文。
+        header = f"📄 `{path}` ({view_mode} of {total_lines} lines)"
+        result = f"{header}\n\n{numbered}"
         return _cache_query(cache_key, result)
     except Exception as e:
         return f"❌ MemoryRead 失败: {e}"
@@ -3087,7 +3119,7 @@ def _exec_choose_ask(question: str, options: list) -> str:
 
 
 def _exec_remember_session(session_id: str) -> str:
-    """标记 library 会话为重要（Reasonix remember 等价物）"""
+    """标记 library 会话为重要"""
     try:
         from .ai_lib.storage import mark_session_important
         home_dir = os.path.expanduser("~")
@@ -3097,7 +3129,7 @@ def _exec_remember_session(session_id: str) -> str:
 
 
 def _exec_forget_session(session_id: str) -> str:
-    """归档 library 会话（Reasonix forget 等价物）"""
+    """归档 library 会话"""
     try:
         from .ai_lib.storage import archive_session
         home_dir = os.path.expanduser("~")
@@ -3107,7 +3139,7 @@ def _exec_forget_session(session_id: str) -> str:
 
 
 def _exec_search_library(query: str, limit: int = 8) -> str:
-    """BM25 搜索海马体（Reasonix recall 等价物）"""
+    """BM25 搜索海马体"""
     try:
         from .ai_lib.storage import search_library
         home_dir = os.path.expanduser("~")
@@ -3117,13 +3149,29 @@ def _exec_search_library(query: str, limit: int = 8) -> str:
 
 
 def _exec_list_hippocampus(filter_type: str = None, limit: int = 30) -> str:
-    """列出海马体活跃记忆（Reasonix list 等价物）"""
+    """列出海马体活跃记忆"""
     try:
         from .ai_lib.storage import list_hippocampus
         home_dir = os.path.expanduser("~")
         return list_hippocampus(home_dir, filter_type=filter_type, limit=limit)
     except Exception as e:
         return f"❌ memory list failed: {e}"
+
+
+def _exec_read_memory(session_id: str) -> str:
+    """用 UUID 直接读取 library 完整记录"""
+    try:
+        from .ai_lib.storage import load_memory_by_uuid
+        home_dir = os.path.expanduser("~")
+        content = load_memory_by_uuid(home_dir, session_id)
+        if not content:
+            return f"Session {session_id} not found in library."
+        # 限制长度防止上下文溢出
+        if len(content) > 8000:
+            content = content[:8000] + f"\n\n... (truncated, {len(content)} chars total)"
+        return content
+    except Exception as e:
+        return f"❌ memory read failed: {e}"
 
 
 def _exec_compact_stats() -> str:
@@ -3262,9 +3310,8 @@ _LSP_MANAGER = LspManager()
 _RECOVERY_CTX = RecoveryContext()
 _APPROVAL_LEDGER = ApprovalTokenLedger()
 
-# 线程局部存储
-import threading as _threading_mod
-_thread_locals = _threading_mod.local()
+# 线程局部存储（使用 mcp_state 统一实例，保证 /tokens 等命令可读）
+# _thread_locals 已在文件顶部从 mcp_state 导入，此处不再重新定义
 
 
 def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
@@ -3324,12 +3371,14 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "ExitPlanMode":  lambda p: _exec_exit_plan_mode(),
         # ── 用户选择提问 ──
         "choose_ask":    lambda p: _exec_choose_ask(p.get("question", ""), p.get("options", [])),
-        # ── Library 记忆管理（Reasonix remember/forget/recall）──
+        # ── Library 记忆管理 ──
         "remember":     lambda p: _exec_remember_session(p.get("session_id", "")),
         "forget":       lambda p: _exec_forget_session(p.get("session_id", "")),
         "memory":       lambda p: (
             _exec_search_library(p.get("query", ""), p.get("limit", 8))
             if p.get("operation", "search") == "search"
+            else _exec_read_memory(p.get("session_id", ""))
+            if p.get("operation") == "read"
             else _exec_list_hippocampus(p.get("filter"), p.get("limit", 30))
         ),
         "compact_stats": lambda p: _exec_compact_stats(),
@@ -3574,7 +3623,7 @@ def _extract_paths_from_tool(tool_name: str, arguments: Dict) -> List[str]:
 
 def parse_mcp_tool_calls(text: str) -> List[Dict[str, str]]:
     """
-    从 AI 响应中解析 [tool:名称]JSON参数[tool:名称:done] 块（Reasonix 风格）。
+    从 AI 响应中解析 [tool:名称]JSON参数[tool:名称:done] 块。
     - 工具名: mcp__<server>__<tool> 格式
     - 块体为 JSON 参数字符串
     - 兼容旧格式：[tool:名 空格参数]...[tool:名:done]
@@ -4257,6 +4306,8 @@ def handle_ai(
     global _AI_INTERRUPTED
     _AI_INTERRUPTED = False
 
+    # _MANUAL_COMPACT_REQUESTED 通过 _mcp_shared 模块属性访问，无需 global
+
     current_session_id = request_id
     initial_question = content
     last_user_question = content  # 追踪最近一次用户输入，ESC 追问时更新
@@ -4432,40 +4483,20 @@ def handle_ai(
         
         no_memory_text = lang_text.get("no_memory", "No historical memory" if current_lang == "english" else "无历史记忆")
         # 记忆上下文注入：每次循环都从磁盘加载 library 记忆
-        # ── 缓存优化：记忆追加到末尾，保持前缀稳定 ──
+        # ── 缓存优化：原地更新 #聊天记忆（不删除不挪位，保持前缀字节级稳定）──
         if memory_section != no_memory_text:
             _memory_content = f"#聊天记忆\n{memory_section}"
-            # 查找并移除旧的记忆消息（可能在任何位置）
-            conversation_history = [m for m in conversation_history
-                                   if not (m.get("role") == "system" and m.get("content", "").startswith("#聊天记忆"))]
-            # 追加到末尾（API 调用前最后一条 system 消息）
-            conversation_history.append({"role": "system", "content": _memory_content})
-            
-            # 后续循环：只移除已在 library 里的用户提问，不删 system 消息
-            if interaction_count > 1:
-                _first_asst = next((i for i, m in enumerate(conversation_history)
-                                   if m.get("role") == "assistant"), None)
-                if _first_asst is not None:
-                    # 保留：所有 system 消息 + 第一个 assistant 及其之后的所有消息
-                    conversation_history = [m for i, m in enumerate(conversation_history)
-                                           if m.get("role") == "system" or i >= _first_asst]
-                    # 清理后如果无 user 消息，插入系统信号（告诉 AI 命令已执行、结果在 library 里）
-                    _has_user = any(m.get("role") == "user" for m in conversation_history)
-                    if not _has_user:
-                        if current_lang == "chinese":
-                            _continue_prompt = (
-                                "上一轮的命令已完成执行，执行结果已记录在上方 #聊天记忆 的 "
-                                "当前会话记忆(library) 部分。请根据执行结果判断任务是否完成："
-                                "若已完成则用 [ANSWER]yes 正常结束，若需继续则继续生成下一步命令。"
-                            )
-                        else:
-                            _continue_prompt = (
-                                "The previous round of commands has finished executing. "
-                                "Results are recorded in the #聊天记忆 Current Session Memory (library) section above. "
-                                "Please check the results and determine if the task is complete: "
-                                "if done, set [ANSWER]yes; if more work is needed, continue with next commands."
-                            )
-                        conversation_history.append({"role": "user", "content": _continue_prompt})
+            # 查找最后一条 #聊天记忆，原地更新；若不存在则追加
+            _mem_idx = -1
+            for _i in range(len(conversation_history) - 1, -1, -1):
+                _m = conversation_history[_i]
+                if _m.get("role") == "system" and _m.get("content", "").startswith("#聊天记忆"):
+                    _mem_idx = _i
+                    break
+            if _mem_idx >= 0:
+                conversation_history[_mem_idx]["content"] = _memory_content
+            else:
+                conversation_history.append({"role": "system", "content": _memory_content})
 
         # Plan 模式前缀：告知 AI 当前处于 plan 模式，禁止执行命令和文件修改
         # mode=="plan"（用户 ai plan 命令）或 _PLAN_MODE_ACTIVE（AI 调用 EnterPlanMode）
@@ -4673,6 +4704,13 @@ def handle_ai(
 
             ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
                                           path_validator=_mcp_path_validator)
+            # ── 采集工具结果（供 library 记录）──
+            if ok and tool_name in ("read_file", "grep_search", "glob_search", "get_file_info"):
+                try:
+                    from .ai_lib.storage import capture_tool_result
+                    capture_tool_result(tool_name, params, output)
+                except Exception:
+                    pass
             # 取前100字符用于面板展示
             _preview = output[:100] + ("..." if len(output) > 100 else "")
             tool_results_display.append({
@@ -4933,6 +4971,79 @@ def handle_ai(
             if log_info:
                 log_info(lang_text["api_call"].format(current_question[:50]), current_session_id)
 
+            # ── 手动对话压缩：仅 /compact 命令触发，不再自动压缩 ──
+            # 旧轮次 → Trident Supersede 去重 → summarize_messages 结构化摘要 → 注入 system
+            # 新轮次 → 保留原文（即时上下文不丢失）
+            if _mcp_shared._MANUAL_COMPACT_REQUESTED and interaction_count > 2:
+                try:
+                    from .ai_lib.memory_compact import (
+                        summarize_messages, stage1_supersede,
+                        get_compact_continuation_message,
+                    )
+                    _keep_last = 5  # 保留最近 5 条消息
+                    _total = len(conversation_history)
+
+                    # ── Guard: 不切断 tool_calls → tool_result 配对 ──
+                    # 扫描 ALL tool_calls 块，累积最小安全边界。
+                    # 任何 tool 结果跨越压缩边界的 tool_calls 块整体保留。
+                    _min_recent_idx = _total - _keep_last
+                    for _j in range(_total - 1, -1, -1):
+                        _m = conversation_history[_j]
+                        if _m.get("tool_calls"):
+                            _tool_end = _j + 1
+                            while _tool_end < _total and conversation_history[_tool_end].get("role") == "tool":
+                                _tool_end += 1
+                            # 如果此块的 tool 结果触及 _recent，则整块纳入 _recent
+                            if _tool_end > _min_recent_idx:
+                                _min_recent_idx = min(_min_recent_idx, _j)
+                    _keep_last = max(_keep_last, _total - _min_recent_idx)
+                    _keep_last = min(_keep_last, _total - 1)  # 至少保留 1 条在 _old
+
+                    _old = conversation_history[:-_keep_last] if _keep_last < _total else []
+                    _recent = conversation_history[-_keep_last:] if _keep_last > 0 else []
+
+                    if not _old:
+                        console.print("[dim]📦 对话压缩: 无可安全压缩的旧消息（tool_calls 链覆盖全部）[/]")
+                    else:
+                        # 转换为 entries 格式（兼容 Trident 管道）
+                        _old_entries = []
+                        for _i, _m in enumerate(_old):
+                            _role = _m.get("role", "?")
+                            _content = _m.get("content", "") or ""
+                            _tc = _m.get("tool_calls")
+                            _rc = _m.get("reasoning_content", "")
+                            _body = _content
+                            if _tc:
+                                _tc_names = [t.get("function", {}).get("name", "?") for t in _tc]
+                                _body = f"[tool_calls: {', '.join(_tc_names)}]\n{_content}"
+                            if _rc:
+                                _body = f"[reasoning]\n{_rc}\n\n{_body}"
+                            _old_entries.append({
+                                "session_id": f"turn_{_i}",
+                                "content": f"### {_role.upper()}\n{_body}",
+                                "time": "",
+                            })
+
+                        # Stage 1: Supersede — 同一文件先 VIEW 后 EDIT/WRITE → 去重 VIEW
+                        _deduped, _superseded = stage1_supersede(_old_entries)
+                        # 结构化摘要（scope / tools / files / timeline）
+                        _summary = summarize_messages(_deduped if _deduped else _old_entries)
+                        if _summary:
+                            _compact_msg = {
+                                "role": "system",
+                                "content": get_compact_continuation_message(_summary),
+                            }
+                            conversation_history = [_compact_msg] + _recent
+                            _saved = len(_old) - 1  # old messages replaced by 1 summary
+                            console.print(
+                                f"[dim]📦 对话压缩: {len(_old)} 条 → 摘要 "
+                                f"({_saved} 条节省, {_superseded} 条去重)[/]"
+                            )
+                except Exception:
+                    pass
+                finally:
+                    _mcp_shared._MANUAL_COMPACT_REQUESTED = False  # 单次触发，执行后复位
+
             with Live(initial_panel, console=console, refresh_per_second=15, transient=False) as live:
                 live_ref[0] = live
                 loading_flag[0] = False  # Live Panel 已接管展示
@@ -5035,7 +5146,9 @@ def handle_ai(
                 live_ref[0] = None
                 
         except Exception as e:
-            ai_result = {"error": f"SSE processing error: {str(e)}", "answer": "no", "ask": ""}
+            import traceback as _tb
+            _tb.print_exc(file=sys.stderr)
+            ai_result = {"error": f"SSE processing error: {type(e).__name__}: {e}", "answer": "no", "ask": ""}
         finally:
             loading_flag[0] = False
             live_ref[0] = None
@@ -5185,10 +5298,12 @@ def handle_ai(
                 last_user_question = user_answer  # 记录追问，供聊天记忆使用
                 message_appended = False           # 新输入 → 允许追加新消息
                 # 标准 messages：AI 提问 + 用户回答
-                _ask_msg = {"role": "assistant", "content": ai_ask.strip()}
                 _ask_reasoning = ai_result.get("_reasoning", "")
-                if _ask_reasoning:
-                    _ask_msg["reasoning_content"] = _ask_reasoning
+                _ask_msg = {
+                    "role": "assistant",
+                    "content": ai_ask.strip(),
+                    "reasoning_content": _ask_reasoning,  # thinking 模式必须回传
+                }
                 conversation_history.append(_ask_msg)
                 conversation_history.append({"role": "user", "content": user_answer})
                 current_question = f"{current_question}\n\nUser answer: {user_answer}" if current_lang == "english" else f"{current_question}\n\n用户回答：{user_answer}"
@@ -5317,14 +5432,19 @@ def handle_ai(
                 continue_asking = True
                 continue
 
-        # Plan 模式安全限制：未确认计划前，拦截所有命令执行和工具调用
+        # Plan 模式安全限制：未确认计划前，拦截非计划类命令和工具调用
         # 既支持 mode=="plan"（用户输入 ai plan），也支持 _PLAN_MODE_ACTIVE（AI 调用 EnterPlanMode）
         # 前 2 轮交互不拦截，让 AI 有机会探索代码库并生成计划
+        # ⚠️ 注意：submit_plan / mark_step_complete / ExitPlanMode / choose_ask
+        # 是 AI 在 plan 模式下唯一能用的工具，不能拦截它们
+        _plan_tools = {"submit_plan", "mark_step_complete", "ExitPlanMode", "choose_ask"}
         if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed and interaction_count > 2:
-            if ai_commands or tool_calls:
+            # 只拦截 ai_commands（shell 命令），不拦截 plan 类工具调用
+            _non_plan_calls = [tc for tc in tool_calls if tc.get("name", "") not in _plan_tools]
+            if ai_commands or _non_plan_calls:
                 console.print(lang_text.get("plan_blocked",
                     "⛔ Plan 模式：AI 命令/工具调用已被拦截。请先确认计划。"), style="bold red")
-                # 告诉 AI 为什么被拦 + 应该怎么做
+                # 告诉 AI 为什么被拦 + 应该怎么做，然后自动继续让 AI 响应
                 conversation_history.append({
                     "role": "system",
                     "content": _mcp_t(
@@ -5336,8 +5456,10 @@ def handle_ai(
                         " The user will review and confirm before execution is allowed."
                     )
                 })
-            ai_commands = []
-            tool_calls = []
+                ai_commands = []
+                tool_calls = []
+                # 清空流式状态，准备下一轮 API 调用（让 AI 看到拦截消息并响应）
+                continue  # 跳回循环顶部，用更新后的 conversation_history 重新调 API
         
         # ── 工具结果收集器（仅 function calling）──
         tool_results = []
@@ -5429,6 +5551,13 @@ def handle_ai(
                     # 先尝试内置 handler，走不通再走 MCP
                     ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
                                                   path_validator=_mcp_path_validator)
+                    # ── 采集工具结果 ──
+                    if ok and tool_name in ("read_file", "grep_search", "glob_search", "get_file_info"):
+                        try:
+                            from .ai_lib.storage import capture_tool_result
+                            capture_tool_result(tool_name, params, output)
+                        except Exception:
+                            pass
                 finally:
                     _status.stop()
 
@@ -5522,9 +5651,8 @@ def handle_ai(
                     "role": "assistant",
                     "content": None,  # DeepSeek thinking mode 要求 tool_call 时 content 为 null
                     "tool_calls": _tool_call_items,
+                    "reasoning_content": _reasoning,  # thinking 模式必须回传，空串也保留
                 }
-                if _reasoning:
-                    _assistant_msg["reasoning_content"] = _reasoning
                 conversation_history.append(_assistant_msg)
                 # tool role 结果消息
                 # 安全垫：确保 tool_results 长度与 tool_calls 一致，避免 API 报错
@@ -5532,10 +5660,21 @@ def handle_ai(
                 while len(_tool_results_safe) < len(tc_ids):
                     _tool_results_safe.append("⚠️ 该工具未执行（结果丢失）")
                 for i, res in enumerate(_tool_results_safe):
+                    # ── 工具结果截断（32KB head+tail） ──
+                    try:
+                        from .ai_lib.tool_results import truncate_tool_output, is_error_result
+                        _is_err = is_error_result(res)
+                        _trunc = truncate_tool_output(res, 32 * 1024)
+                        if _is_err:
+                            _trunc = "error: " + _trunc
+                    except Exception:
+                        _trunc = res
+                        _is_err = False
                     conversation_history.append({
                         "role": "tool",
                         "tool_call_id": tc_ids[i],
-                        "content": res,
+                        "content": _trunc,
+                        "is_error": _is_err,
                     })
             # 原生标记语言结果由 library 记忆系统持久化（record_ai_session），
             # 下一轮 build_memory_context 从磁盘加载注入提示词。
@@ -5550,6 +5689,16 @@ def handle_ai(
                     _tn = tc.get("name", "?")
                     _res = tool_results[_res_idx] if _res_idx < len(tool_results) else "(无结果)"
                     _res_idx += 1
+                    # MemoryRead/MemorySearch 结果只保留摘要行，正文不嵌入（防止多层套娃）
+                    if _tn in ("MemoryRead", "MemorySearch") and _res:
+                        _lines = _res.split("\n")
+                        _summary_lines = []
+                        for _l in _lines:
+                            if _l.startswith("📄") or _l.startswith("📋") or _l.startswith("🔍"):
+                                _summary_lines.append(_l)
+                                break
+                        if _summary_lines:
+                            _res = _summary_lines[0] + "\n_(正文已省略，使用 MemoryRead 重新查询)_"
                     _log_lines.append(f"- **工具**: `{_tn}`")
                     _log_lines.append(f"  ```")
                     _log_lines.append(f"  {_res}")
@@ -5565,11 +5714,13 @@ def handle_ai(
 
         # ── AI 纯文本回复 → 追加 assistant 消息 ──
         _ai_txt = (ai_result.get("txt", "") or "").strip()
-        if _ai_txt and not tool_calls:
-            _assistant_msg = {"role": "assistant", "content": _ai_txt}
-            _reasoning = ai_result.get("_reasoning", "")
-            if _reasoning:
-                _assistant_msg["reasoning_content"] = _reasoning
+        _reasoning = ai_result.get("_reasoning", "")
+        if (_ai_txt or _reasoning) and not tool_calls:
+            _assistant_msg = {
+                "role": "assistant",
+                "content": _ai_txt or None,
+                "reasoning_content": _reasoning,  # thinking 模式必须回传
+            }
             conversation_history.append(_assistant_msg)
 
         # ── 标记本轮已处理工具调用（命令的标记在 cmd_results 之后设置）──

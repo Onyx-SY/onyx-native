@@ -729,14 +729,16 @@ def should_try_path_resolution(token: str) -> bool:
     if token.startswith('-'):
         return False
     
-    # 跳过纯特殊符号组合
-    special_only_pattern = re.compile(r'^[\/\.\;\:\,\!\@\#\$\%\^\&\*\(\)\[\]\{\}\|\~\`\\]+$')
-    if special_only_pattern.match(token):
-        return False
-    
     # 包含路径相关字符（/ 或 .）则尝试解析
+    # 必须在 special_only 检查之前：/;ls 含 / 但也被 special_only 正则匹配，
+    # 路径核心 / 需要虚拟路径翻译，不能跳过
     if '/' in token or ('.' in token and len(token) > 1):
         return True
+
+    # 跳过纯特殊符号组合（不含 / 的纯符号 token）
+    special_only_pattern = re.compile(r'^[\.\;\:\,\!\@\#\$\%\^\&\*\(\)\[\]\{\}\|\~\`\\]+$')
+    if special_only_pattern.match(token):
+        return False
     
     # 其他情况：可能是文件名，也尝试解析
     if re.search(r'[a-zA-Z0-9_]', token):
@@ -852,8 +854,9 @@ def resolve_paths_in_multiline_text(text: str, resolve_path_func=None) -> str:
     if not text or not resolve_path_func:
         return text
     
-    # 快速路径：不含路径分隔符的文本无需解析
-    if '/' not in text and '~' not in text:
+    # 快速路径：不含路径相关字符的文本无需解析
+    # /  ~  ..  .  都可能是路径
+    if '/' not in text and '~' not in text and '..' not in text:
         return text
     
     lines = text.split('\n')

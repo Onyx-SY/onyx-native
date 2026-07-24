@@ -22,7 +22,7 @@
 #define MAX_PATH_LEN PATH_MAX
 #define ENV_OLDPWD "OLDPWD"
 #define SAFE_FREE(ptr) do { if (ptr) { free(ptr); ptr = NULL; } } while (0)
-#define FORBIDDEN_MSG "You can't cross /"
+#define FORBIDDEN_MSG "You cannot cross root dir"
 
 /* ================= perm_path 缓存（从Python传入） ================= */
 

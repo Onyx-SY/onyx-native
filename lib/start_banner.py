@@ -554,8 +554,8 @@ def _load_tips(language: str) -> list:
 
 def show_random_tip(language: str = "chinese") -> None:
     """
-    从 etc/tips.json 随机选取一条小贴士并显示。
-    类似游戏加载界面的 tips，帮助用户了解 Onyx 功能。
+    从 etc/tips.json 加权随机选取一条小贴士并显示。
+    权重高的提示（常用指令）出现频繁，权重低的（彩蛋）偶尔出现。
     
     Args:
         language: 语言 (chinese/english)
@@ -566,7 +566,16 @@ def show_random_tip(language: str = "chinese") -> None:
     if not tips:
         return
     
-    tip = random.choice(tips)
+    # 加权随机选取
+    total_weight = sum(item["weight"] for item in tips)
+    rand = random.uniform(0, total_weight)
+    cumulative = 0.0
+    tip = tips[0]["text"]
+    for item in tips:
+        cumulative += item["weight"]
+        if rand <= cumulative:
+            tip = item["text"]
+            break
     
     if not _init_rich():
         # fallback: 纯文本输出

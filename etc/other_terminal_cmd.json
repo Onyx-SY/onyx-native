@@ -213,7 +213,6 @@
         "sudo",
         "dirs",
         "popd",
-        "pushd",
-        "cd"
+        "pushd"
     ]
 }

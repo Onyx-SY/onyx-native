@@ -2,7 +2,7 @@
 """
 memory_compact.py — Trident 三阶段记忆压缩引擎
 
-从 Claw Code (Rust) 移植到 Python，适配 Onyx 的 library 记忆系统。
+Onyx library 记忆压缩引擎。
 
 三阶段：
   1. Supersede  — 文件操作去重：同文件先 VIEW 后 EDIT/WRITE → 标记 VIEW 过时
@@ -42,10 +42,33 @@ class CompactConfig:
 # ── Token 估算 ──
 
 def estimate_tokens(text: str) -> int:
-    """粗略估算文本 token 数：4 字符 ≈ 1 token (英文) / 1.5 字符 ≈ 1 token (混合)"""
+    """
+    估算文本 token 数（保守估计，实际偏差 ±20%）。
+    
+    DeepSeek tokenizer 特征：
+      - 英文单词 ≈ 1-1.5 tokens/词
+      - 中文字 ≈ 1.5-2 tokens/字
+      - 代码符号 ≈ 0.3-0.5 tokens/字符
+    
+    本实现：中英文分开计数后加权，对混合内容比纯 char/4 准 2-3 倍。
+    """
     if not text:
         return 0
-    return max(len(text) // 4, len(text.encode("utf-8")) // 3)
+    import re
+    # 英文单词（含下划线、数字）
+    eng_words = len(re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', text))
+    # 中文字符
+    cjk_chars = len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]', text))
+    # 剩余字符（标点、空格、换行等）
+    remaining = len(text) - eng_words * 4 - cjk_chars  # 粗略扣除
+    
+    # 加权估算：英文 ~1.3 tokens/词，中文 ~1.8 tokens/字，其余 ~0.25 tokens/字符
+    est = int(eng_words * 1.3 + cjk_chars * 1.8 + max(remaining, 0) * 0.25)
+    
+    # 保守下界：纯英文 char/4，纯中文 bytes/3
+    lower = max(len(text) // 4, len(text.encode("utf-8")) // 3)
+    
+    return max(est, lower)
 
 
 # ── Stage 1: Supersede — 文件操作去重 ──
@@ -393,9 +416,9 @@ def _generate_cluster_summary(entries: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-# ── 完整 summary 格式（取自 Claw Code compact.rs）──
+# ── 会话摘要格式 ──
 
-# 可恢复会话的前导/尾部指令（与 Claw Code 对齐）
+# 可恢复会话的前导/尾部指令
 _COMPACT_CONTINUATION_PREAMBLE = (
     "This session is being continued from a previous conversation that ran out of context. "
     "The summary below covers the earlier portion of the conversation.\n\n"
@@ -411,7 +434,7 @@ _COMPACT_DIRECT_RESUME_INSTRUCTION = (
 def summarize_messages(entries: List[Dict]) -> str:
     """
     对一批条目生成完整的 <summary> XML 摘要。
-    完全对齐 Claw Code compact.rs::summarize_messages()。
+    生成完整的会话摘要。
     
     包含: Scope, Tools mentioned, Recent user requests, 
           Pending work, Key files, Current work, Key timeline
@@ -540,7 +563,7 @@ def _infer_entry_role(entry: Dict) -> str:
 
 
 def _summarize_entry_blocks(entry: Dict) -> str:
-    """摘要一条目的内容块（对齐 Claw Code summarize_block()）"""
+    """摘要一条目的内容块"""
     content = entry.get("content", "")
     
     # 文件操作
@@ -570,15 +593,12 @@ def _truncate_summary(text: str, max_chars: int) -> str:
     return text[:max_chars] + "…"
 
 
-# ── 摘要格式化与合并（取自 Claw Code compact.rs）──
+# ── 摘要格式化与合并 ──
 
 def format_compact_summary(summary: str) -> str:
     """
     规范化压缩摘要为用户可读格式。
-    对齐 Claw Code format_compact_summary():
-      - 剥离 <analysis> 标签
-      - <summary> 内容提取为 "Summary:\n..."
-      - 合并连续空行
+    规范化压缩摘要为用户可读格式：剥离 analysis 标签、提取 summary、合并空行。
     """
     # 剥离 <analysis>
     result = _strip_tag_block(summary, "analysis")
@@ -607,7 +627,7 @@ def format_compact_summary(summary: str) -> str:
 def get_compact_continuation_message(summary: str) -> str:
     """
     生成压缩后可恢复会话的系统消息。
-    对齐 Claw Code get_compact_continuation_message().
+    生成压缩后可恢复会话的系统消息。
     """
     formatted = format_compact_summary(summary)
     parts = [_COMPACT_CONTINUATION_PREAMBLE + formatted]
@@ -619,10 +639,7 @@ def get_compact_continuation_message(summary: str) -> str:
 def merge_compact_summaries(existing_summary: Optional[str], new_summary: str) -> str:
     """
     合并已有压缩摘要和新摘要（重压缩时使用）。
-    对齐 Claw Code merge_compact_summaries():
-      - 展平 prior highlights（不嵌套）
-      - 新内容追加到 "Newly compacted context:" 下
-      - Key timeline 仅保留新的
+    合并已有压缩摘要和新摘要：展平 prior highlights、新内容追加、时间线只保留新的。
     """
     if not existing_summary:
         return new_summary
@@ -729,7 +746,7 @@ def extract_existing_compacted_summary(entries: List[Dict]) -> Optional[str]:
     return None
 
 
-# ── Summary 后压缩（取自 Claw Code summary_compression.rs）──
+# ── Summary 后压缩 ──
 
 class SummaryCompressionBudget:
     """摘要压缩预算"""
@@ -742,11 +759,7 @@ class SummaryCompressionBudget:
 def compress_summary(summary: str, budget: SummaryCompressionBudget = None) -> str:
     """
     优先级行选择压缩摘要。
-    对齐 Claw Code summary_compression.rs:
-      Priority 0: Summary:/Conversation summary:/核心详情行
-      Priority 1: 节标题（以 : 结尾）
-      Priority 2: 列表项（- 或空格开头）
-      Priority 3: 其他
+    优先级行选择压缩摘要：Priority 0 核心详情、1 节标题、2 列表项、3 其他。
     """
     if budget is None:
         budget = SummaryCompressionBudget()
@@ -831,7 +844,7 @@ def _selected_indices(selected: List[str], lines: List[str]) -> set:
 
 
 def _line_priority(line: str) -> int:
-    """确定行的优先级（对齐 Claw Code line_priority()）"""
+    """确定行的优先级"""
     if line in ("Summary:", "Conversation summary:") or _is_core_detail(line):
         return 0
     if _is_section_header(line):
@@ -859,6 +872,28 @@ def _is_section_header(line: str) -> bool:
 
 # ── 汇总压缩 ──
 
+# ── 压缩计数追踪 ──
+
+_COMPACTION_COUNT_FILE = ".compaction_count"
+
+def _read_compaction_count(library_dir: str) -> int:
+    """读取已压缩次数"""
+    try:
+        with open(os.path.join(library_dir, _COMPACTION_COUNT_FILE), "r") as f:
+            return int(f.read().strip())
+    except Exception:
+        return 0
+
+
+def _write_compaction_count(library_dir: str, count: int) -> None:
+    """写入压缩次数"""
+    try:
+        with open(os.path.join(library_dir, _COMPACTION_COUNT_FILE), "w") as f:
+            f.write(str(count))
+    except Exception:
+        pass
+
+
 class CompactResult:
     """压缩结果"""
     def __init__(self):
@@ -872,6 +907,7 @@ class CompactResult:
         self.final_count: int = 0
         self.tokens_saved_estimate: int = 0
         self.summary: str = ""
+        self.compaction_count: int = 0  # 累计压缩次数
 
 
 def compact_library_entries(entries: List[Dict],
@@ -891,9 +927,16 @@ def compact_library_entries(entries: List[Dict],
     
     result = CompactResult()
     result.original_count = len(entries)
+    result.compaction_count = 0
     
     if not entries:
         return result
+    
+    # 读取已有压缩计数（需要 library dir，通过 entry path 推断）
+    if entries and entries[0].get("path"):
+        lib_dir = os.path.dirname(entries[0]["path"])
+        result.compaction_count = _read_compaction_count(lib_dir) + 1
+        _write_compaction_count(lib_dir, result.compaction_count)
     
     # 计算原始 token
     original_tokens = sum(estimate_tokens(e.get("content", "")) for e in entries)
@@ -987,3 +1030,365 @@ def should_compact(entries: List[Dict], config: CompactConfig = None) -> bool:
     
     total_tokens = sum(estimate_tokens(e.get("content", "")) for e in entries)
     return total_tokens >= config.max_tokens
+
+
+# ── Live Conversation Compaction ──
+# 直接压缩 current_question 字符串（而非 library 文件）。
+# 参考 Claw-Code compact.rs 的 structured summary + resume-directly 设计。
+
+_COMPACT_LIVE_PREAMBLE = (
+    "## Earlier conversation (compacted to save context)\n"
+)
+_COMPACT_RESUME_INSTRUCTION = (
+    "Continue directly — do not acknowledge this summary.\n"
+)
+
+
+def compact_live_conversation(
+    current_question: str,
+    keep_last_rounds: int = 3,
+    max_bytes: int = 50 * 1024,
+) -> str:
+    """
+    将 current_question 中过旧的工具调用轮次替换为结构化摘要，
+    保留最近 N 轮完整内容。
+
+    设计目标（参考 Claw-Code）：
+      - 旧轮次 → 紧凑结构化摘要（Goal / Decisions / Files / Errors / Next）
+      - 新轮次 → 保留原文（保证即时上下文不丢失）
+      - 注入 resume-directly 指令（防止 AI 浪费 token 确认摘要）
+      - 摘要放在顶部（AI 先看到摘要建立全局认知，再看到最近细节）
+
+    Args:
+        current_question: 完整的 current_question 字符串
+        keep_last_rounds: 保留最近 N 轮工具调用完整内容
+        max_bytes: 超过此阈值才触发压缩
+
+    Returns:
+        压缩后的 current_question 字符串
+    """
+    if len(current_question.encode("utf-8")) <= max_bytes:
+        return current_question
+
+    # 按工具调用轮次切分
+    round_marker = r"### 第 \d+ 轮工具调用"
+    parts = re.split(f"({round_marker} [^\n]*)", current_question)
+
+    # 重组：每个轮次 = header + body
+    rounds = []
+    preamble = ""
+    i = 0
+    # 跳过第一个轮次标记之前的内容（初始 question + memory 等）
+    while i < len(parts) and not re.match(round_marker, parts[i]):
+        preamble += parts[i]
+        i += 1
+
+    while i < len(parts):
+        header = parts[i]  # "### 第 N 轮工具调用 (...)"
+        body = parts[i + 1] if i + 1 < len(parts) else ""
+        rounds.append((header, body))
+        i += 2
+
+    if len(rounds) <= keep_last_rounds:
+        return current_question
+
+    # 拆分：旧轮次 → 摘要，新轮次 → 保留原文
+    old_rounds = rounds[:-keep_last_rounds]
+    recent_rounds = rounds[-keep_last_rounds:]
+
+    # 生成结构化摘要（只摘要旧轮次的关键信息）
+    summary = _generate_live_summary(old_rounds)
+
+    # 组装输出：摘要 → 最近轮次原文
+    result_parts = [preamble.rstrip()]
+    result_parts.append("")
+    result_parts.append(_COMPACT_LIVE_PREAMBLE + summary)
+    result_parts.append("")
+    result_parts.append(_COMPACT_RESUME_INSTRUCTION)
+    result_parts.append("")
+
+    for header, body in recent_rounds:
+        result_parts.append(header)
+        result_parts.append(body)
+
+    return "\n".join(result_parts)
+
+
+def _generate_live_summary(rounds: List[Tuple[str, str]]) -> str:
+    """
+    从旧工具调用轮次中提取结构化摘要。
+    
+    输出格式（优先级从高到低，帮助 AI 注意力聚焦）：
+      ## Goal & Status     — 当前目标和进度
+      ## Decisions Made    — 已做的关键决策
+      ## Files Touched     — 涉及的文件
+      ## Errors & Fixes    — 遇到的错误及修复
+      ## Pending           — 待完成事项
+    """
+    # 收集所有轮次的文本
+    all_text = "\n".join(body for _, body in rounds)
+    all_text_lower = all_text.lower()
+
+    lines = []
+
+    # ── Goal & Status ──
+    goals = _extract_goals(all_text)
+    if goals:
+        lines.append("## Goal & Status")
+        for g in goals[:3]:
+            lines.append(f"- {g}")
+        lines.append("")
+
+    # ── Files Touched ──
+    files = set()
+    for _, body in rounds:
+        for match in re.finditer(r'`([^`]+\.(?:py|js|ts|go|rs|java|cpp|c|h|sh|json|yaml|yml|toml|md|html|css))`', body):
+            files.add(match.group(1))
+        # Also catch tool names with paths
+        for match in re.finditer(r'(?:read_file|write_file|edit_file|glob|search)\s+[`"]?([^\s`"]+)[`"]?', body):
+            candidate = match.group(1)
+            if "/" in candidate and "." in candidate.split("/")[-1]:
+                files.add(candidate)
+    if files:
+        lines.append("## Files Touched")
+        for f in sorted(files)[:10]:
+            lines.append(f"- `{f}`")
+        lines.append("")
+
+    # ── Errors & Fixes ──
+    errors = []
+    for _, body in rounds:
+        for match in re.finditer(
+            r'(?:error:|Error:|❌|Traceback|Exception|failed|失败|错误)[^\n]{0,200}',
+            body,
+        ):
+            err_text = match.group(0).strip()[:150]
+            if err_text not in errors:
+                errors.append(err_text)
+    if errors:
+        lines.append("## Errors & Fixes")
+        for e in errors[:5]:
+            lines.append(f"- {e}")
+        lines.append("")
+
+    # ── Decisions Made ──
+    decisions = []
+    for _, body in rounds:
+        for kw in ["decided", "chose", "opted", "went with", "决定", "选择", "采用"]:
+            idx = body.lower().find(kw)
+            if idx >= 0:
+                snippet = body[max(0, idx - 20):idx + 150].strip()
+                snippet = snippet.replace("\n", " ")[:160]
+                if snippet not in decisions:
+                    decisions.append(snippet)
+    if decisions:
+        lines.append("## Decisions Made")
+        for d in decisions[:5]:
+            lines.append(f"- {d}")
+        lines.append("")
+
+    # ── Pending ──
+    pending = []
+    for _, body in rounds:
+        for kw in ["todo", "next", "pending", "remaining", "待办", "下一步", "剩余"]:
+            idx = body.lower().find(kw)
+            if idx >= 0:
+                snippet = body[max(0, idx - 10):idx + 150].strip()
+                snippet = snippet.replace("\n", " ")[:160]
+                if snippet not in pending:
+                    pending.append(snippet)
+    if pending:
+        lines.append("## Pending")
+        for p in pending[:5]:
+            lines.append(f"- {p}")
+        lines.append("")
+
+    if not lines:
+        return f"({len(rounds)} earlier tool-call rounds compacted — no significant patterns detected.)"
+
+    return "\n".join(lines)
+
+
+def _extract_goals(text: str) -> List[str]:
+    """从文本中提取目标描述"""
+    goals = []
+    # Look for task/question lines in the preamble
+    for match in re.finditer(
+        r'(?:#Task|任务|Goal|目标|要做|需要)[：:\s]*([^\n]{10,200})',
+        text,
+        re.IGNORECASE,
+    ):
+        g = match.group(1).strip()
+        if len(g) > 10 and g not in goals:
+            goals.append(g)
+    # Also catch user questions as implicit goals
+    for match in re.finditer(
+        r'(?:用户提问|Question)[：:\s]*\n?([^\n]{15,200})',
+        text,
+    ):
+        g = match.group(1).strip()
+        if g not in goals:
+            goals.append(g)
+    return goals
+
+
+# ── Tool Pair Boundary Protection ──
+
+def compact_tool_pairs_safe(
+    messages: List[Dict],
+    preserve_recent: int = 4
+) -> List[Dict]:
+    """
+    安全压缩：确保不在 ToolUse/ToolResult 对中间切断。
+    
+    如果保留区的第一条消息是 ToolResult，但其前的 Assistant(ToolUse) 
+    在压缩区，则将边界回退以包含完整的工具对。
+    
+    Args:
+        messages: 消息列表，每条含 {"role": str, "content": str, ...}
+        preserve_recent: 保留最近 N 条完整消息
+    
+    Returns:
+        调整后的消息列表（保持工具对完整性）
+    """
+    if len(messages) <= preserve_recent:
+        return messages
+    
+    keep_from = max(0, len(messages) - preserve_recent)
+    
+    # 回退边界直到不撕裂工具对
+    while keep_from > 0 and keep_from < len(messages):
+        first_preserved = messages[keep_from]
+        
+        # 如果保留区第一条是 tool 角色
+        if first_preserved.get("role") == "tool":
+            preceding = messages[keep_from - 1]
+            # 前一条是 assistant 且有 tool_calls → 对完整，回退一条包含 assistant
+            if preceding.get("role") == "assistant" and preceding.get("tool_calls"):
+                keep_from -= 1
+                break
+            # 否则继续回退
+            keep_from -= 1
+        # 如果保留区第一条是 assistant 且有 tool_calls
+        elif (first_preserved.get("role") == "assistant" 
+              and first_preserved.get("tool_calls")):
+            # 检查后面的 tool 消息是否也都在保留区
+            # 如果助手调用了工具，工具结果也必须保留
+            call_ids = {tc.get("id") for tc in first_preserved.get("tool_calls", [])}
+            for j in range(keep_from + 1, len(messages)):
+                msg = messages[j]
+                if msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids:
+                    call_ids.discard(msg.get("tool_call_id"))
+                elif msg.get("role") != "tool":
+                    break
+            # 所有工具结果都在保留区 → OK
+            if not call_ids:
+                break
+            # 有孤儿工具结果 → 继续回退
+            keep_from -= 1
+        else:
+            break
+    
+    return messages
+
+
+# ── Keep Policy ──
+
+_KEEP_MARKERS = [
+    "[[keep]]", "[keep]", "<keep>", "<!-- keep -->",
+    "[[KEEP]]", "[KEEP]", "<KEEP>", "<!-- KEEP -->",
+]
+
+
+def has_keep_marker(message: Dict) -> bool:
+    """
+    检测用户是否用 [[keep]] 标记了此消息。
+    
+    匹配格式（大小写不敏感）：
+      - [[keep]] / [keep] / <keep> / <!-- keep -->
+      - 支持中英混合：[[保留]] / [保留]
+    """
+    content = message.get("content", "")
+    if message.get("role") != "user":
+        return False
+    
+    content_lower = content.strip().lower()
+    for marker in _KEEP_MARKERS:
+        if content_lower.startswith(marker.lower()):
+            return True
+    
+    # 中文标记
+    cn_markers = ["[[保留]]", "[保留]", "[[重要]]", "[重要]"]
+    for marker in cn_markers:
+        if content.strip().startswith(marker):
+            return True
+    
+    return False
+
+
+def is_error_message(message: Dict) -> bool:
+    """
+    检测是否为错误消息（tool result 以 error: 或 blocked: 开头）。
+    错误消息默认保留，防止压缩丢失关键诊断信息。
+    """
+    if message.get("role") != "tool":
+        return False
+    content = message.get("content", "").strip().lower()
+    return content.startswith("error:") or content.startswith("blocked:")
+
+
+def partition_keep_fold(
+    messages: List[Dict],
+    keep_errors: bool = True,
+    keep_user_marked: bool = True
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    将消息列表分为 keep（保留）和 fold（折叠）两部分。
+    
+    Keep 策略：
+      - 系统消息（role=system）→ keep
+      - 用户标记 [[keep]] → keep（如果 keep_user_marked=True）
+      - 错误消息（error:/blocked:）→ keep（如果 keep_errors=True）
+      - 先前压缩摘要（compaction-summary）→ keep
+      - 小规模用户消息（< 1500 tokens）→ keep
+      - 其余 → fold
+    
+    Returns:
+        (kept_messages, fold_messages)
+    """
+    kept = []
+    fold = []
+    
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        
+        # 系统消息永远保留
+        if role == "system":
+            kept.append(msg)
+            continue
+        
+        # 压缩摘要标记 ← 保留
+        if "<compaction-summary>" in content or "<session_compact_summary>" in content:
+            kept.append(msg)
+            continue
+        
+        # 用户 [[keep]] 标记
+        if keep_user_marked and has_keep_marker(msg):
+            kept.append(msg)
+            continue
+        
+        # 错误消息
+        if keep_errors and is_error_message(msg):
+            kept.append(msg)
+            continue
+        
+        # 小规模用户消息（< 1500 tokens）默认保留
+        if role == "user" and estimate_tokens(content) < 1500:
+            kept.append(msg)
+            continue
+        
+        # 其余 → 折叠
+        fold.append(msg)
+    
+    return kept, fold

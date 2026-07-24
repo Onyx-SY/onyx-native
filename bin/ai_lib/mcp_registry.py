@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MCP 工具注册表 — Reasonix 风格
+MCP 工具注册表
 
 替代全局 MCP_TOOLS_CACHE dict，提供线程安全的工具注册/查找/导出。
 支持：
@@ -24,7 +24,7 @@ class MCPRegistry:
     """
     线程安全的 MCP 工具注册表。
 
-    参照 Reasonix tool.Registry：
+    Registry 设计：
       - Add(tool)     → 注册一个工具
       - RemovePrefix  → 按前缀移除
       - Schemas()     → 导出给 LLM Provider
@@ -154,7 +154,7 @@ class MCPSchemaCache:
     """
     MCP 工具 Schema 持久化缓存。
 
-    参照 Reasonix plugin/cache.go：
+    Cache 设计：
       - 对 server 配置（command/args/env/url）做 SHA-256 指纹
       - 成功 handshake 后缓存 tools/prompts/resources schema
       - 下次启动指纹匹配则直接使用缓存，跳过握手

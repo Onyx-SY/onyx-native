@@ -9,11 +9,18 @@ if TYPE_CHECKING:
 
 
 def graceful_shutdown(ctx: "AppContext", request_id: str = "") -> None:
-    """优雅关闭：保存所有缓存 + 清理资源"""
+    """优雅关闭：保存所有缓存 + 清理资源 + 恢复终端"""
     if not request_id:
         request_id = str(uuid.uuid4())
 
     _disable_logging(ctx)
+
+    try:
+        # 恢复终端属性（raw → cooked）
+        from lib.terminal.exe import restore_terminal_attrs
+        restore_terminal_attrs()
+    except Exception:
+        pass
 
     try:
         _save_persistent_data(ctx, request_id)

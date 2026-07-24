@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MCP 传输层抽象 — Reasonix 风格
+MCP 传输层抽象
 
 定义 Transport 抽象基类，解耦 JSON-RPC 通信与业务逻辑。
 支持两种传输：
@@ -57,7 +57,7 @@ class StdioTransport(Transport):
     """
     通过子进程 stdin/stdout 的 JSON-RPC 2.0 传输。
 
-    设计要点（参照 Reasonix transport_stdio.go）：
+    设计要点：
       - callMu 序列化请求，因为共享管道一次只能一个请求
       - 专属 read_loop goroutine（Python 用线程）拥有 stdout，按 id 派发响应
       - 双 context 分离：lifeCtx（会话级）vs callCtx（每次调用带 timeout）
@@ -463,7 +463,7 @@ def create_transport(server_config: dict, startup_timeout: float = 10.0) -> Tran
     """
     根据服务器配置创建对应的 Transport 实例。
 
-    server_config 格式（参照 Reasonix mcp.json）：
+    server_config 格式：
     {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"],

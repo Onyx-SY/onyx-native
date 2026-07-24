@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from typing import Dict, Tuple, Optional
 import time
 
@@ -14,7 +15,7 @@ C_LIB = None
 C_LIB_AVAILABLE = False
 C_LIB_PATH = ""
 
-FORBIDDEN_MSG = "You can't cross /"
+FORBIDDEN_MSG = "You cannot cross root dir"
 
 PATH_RESOLVE_CACHE: Dict[str, Tuple[str, float, str]] = {}
 PATH_RESOLVE_CACHE_MAX = 1000  # 硬上限，防止内存泄漏
@@ -157,7 +158,87 @@ def _should_resolve(path: str) -> bool:
         return False
     if path.startswith("/") and _is_in_virtual_root(path):
         return False
+    # ..  /  ~  -  ./  ../  都需要解析
+    if path == "..":
+        return True
     return path.startswith(("/", "~", "-", "./", "../"))
+
+
+# === 特殊路径：真实存在，不转虚拟路径 ===
+_SPECIAL_REAL_PATHS = frozenset({
+    '/dev/null', '/dev/zero', '/dev/random', '/dev/urandom',
+    '/dev/stdin', '/dev/stdout', '/dev/stderr', '/dev/fd',
+    '/dev/tty', '/dev/pts',
+})
+
+
+def _is_all_special(s: str) -> bool:
+    """检查字符串是否全由非路径字符组成（用于判断 / 前的前缀是否是 shell 元字符而非路径名）"""
+    if not s:
+        return True  # 空前缀 = 以 / 开头
+    for ch in s:
+        if ch.isalnum() or ch in '._-~+@':
+            return False
+    return True
+
+
+def _is_special_real_path(path: str) -> bool:
+    """检查是否为真实存在的特殊路径（如 /dev/null），这些路径不应被虚拟路径转换"""
+    if path in _SPECIAL_REAL_PATHS:
+        return True
+    # /dev/ 下的子路径也保护
+    if path.startswith('/dev/') and os.path.exists(path):
+        return True
+    return False
+
+
+# 非路径字符正则：保留 0-9 a-z A-Z _ / .  其余替换为空格
+_NON_PATH_RE = re.compile(r'[^a-zA-Z0-9_/.]')
+
+
+def _extract_path_core(token: str) -> str:
+    """
+    提取 token 中的路径核心并检查是否越界。
+
+    算法（大道至简）：
+    1. 非路径字符全部替换为空格
+    2. split 后取第一个 token 作为路径核心
+    3. 解析核心路径，若越界返回 FORBIDDEN_MSG，否则返回原 token
+
+    例：
+        '..;ls'            → 核心 '..' → 未越界 → 返回 '..;ls'
+        'cd'               → 核心 'cd' → 不需要解析 → 返回 'cd'
+        '/dev/null'        → 特殊路径 → 返回 '/dev/null'
+        'simple_forum/'    → 核心 'simple_forum/' → 普通相对路径不解析 → 返回原值
+    """
+    if not token:
+        return token
+
+    if _is_special_real_path(token):
+        return token
+
+    # 替换非路径字符为空格，取第一个片段
+    cleaned = _NON_PATH_RE.sub(' ', token).strip()
+    if not cleaned:
+        return token
+
+    # 如果 token 本身已是纯路径（无 shell 元字符），不做掐头去尾
+    # 由 resolve_path 正常流程处理，避免递归
+    if cleaned == token:
+        return token
+
+    first = cleaned.split()[0]
+
+    # 不需要解析的：不含 / 且不是 .. 或 ./
+    if '/' not in first and first != '..' and not first.startswith('./') and not first.startswith('../'):
+        return token
+
+    # 解析核心路径：若越界则返回阻断消息
+    resolved = resolve_path(first)
+    if resolved == FORBIDDEN_MSG:
+        return FORBIDDEN_MSG
+
+    return token
 
 
 def resolve_path(path: str) -> str:
@@ -165,6 +246,17 @@ def resolve_path(path: str) -> str:
         return ""
 
     path = path.strip()
+
+    # === 掐头去尾：提取路径核心并检查越界 ===
+    # FORBIDDEN_MSG 是阻断信号，不再做路径解析
+    if path == FORBIDDEN_MSG:
+        return FORBIDDEN_MSG
+
+    checked = _extract_path_core(path)
+    if checked == FORBIDDEN_MSG:
+        return FORBIDDEN_MSG
+    if checked != path:
+        return checked
 
     if _is_root_overlap():
         return path

@@ -276,6 +276,27 @@ def load_chat_memory_for_context(home_dir: str, chat_name: str) -> str:
     return "\n".join(context_lines)
 
 
+# ── 工具结果采集（供 library 记录用）──
+
+_TOOL_RESULTS_BUFFER: List[Dict] = []  # 每轮工具执行结果暂存
+
+def capture_tool_result(tool_name: str, params: Dict, result: str) -> None:
+    """采集工具执行结果，下一轮 record_ai_session 消费并清空"""
+    _TOOL_RESULTS_BUFFER.append({
+        "name": tool_name,
+        "params": params,
+        "result": result,
+    })
+
+
+def _consume_tool_results() -> List[Dict]:
+    """取出并清空本轮工具结果"""
+    global _TOOL_RESULTS_BUFFER
+    data = _TOOL_RESULTS_BUFFER[:]
+    _TOOL_RESULTS_BUFFER = []
+    return data
+
+
 # ── 会话管理 ──
 
 def get_ai_session_library_dir(home_dir: str) -> str:
@@ -350,6 +371,15 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
     # ── 合并 native_results：优先用 markup_results 自动格式化 ──
     if markup_results and not native_results:
         native_results = _format_native_results(markup_results)
+    
+    # ── 采集工具执行结果（read_file / grep_search / glob_search）──
+    _captured = _consume_tool_results()
+    if _captured:
+        _tool_results_block = _format_tool_results(_captured)
+        if native_results:
+            native_results += "\n\n" + _tool_results_block
+        else:
+            native_results = _tool_results_block
     
     current_time = datetime.now()
     time_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
@@ -471,15 +501,65 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
         f.flush()
         os.fsync(f.fileno())
     
-    # ── 触发记忆压缩（如需要）──
-    # 每次记录后惰性检查，不阻塞主流程
-    try:
-        maybe_compact_library(home_dir)
-    except Exception:
-        pass  # 压缩失败不影响主流程
+    # ── 记忆压缩已改为手动触发（/compact 命令），不再自动执行 ──
+    # try:
+    #     maybe_compact_library(home_dir)
+    # except Exception:
+    #     pass  # 压缩失败不影响主流程
 
 
 # ── 文件操作结果格式化 ──
+
+def _format_tool_results(tool_results: List[Dict]) -> str:
+    """
+    格式化工具执行结果为 Markdown。
+    覆盖: read_file, grep_search, glob_search, get_file_info
+    """
+    if not tool_results:
+        return ""
+    
+    lines = []
+    for tr in tool_results:
+        name = tr.get("name", "?")
+        params = tr.get("params", {})
+        result = tr.get("result", "")
+        
+        if name == "read_file":
+            path = params.get("path", "?")
+            rng = params.get("range", "")
+            range_str = f" (range={rng})" if rng else " (full)"
+            lines.append(f"#### 📖 {name} — `{path}`{range_str}")
+            # 结果已带行号（_exec_read_file 返回格式）
+            if result:
+                lines.append(result[:5000])
+                if len(result) > 5000:
+                    lines.append(f"... (truncated, {len(result)} chars)")
+        
+        elif name == "grep_search":
+            pattern = params.get("pattern", "?")
+            path = params.get("path", ".")
+            lines.append(f"#### 🔍 {name} — pattern=`{pattern}` in `{path}`")
+            if result:
+                lines.append(result[:3000])
+                if len(result) > 3000:
+                    lines.append(f"... ({len(result)} chars total)")
+        
+        elif name == "glob_search":
+            pattern = params.get("pattern", "?")
+            lines.append(f"#### 🔎 {name} — `{pattern}`")
+            if result:
+                lines.append(result[:2000])
+        
+        elif name == "get_file_info":
+            path = params.get("path", "?")
+            lines.append(f"#### ℹ️ {name} — `{path}`")
+            if result:
+                lines.append(result[:500])
+        
+        lines.append("")
+    
+    return "\n".join(lines)
+
 
 def _format_native_results(markup_results: List[Dict]) -> str:
     """
@@ -682,14 +762,15 @@ def load_hippocampus_index(home_dir: str, chat_name: str = None) -> str:
         q = (msg.get("user_question", "") or "")[:60]
         tag_str = f" [{tag}]" if tag else ""
         cls_str = f" (class={cls})" if cls != "1" else ""
-        lines.append(f"- [{mid}]({sid}.txt){tag_str}{cls_str} — {q}")
+        lines.append(f"- [{mid}](library/{sid}){tag_str}{cls_str} — {q}")
     
     return "\n".join(lines)
 
 
 def estimate_session_tokens(markdown_content: str) -> int:
-    """粗略估算 Markdown 内容的 token 数（用于压缩阈值判断）"""
-    return max(len(markdown_content) // 4, len(markdown_content.encode("utf-8")) // 3)
+    """估算 Markdown 内容 token 数，委托 memory_compact.estimate_tokens"""
+    from .memory_compact import estimate_tokens
+    return estimate_tokens(markdown_content)
 
 
 def get_library_total_tokens(home_dir: str) -> int:
@@ -771,7 +852,7 @@ def maybe_compact_library(home_dir: str) -> Optional[str]:
     # 执行 Trident 三阶段压缩
     result = compact_library_entries(entries, config)
     
-    # ── 使用完整 Claw Code summary 格式 ──
+    # ── 生成完整摘要 ──
     # 对被压缩的条目生成完整 <summary>（含 Scope/Tools/KeyFiles/PendingWork/KeyTimeline）
     removed_entries = [e for e in entries 
                        if not any(ke.get("session_id") == e.get("session_id") 
@@ -814,7 +895,7 @@ def maybe_compact_library(home_dir: str) -> Optional[str]:
     except Exception:
         pass
     
-    # ── 写入可恢复会话消息（Claw Code 格式）──
+    # ── 写入可恢复会话消息 ──
     compact_session_id = f"compact_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     compact_path = os.path.join(library_dir, f"{compact_session_id}.txt")
     
@@ -958,22 +1039,28 @@ def get_compaction_stats(home_dir: str) -> str:
     total_tokens = get_library_total_tokens(home_dir)
     compacted_entries = sum(1 for f in entries if f.startswith("compact_") or f.startswith("collapsed_") or f.startswith("clustered_"))
     
+    # 读取压缩计数
+    from .memory_compact import _read_compaction_count
+    count = _read_compaction_count(library_dir)
+    
     return (
-        f"Library stats:\n"
+        f"Library stats (estimates ±20%):\n"
         f"  Active entries: {len(entries)} ({compacted_entries} compacted)\n"
         f"  Archived: {archived}\n"
+        f"  Compaction count: {count}\n"
         f"  Est. tokens: ~{total_tokens}\n"
-        f"  Auto-compact triggers at: >20 entries or >10K tokens"
+        f"  Auto-compact triggers at: >20 entries or >10K tokens\n"
+        f"  (Token count is a conservative estimate; actual usage depends on DeepSeek tokenizer)"
     )
 
 
-# ── remember / forget / recall 工具（取自 Reasonix 思路）──
+# ── 记忆管理工具 ──
 
 def mark_session_important(home_dir: str, session_id: str, chat_name: str = None) -> str:
     """
-    标记会话为重要（Reasonix `remember` 等价物）。
+    标记会话为重要。
     1. Library 文件插入 frontmatter importance:high
-    2. 海马体对应消息 class=10（永久保留，不低于 class 10 不会被压缩）
+    2. 海马体对应消息 class=10（永久保留）
     
     Returns:
         操作结果
@@ -1036,9 +1123,9 @@ def mark_session_important(home_dir: str, session_id: str, chat_name: str = None
 
 def archive_session(home_dir: str, session_id: str, chat_name: str = None) -> str:
     """
-    归档会话（Reasonix `forget` 等价物）。
+    归档会话。
     1. Library 文件移到 .archive/
-    2. 海马体对应消息 class=0（立即过期，从索引消失）
+    2. 海马体对应消息 class=0（从索引移除）
     
     Returns:
         操作结果
@@ -1085,7 +1172,7 @@ def archive_session(home_dir: str, session_id: str, chat_name: str = None) -> st
 
 def search_library(home_dir: str, query: str, limit: int = 8, chat_name: str = None) -> str:
     """
-    搜索海马体索引（Reasonix `recall` 等价物）。
+    BM25 搜索海马体索引。
     
     直接搜索海马体的 {question, response, tag} 字段，比搜索 library 纯文本文件
     更快更准——海马体已是结构化索引。
@@ -1178,7 +1265,7 @@ def search_library(home_dir: str, query: str, limit: int = 8, chat_name: str = N
             f"   session: {r['session_id']}\n"
             f"   {r['question']}"
         )
-    lines.append("\nUse load_memory_by_uuid(session_id) to read full library entry.")
+    lines.append("\nUse memory(session_id=<uuid>) to read full library entry.")
     
     return "\n".join(lines)
 
@@ -1257,7 +1344,7 @@ def compact_hippocampus(home_dir: str, chat_name: str = None, max_messages: int 
 def list_hippocampus(home_dir: str, chat_name: str = None, 
                      filter_type: str = None, limit: int = 30) -> str:
     """
-    列出海马体活跃记忆（Reasonix `memory list` 等价物）。
+    列出海马体活跃记忆。
     
     Args:
         filter_type: 可选过滤 class 等级（如 "10" 只列永久保留的）

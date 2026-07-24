@@ -177,11 +177,11 @@ Onyx Mode: {onyx_mode}
 {language_label}: {get_current_lang()}
 #Available tools ({tool_count})
 {chr(10).join(tool_list)}
-{ai_tools_prompt}"""
+{ai_tools_prompt}
+#Persistent memory (rarely changes — cached prefix)
+{onyx_ai_prompt if onyx_ai_prompt else '(none)'}"""
 
     _dynamic_suffix = f"""#Working directory: {os.getcwd()}
-#Persistent memory
-{onyx_ai_prompt if onyx_ai_prompt else '(none)'}
 
 #{task_label}
 {question}"""
@@ -215,24 +215,27 @@ Onyx Mode: {onyx_mode}
             pass
 
     # ── 构建 messages ──
+    # 缓存策略:
+    #   [system] agreement.md + hippocampus_index  ← 整块缓存命中（单次模式）
+    #   [system] hippocampus_index（对话模式，agreement.md 已在 messages[0] 中，避免重复）
+    #   messages                                     ← 每轮 append-only，前缀稳定
     if messages is None:
         _messages = []
         if system_prompt:
             sp_content = system_prompt
-            # 注入缓存稳定前缀到 system prompt 末尾
             if memory_block:
-                sp_content = sp_content.rstrip() + "\n\n# Persistent Memory (cache-stable)\n" + memory_block
+                sp_content = sp_content.rstrip() + "\n\n# Persistent Memory\n" + memory_block
             _messages.append({"role": "system", "content": sp_content})
         elif memory_block:
-            _messages.append({"role": "system", "content": "# Persistent Memory (cache-stable)\n" + memory_block})
+            _messages.append({"role": "system", "content": memory_block})
         _messages.append({"role": "user", "content": env_info})
     else:
-        # messages 已预构建：将 memory_block 作为独立的 system 消息前置
-        # 关键：独立消息 → 第一条不变 → DeepSeek 前缀缓存命中
+        # 对话模式：仅注入 hippocampus 索引（agreement.md 已在 conversation_history[0]）
+        # 不重复注入 system_prompt，避免前缀膨胀 + 重复 token 浪费
+        _messages = []
         if memory_block:
-            _messages = [{"role": "system", "content": "# Persistent Memory (cache-stable)\n" + memory_block}] + list(messages)
-        else:
-            _messages = list(messages)
+            _messages.append({"role": "system", "content": "# Persistent Memory\n" + memory_block})
+        _messages.extend(messages)
 
     # 保留 reasoning_content（DeepSeek thinking 模式要求回传）
     # 仅对不支持 thinking 的平台剥离该字段
@@ -376,12 +379,38 @@ Onyx Mode: {onyx_mode}
             _mcp_debug_fn(f"HTTP response: {response.status_code}")
 
             if response.status_code in (400, 422):
-                _detail = response.text[:500]
-                console.print(f"[red]❌ API 请求错误 ({response.status_code}): {_detail[:200]}[/]")
+                _detail = response.text[:2000]
+                # ── 写入调试文件：完整请求 payload + 响应 body ──
+                _deb_path = ""
+                try:
+                    _deb_dir = os.path.join(os.path.expanduser("~"), ".ai_s", "deb")
+                    os.makedirs(_deb_dir, exist_ok=True)
+                    _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    _deb_path = os.path.join(_deb_dir, f"http_{response.status_code}_{_ts}.json")
+                    _safe_payload = {}
+                    for _k, _v in payload.items():
+                        if _k == "messages":
+                            _safe_payload[_k] = [
+                                {**{mk: mv for mk, mv in m.items() if mk != "content"},
+                                 "content": str(m.get("content", ""))[:200] + ("..." if len(str(m.get("content", ""))) > 200 else "")}
+                                for m in _v
+                            ]
+                        else:
+                            _safe_payload[_k] = _v
+                    with open(_deb_path, "w", encoding="utf-8") as _df:
+                        _df.write(f"── HTTP {response.status_code} Request ──\n")
+                        json.dump(_safe_payload, _df, ensure_ascii=False, indent=2)
+                        _df.write(f"\n\n── Response Body ──\n{response.text[:10000]}")
+                except Exception:
+                    pass
+                console.print(f"[red]❌ API 请求错误 ({response.status_code})[/]")
+                console.print(f"[dim]   调试文件: {_deb_path}[/]")
+                if _detail:
+                    console.print(f"[red]   {_detail[:300]}[/]")
                 return {
-                    "error": f"请求参数错误 ({response.status_code}): {_detail}",
+                    "error": f"请求参数错误 ({response.status_code}): {_detail[:500]}",
                     "txt": f"❌ **API 请求失败 (HTTP {response.status_code})**\n\n{_detail[:500]}",
-                    "analysis": f"HTTP {response.status_code} 表示请求参数有问题（如 API Key、模型名或消息格式错误）。这不是临时故障，重试也无法解决，请检查配置。",
+                    "analysis": f"HTTP {response.status_code} 表示请求参数有问题（如 API Key、模型名或消息格式错误）。这不是临时故障，重试也无法解决，请检查配置。\n调试文件: {_deb_path}",
                     "answer": "yes",
                     "ask": ""
                 }
@@ -627,6 +656,35 @@ Onyx Mode: {onyx_mode}
 
             if _usage:
                 result["_usage"] = _usage
+                # ── 缓存诊断 ──
+                try:
+                    from .cache_diagnostics import (
+                        capture_prefix_shape, compare_shapes,
+                        extract_cache_tokens_from_usage, format_cache_report,
+                        SessionCacheStats,
+                    )
+                    import threading as _thr
+                    _tl = _thr.local()
+                    _prev = getattr(_tl, "cache_prev_shape", None)
+                    _stats = getattr(_tl, "cache_session_stats", None)
+                    if _stats is None:
+                        _stats = SessionCacheStats()
+                        _tl.cache_session_stats = _stats
+                    _cur = capture_prefix_shape(
+                        system_prompt=system_prompt or "",
+                        tools=tools or [],
+                        messages_prefix=memory_block or "",
+                        rewrite_version=getattr(_tl, "rewrite_version", 0),
+                    )
+                    hit, miss = extract_cache_tokens_from_usage(_usage)
+                    _diag = compare_shapes(_prev if _prev else _cur, _cur, hit, miss)
+                    _stats.record(_diag)
+                    _tl.cache_prev_shape = _cur
+                    result["_cache_report"] = format_cache_report(_diag)
+                    if debug_mode:
+                        console.print(f"[dim]📊 {result['_cache_report']}[/]")
+                except Exception:
+                    pass  # best-effort
             if _reasoning_display:
                 result["_reasoning"] = "".join(_reasoning_display)
             result["_debug"] = "\n".join(debug_lines) if debug_lines else ""
@@ -715,87 +773,78 @@ def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
                          referenced_memory_uuid: Optional[str], is_first_interaction: bool,
                          mode: str = "normal") -> str:
     """
-    构建瞬态记忆上下文（每轮变化，不参与前缀缓存）。
+    构建瞬态记忆上下文（按需查询型 — 不注入全量内容，由 AI 通过 MemoryRead/MemorySearch 按需拉取）。
     
-    包含：UUID 链历史 | 当前会话实时内容 | 引用记忆
+    仅注入：UUID 链索引（精简）| 当前会话尾部摘要（最近 2000 字符）| 引用记忆 ID
     
-    注意：LIBRARY.md 索引已移至 build_stable_prefix() 作为缓存稳定前缀。
+    全量历史内容通过 MemoryRead("library/<uuid>") / MemorySearch 按需查询，
+    避免每轮把不断增长的 library 全量注入为 cache miss。
     """
     lang = get_current_lang()
     is_en = lang == "english"
     parts = []
+    _MAX_CURRENT_SESSION_CHARS = 2000  # 当前会话最多注入 2000 字符的尾部摘要
 
     if mode == "normal":
-        # ── 瞬态记忆：UUID 链 + 当前会话（每轮变化，不参与缓存前缀）──
+        # ── UUID 链：仅索引（id/session_uuid/question 摘要），非全量内容 ──
         chat_memory = load_chat_memory_for_context(home_dir, chat_name)
-        uuid_chain = []
         if chat_memory:
-            uuid_chain.append(chat_memory)
+            header = (
+                "═══════════════════════════════════════\n"
+                " 历史会话索引 — 使用 MemoryRead(\"library/<uuid>\") 查看完整记录\n"
+                "═══════════════════════════════════════"
+            ) if is_en else (
+                "═══════════════════════════════════════\n"
+                " 历史会话索引 — 使用 MemoryRead(\"library/<uuid>\") 查看完整记录\n"
+                "═══════════════════════════════════════"
+            )
+            parts.append(header + "\n" + chat_memory)
 
         previous_uuid = get_previous_session_uuid(home_dir, chat_name, current_session_id, is_first_interaction)
         if previous_uuid:
-            prev_memory = load_memory_by_uuid(home_dir, previous_uuid)
-            if prev_memory:
-                prev_block = (
-                    f"\n--- {{UUID链: {previous_uuid}}} ---\n"
-                    f"{prev_memory.strip()}"
-                ) if is_en else (
-                    f"\n--- {{UUID链: {previous_uuid}}} ---\n"
-                    f"{prev_memory.strip()}"
-                )
-                uuid_chain.append(prev_block)
+            if is_en:
+                parts.append(f"💡 上一会话: library/{previous_uuid}.txt — MemoryRead 可查询")
+            else:
+                parts.append(f"💡 上一会话: library/{previous_uuid}.txt — MemoryRead 可查询")
 
-        if uuid_chain:
-            header = (
-                "═══════════════════════════════════════\n"
-                " UUID 链 — 历史参考（非当前对话，按 id/session 标记可精确引用）\n"
-                "═══════════════════════════════════════"
-            ) if is_en else (
-                "═══════════════════════════════════════\n"
-                " UUID 链 — 历史参考（非当前对话，每条带独立 id，可按 MEMORY 精确引用）\n"
-                "═══════════════════════════════════════"
-            )
-            parts.append(header + "\n" + "\n\n".join(uuid_chain))
-
+        # ── 当前会话：仅注入尾部摘要（最近 2000 字符）──
         existing_memory, _ = get_latest_ai_session(home_dir, current_session_id)
         if existing_memory and existing_memory.strip():
+            _trimmed = existing_memory.strip()
+            if len(_trimmed) > _MAX_CURRENT_SESSION_CHARS:
+                _trimmed = "…(earlier content omitted — use MemoryRead for full)\n\n" + _trimmed[-_MAX_CURRENT_SESSION_CHARS:]
             header = (
                 "═══════════════════════════════════════\n"
-                f" 当前会话（ongoing）— library/{current_session_id}.txt （实时更新）\n"
+                f" 当前会话 — library/{current_session_id}.txt （尾部摘要，MemoryRead 查全文）\n"
                 "═══════════════════════════════════════"
             ) if is_en else (
                 "═══════════════════════════════════════\n"
-                f" 当前会话（ongoing）— library/{current_session_id}.txt （实时更新）\n"
+                f" 当前会话 — library/{current_session_id}.txt （尾部摘要，MemoryRead 查全文）\n"
                 "═══════════════════════════════════════"
             )
-            parts.append(header + "\n" + existing_memory.strip())
+            parts.append(header + "\n" + _trimmed)
 
         if referenced_memory_uuid:
-            ref_memory = load_memory_by_uuid(home_dir, referenced_memory_uuid)
-            if ref_memory:
-                header = (
-                    "═══════════════════════════════════════\n"
-                    f" 引用记忆 — [MEMORY:{referenced_memory_uuid}]\n"
-                    "═══════════════════════════════════════"
-                ) if is_en else (
-                    "═══════════════════════════════════════\n"
-                    f" 引用记忆 — [MEMORY:{referenced_memory_uuid}]\n"
-                    "═══════════════════════════════════════"
-                )
-                parts.append(header + "\n" + ref_memory.strip())
+            if is_en:
+                parts.append(f"💡 引用记忆: [MEMORY:{referenced_memory_uuid}] — MemoryRead(\"library/{referenced_memory_uuid}\") 查询")
+            else:
+                parts.append(f"💡 引用记忆: [MEMORY:{referenced_memory_uuid}] — MemoryRead(\"library/{referenced_memory_uuid}\") 查询")
 
     elif mode in ["adv_code", "adv_terminal"]:
         existing_memory, _ = get_latest_ai_session(home_dir, current_session_id)
         if existing_memory and existing_memory.strip():
+            _trimmed = existing_memory.strip()
+            if len(_trimmed) > _MAX_CURRENT_SESSION_CHARS:
+                _trimmed = "…(earlier omitted — MemoryRead for full)\n\n" + _trimmed[-_MAX_CURRENT_SESSION_CHARS:]
             header = (
                 "═══════════════════════════════════════\n"
-                f" Current Session (library/{current_session_id}.txt)\n"
+                f" Current Session (library/{current_session_id}.txt) — tail summary\n"
                 "═══════════════════════════════════════"
             ) if is_en else (
                 "═══════════════════════════════════════\n"
-                f" 当前会话 (library/{current_session_id}.txt)\n"
+                f" 当前会话 (library/{current_session_id}.txt) — 尾部摘要\n"
                 "═══════════════════════════════════════"
             )
-            parts.append(header + "\n" + existing_memory.strip())
+            parts.append(header + "\n" + _trimmed)
 
     return "\n\n".join(parts) if parts else ("No historical memory" if is_en else "无历史记忆")

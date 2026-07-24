@@ -46,6 +46,7 @@ _SLASH_COMMANDS_CN: Dict[str, str] = {
     "/key":    "查看/更换 API 密钥",
     "/chat":   "管理聊天记忆 (list / switch <name> / new <name>)",
     "/mcp":    "MCP 服务器管理 (list / install <name> / remove <name>)",
+    "/compact": "手动压缩对话历史，释放上下文空间",
 }
 
 _SLASH_COMMANDS_EN: Dict[str, str] = {
@@ -67,6 +68,7 @@ _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/key":    "View/change API key",
     "/chat":   "Manage chat memory (list / switch <name> / new <name>)",
     "/mcp":    "MCP server management (list / install <name> / remove <name>)",
+    "/compact": "Manually compress conversation history to free context",
 }
 
 _HELP_TEXT_CN = """\
@@ -672,6 +674,13 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         ctx["show_time"] = not current
         status = _t("time_on", lang) if ctx["show_time"] else _t("time_off", lang)
         console.print(f"[dim]{status}[/]")
+        return True
+
+    elif cmd == "/compact":
+        """手动压缩对话历史"""
+        import bin.ai_lib.mcp_state as _mcp_shared
+        _mcp_shared._MANUAL_COMPACT_REQUESTED = True
+        console.print(f"[green]{_t('compact_queued', lang)}[/]")
         return True
 
     else:

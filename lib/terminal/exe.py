@@ -220,6 +220,13 @@ def _get_cwd_cached() -> str:
     return _cached_cwd
 
 
+def invalidate_cwd_cache() -> None:
+    """强制失效 CWD 缓存，使下次 _get_cwd_cached() 重新读取 os.getcwd()"""
+    global _cached_cwd, _cached_cwd_time
+    _cached_cwd = None
+    _cached_cwd_time = 0
+
+
 # ======================================================================
 # Utility Functions
 # ======================================================================
@@ -1103,12 +1110,30 @@ class PersistentShell:
 
     def get_current_cwd(self) -> Optional[str]:
         """
-        Get current working directory from shell process
+        Get current working directory from shell process.
+
+        优先使用 /proc/<pid>/cwd（Linux/Android，零延迟，无 PTY 污染风险），
+        回退到 PTY marker 方式（Windows / macOS / 非 Linux）。
 
         Returns:
             Current directory path or None if unable to retrieve
         """
-        if (self.master_fd is None and self._winpty_handle is None) or self.pid is None or self._dead:
+        if self.pid is None or self._dead:
+            return None
+
+        # === 快速路径：/proc/<pid>/cwd（Linux / Android） ===
+        proc_cwd = f"/proc/{self.pid}/cwd"
+        try:
+            if os.path.islink(proc_cwd) or os.path.exists(proc_cwd):
+                cwd = os.readlink(proc_cwd)
+                if cwd and os.path.isdir(cwd):
+                    debug_log(f"Got CWD via /proc: {cwd}")
+                    return os.path.abspath(cwd)
+        except (OSError, ValueError):
+            pass  # 回退到 PTY marker
+
+        # === 回退：PTY marker 方式（Windows / macOS / proc 不可用） ===
+        if (self.master_fd is None and self._winpty_handle is None):
             return None
 
         marker = generate_var_marker()
@@ -1155,7 +1180,7 @@ class PersistentShell:
                                 debug_log(f"Got CWD (fallback): {lines[0].strip()}")
                                 return os.path.abspath(lines[0].strip())
                         break
-            debug_log("Failed to get CWD")
+            debug_log("Failed to get CWD via PTY")
             return None
         except OSError as e:
             debug_log(f"Error getting CWD: {e}", 'error')
@@ -1411,13 +1436,23 @@ class PersistentShell:
         debug_log("Shell cleanup complete")
 
     def is_alive(self) -> bool:
-        """Check if shell is alive"""
+        """Check if shell is alive.
+        
+        优先检查 /proc/<pid>（Android/Linux 上 os.kill 可能因 SELinux 失败），
+        回退到 os.kill(pid, 0)。
+        """
         if self._dead or self.pid is None:
             return False
+        if platform.system() == "Windows":
+            return self._winpty_handle is not None and self._winpty_handle.isalive()
+        # 优先用 /proc/<pid> 检查（不受 SELinux 限制）
         try:
-            if platform.system() == "Windows":
-                # On Windows, check winpty handle
-                return self._winpty_handle is not None and self._winpty_handle.isalive()
+            if os.path.isdir(f"/proc/{self.pid}"):
+                return True
+        except OSError:
+            pass
+        # 回退到 os.kill
+        try:
             os.kill(self.pid, 0)
             return True
         except OSError:
@@ -1470,9 +1505,13 @@ def get_functions_from_shell() -> List[str]:
 
 
 def get_shell_cwd() -> Optional[str]:
-    """Get current working directory from persistent shell"""
+    """Get current working directory from persistent shell.
+    
+    直接读 shell CWD（优先 /proc/<pid>/cwd），不依赖 os.kill(pid, 0)
+    因为在 Android/Termux 等受限环境中 kill 可能因 SELinux 失败。
+    """
     global _persistent_shell
-    if _persistent_shell is None or not _persistent_shell.is_alive():
+    if _persistent_shell is None:
         _get_persistent_shell()
     if _persistent_shell:
         return _persistent_shell.get_current_cwd()
@@ -1648,10 +1687,14 @@ def cleanup_shell():
 
 def warmup_persistent_shell():
     """Pre-create persistent shell in background during startup.
-    By the time the first command arrives, shell is likely ready."""
+    Creates shell AND triggers prompt probe so the first real command
+    doesn't pay the 2s probe timeout."""
     def _warmup():
         try:
-            _get_persistent_shell()
+            shell = _get_persistent_shell()
+            # 触发 PS1 探测（避免首条命令等 2 秒超时）
+            if shell is not None:
+                shell._probe_and_learn_prompt()
             debug_log("Persistent shell pre-created in background")
         except Exception as e:
             debug_log(f"Background shell warmup failed: {e}", 'error')
@@ -1688,9 +1731,45 @@ def get_debug_session_info() -> Optional[Dict[str, str]]:
 
 
 # ======================================================================
+# Terminal attribute save/restore
+# ======================================================================
+_saved_term_attrs = None
+
+
+def save_terminal_attrs():
+    """保存当前终端属性，供 restore_terminal_attrs() 恢复。
+    由 main_loop 在进入 raw 模式前调用。"""
+    global _saved_term_attrs
+    try:
+        import termios as _t
+        fd = sys.stdin.fileno()
+        if os.isatty(fd):
+            _saved_term_attrs = _t.tcgetattr(fd)
+    except (ImportError, OSError):
+        _saved_term_attrs = None
+
+
+def restore_terminal_attrs():
+    """恢复终端属性到 save_terminal_attrs() 保存的状态。
+    由 graceful_shutdown / crash handler 调用，确保终端回到 cooked 模式。"""
+    global _saved_term_attrs
+    if _saved_term_attrs is None:
+        return
+    try:
+        import termios as _t
+        fd = sys.stdin.fileno()
+        if os.isatty(fd):
+            _t.tcsetattr(fd, _t.TCSANOW, _saved_term_attrs)
+            _saved_term_attrs = None
+    except (ImportError, OSError):
+        pass
+
+
+# ======================================================================
 # Auto-cleanup on module unload
 # ======================================================================
 @atexit.register
 def _atexit_cleanup():
-    """Clean up shell when Python process exits"""
+    """Clean up shell and restore terminal when Python process exits"""
+    restore_terminal_attrs()
     cleanup_shell()

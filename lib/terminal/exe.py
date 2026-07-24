@@ -577,9 +577,23 @@ class PersistentShell:
             is_windows = platform.system() == "Windows"
             fd_stdin = sys.stdin.fileno()
 
-            # 不再在此处 save/restore 终端属性：由外层 main_loop 统一管理 raw 模式。
-            # 这样交互式程序和 TUI 程序在命令运行时获得稳定的 raw 通道。
-            # 每个命令结束时也不再恢复——直到整个 Onyx 会话结束才恢复。
+            # 命令执行期间进入 raw 模式，确保 TUI 程序的逐键输入能正确转发到 PTY。
+            # 命令结束后恢复到 cooked 模式，与 bash/zsh 行为一致。
+            _passthrough_entered_raw = False
+            if not is_windows:
+                try:
+                    import termios as _pt
+                    if os.isatty(fd_stdin):
+                        save_terminal_attrs()
+                        _new_tty = _pt.tcgetattr(fd_stdin)
+                        _new_tty[0] &= ~(_pt.ICRNL | _pt.INLCR | _pt.IGNCR)
+                        _new_tty[3] &= ~(_pt.ICANON | _pt.ECHO | _pt.ISIG)
+                        _new_tty[6][_pt.VMIN] = 1
+                        _new_tty[6][_pt.VTIME] = 0
+                        _pt.tcsetattr(fd_stdin, _pt.TCSANOW, _new_tty)
+                        _passthrough_entered_raw = True
+                except (ImportError, OSError):
+                    pass
 
             old_sigint = None
             old_sigwinch = None
@@ -724,12 +738,17 @@ class PersistentShell:
             debug_log(f"Passthrough exception: {e}", 'error')
         finally:
             if not is_windows:
-                # 不再恢复终端属性：由外层 main_loop 统一管理 raw 模式生命周期。
-                # 仅恢复 Python 的信号 handlers。
+                # 恢复信号 handlers
                 if old_sigint:
                     signal.signal(signal.SIGINT, old_sigint)
                 if old_sigwinch and hasattr(signal, 'SIGWINCH'):
                     signal.signal(signal.SIGWINCH, old_sigwinch)
+                # 恢复终端到 cooked 模式（与 bash/zsh 一致）
+                if _passthrough_entered_raw:
+                    try:
+                        restore_terminal_attrs()
+                    except Exception:
+                        pass
 
         # v9.7+: Check if the safety-net SIGINT handler was triggered
         if not interrupted and _interrupted_flag['value']:

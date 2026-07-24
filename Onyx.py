@@ -3637,18 +3637,13 @@ def main_loop() -> None:
         # ========== 阶段7: 交互循环 ==========
         log_info(f"   阶段7-进入交互模式: 等待用户输入", request_id)
         
-        # ── 全局 raw 模式：整个会话期间 stdin 保持 raw 态，不再每条命令 save/restore ──
+        # ── 终端模式：保持 cooked，由 prompt_toolkit 和 _execute_passthrough 各自管理 raw 窗口 ──
+        # prompt_toolkit 的 prompt() 内部自动 save/enter raw/restore；
+        # _execute_passthrough 内部也独立管理 raw 模式（TUI 命令需要逐键转发）。
+        # 会话期间默认处于 cooked 模式，行为与 bash/zsh 一致。
         try:
             from lib.terminal.exe import save_terminal_attrs
             save_terminal_attrs()
-            import termios as _termios
-            if os.isatty(sys.stdin.fileno()):
-                _new_tty = _termios.tcgetattr(sys.stdin.fileno())
-                _new_tty[0] &= ~(_termios.ICRNL | _termios.INLCR | _termios.IGNCR)
-                _new_tty[3] &= ~(_termios.ICANON | _termios.ECHO | _termios.ISIG)
-                _new_tty[6][_termios.VMIN] = 1
-                _new_tty[6][_termios.VTIME] = 0
-                _termios.tcsetattr(sys.stdin.fileno(), _termios.TCSANOW, _new_tty)
         except (ImportError, OSError):
             pass
         # ────────────────────────────────────────────────────────────

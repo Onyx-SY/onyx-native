@@ -606,8 +606,12 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
                      'last_cache_hit', 'last_cache_miss'):
             if hasattr(_thread_locals, attr):
                 delattr(_thread_locals, attr)
+        # 清除持久对话历史
+        ctx.pop("_conversation_history", None)
         # 重置会话起始时间
         ctx["session_start"] = time.time()
+        # 生成新的 session_id
+        ctx["session_id"] = str(uuid.uuid4())
         confirm = _t("reset_done", lang)
         console.print(f"[green]{confirm}[/]")
         return True
@@ -825,6 +829,9 @@ def _call_ai_engine(
     try:
         # 使用 REPL 会话级 session_id，同一会话的所有交互写入同一个 library 文件
         call_request_id = ctx.get("session_id", str(uuid.uuid4()))
+        # ── REPL 持久对话：conversation_history 跨轮保留，AI 记住完整上下文 ──
+        # 始终传 list（首轮传空 list，handle_ai 检测到 len==0 自动构建 system 消息）
+        _conv_hist = ctx.get("_conversation_history", [])
         handle_ai(
             cmd_parts=cmd_parts,
             request_id=call_request_id,
@@ -835,7 +842,10 @@ def _call_ai_engine(
             user_mode=user_mode,
             parse_and_execute=parse_and_execute,
             _in_repl=True,
+            conversation_history=_conv_hist,
             **{k: v for k, v in kwargs.items() if k not in ("cmd_parts", "request_id", "onyx_module", "user_home_dir", "global_config", "user_info", "user_mode", "parse_and_execute")}
         )
+        # handle_ai 原地修改了 _conv_hist → 存回 ctx 供下一轮使用
+        ctx["_conversation_history"] = _conv_hist
     except Exception as e:
         console.print(f"[red]{_t('ai_error', ctx.get('lang', 'chinese')).format(str(e))}[/]")

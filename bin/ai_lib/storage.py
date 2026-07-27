@@ -492,12 +492,20 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
         content.append("")
     
     # 写入文件（Markdown 格式，append → 崩溃安全）
+    _raw_block = "\n".join(content).rstrip("\n")
+    # ── 前缀剥离：分隔线以上的缓存前缀不进入 library（仅保留分隔线以下的对话内容）──
+    try:
+        from .prompt_cache import strip_prompt_prefix
+        _raw_block = strip_prompt_prefix(_raw_block)
+    except Exception:
+        pass
+
     file_exists = os.path.exists(record_path)
     file_has_content = file_exists and os.path.getsize(record_path) > 0
     with open(record_path, "a", encoding="utf-8") as f:
         if file_has_content:
             f.write(f"\n\n---\n\n")
-        f.write("\n".join(content).rstrip("\n"))
+        f.write(_raw_block)
         f.flush()
         os.fsync(f.fileno())
     

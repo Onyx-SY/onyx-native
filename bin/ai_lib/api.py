@@ -34,6 +34,33 @@ _ACTIVE_RESPONSE = None
 
 # ── 持久记忆缓存（模块级，避免每轮读盘）──
 _ONYX_AI_PROMPT_CACHE: Optional[Tuple[str, float]] = None  # (content, mtime)
+
+# ── 缓存诊断持久化状态（模块级，按 session_id 隔离）──
+# 替换原 threading.local() 临时对象，确保 prev_shape/stats 跨 turn 正确累积
+_CACHE_DIAG_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_cache_diag_slot(session_id: str) -> Dict[str, Any]:
+    """获取或创建当前 session 的缓存诊断槽位。"""
+    key = session_id or "_default"
+    slot = _CACHE_DIAG_STATE.get(key)
+    if slot is None:
+        slot = {"prev_shape": None, "stats": None, "rewrite_version": 0}
+        _CACHE_DIAG_STATE[key] = slot
+    return slot
+
+
+def clear_cache_diag_state(session_id: str = "") -> None:
+    """会话结束时清理缓存诊断状态，避免长期运行的进程无限增长。"""
+    key = session_id or "_default"
+    _CACHE_DIAG_STATE.pop(key, None)
+
+
+def bump_rewrite_version(session_id: str = "") -> None:
+    """压缩/对话重写后调用，让 cache_diagnostics 正确归因缓存断裂。"""
+    slot = _get_cache_diag_slot(session_id)
+    slot["rewrite_version"] = slot.get("rewrite_version", 0) + 1
+
 from . import mcp_state as _mcp_state
 
 
@@ -61,10 +88,13 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
                     user_home_dir: str = None,
                     tools: Optional[List[Dict]] = None,
                     messages: Optional[List[Dict]] = None,
-                    memory_block: str = "") -> Dict[str, Any]:
+                    memory_block: str = "",
+                    session_id: str = "") -> Dict[str, Any]:
     """
     memory_block: 缓存稳定前缀（build_stable_prefix 输出），
                   注入 system prompt 末尾。同值返回相同 → DeepSeek 前缀缓存命中。
+
+    session_id: 当前会话 UUID，用于隔离缓存诊断状态和前缀比较文件。
     """
     # 惰性导入避免循环引用
     from .config import get_current_lang, get_prompt_text, load_key_conf
@@ -215,26 +245,29 @@ Onyx Mode: {onyx_mode}
             pass
 
     # ── 构建 messages ──
-    # 缓存策略:
-    #   [system] agreement.md + hippocampus_index  ← 整块缓存命中（单次模式）
-    #   [system] hippocampus_index（对话模式，agreement.md 已在 messages[0] 中，避免重复）
-    #   messages                                     ← 每轮 append-only，前缀稳定
+    # 缓存策略（统一前缀）:
+    #   [system] 统一前缀 (.prompt = agreement + tools + hippocampus + 分隔线)
+    #             ↑ 100% 稳定，DeepSeek 前缀缓存命中
+    #   [system] 动态环境 (cwd/time/git/onyx_ai.md)  ← 每轮变化，少量 miss
+    #   messages  ← 对话历史，append-only，前缀稳定
     if messages is None:
         _messages = []
-        if system_prompt:
-            sp_content = system_prompt
-            if memory_block:
-                sp_content = sp_content.rstrip() + "\n\n# Persistent Memory\n" + memory_block
-            _messages.append({"role": "system", "content": sp_content})
-        elif memory_block:
+        # 单次模式：如果提供了 memory_block（统一前缀），优先使用
+        if memory_block:
+            # memory_block 已包含 agreement.md + tools + hippocampus + separator
+            # system_prompt 不再单独注入，避免重复
             _messages.append({"role": "system", "content": memory_block})
+        elif system_prompt:
+            _messages.append({"role": "system", "content": system_prompt})
         _messages.append({"role": "user", "content": env_info})
     else:
-        # 对话模式：仅注入 hippocampus 索引（agreement.md 已在 conversation_history[0]）
-        # 不重复注入 system_prompt，避免前缀膨胀 + 重复 token 浪费
+        # 对话模式：统一前缀作为 messages[0] — 前缀 100% 稳定
+        # agreement.md 和 tools 已从 conversation_history[0] 移入 memory_block
+        # onyx_ai.md 仍在 conversation_history[0] 的末尾（动态部分，不影响前缀缓存）
         _messages = []
         if memory_block:
-            _messages.append({"role": "system", "content": "# Persistent Memory\n" + memory_block})
+            # memory_block = .prompt 内容 + 分隔线（来自 prompt_cache.get_prompt_prefix）
+            _messages.append({"role": "system", "content": memory_block})
         _messages.extend(messages)
 
     # 保留 reasoning_content（DeepSeek thinking 模式要求回传）
@@ -463,10 +496,11 @@ Onyx Mode: {onyx_mode}
                         chunk = json.loads(data_str)
                         if not isinstance(chunk, dict):
                             continue
+                        # ── 捕获 usage（可能出现在空 choices 的 chunk 或最后一帧同时带 choices）──
+                        _chunk_usage = chunk.get("usage")
+                        if _chunk_usage:
+                            _usage = _chunk_usage
                         if not chunk.get("choices"):
-                            usage_info = chunk.get("usage")
-                            if usage_info:
-                                _usage = usage_info
                             continue
                         choices = chunk.get("choices", [])
                         if not choices or not isinstance(choices[0], dict):
@@ -523,7 +557,15 @@ Onyx Mode: {onyx_mode}
                             continue
                         ctype = chunk.get("type", "")
 
-                        if ctype == "content_block_start":
+                        if ctype == "message_start":
+                            # Anthropic 的 cache_read_input_tokens / cache_creation_input_tokens
+                            # 只出现在 message_start 事件中，必须在此采集
+                            _msg_obj = chunk.get("message", {})
+                            _start_usage = _msg_obj.get("usage")
+                            if isinstance(_start_usage, dict):
+                                _usage.update(_start_usage)
+
+                        elif ctype == "content_block_start":
                             cb = chunk.get("content_block", {})
                             if not isinstance(cb, dict):
                                 continue
@@ -569,7 +611,8 @@ Onyx Mode: {onyx_mode}
                                 pass  # 工具调用将在循环结束后处理
                             usage_info = chunk.get("usage")
                             if usage_info:
-                                _usage = usage_info
+                                # merge 而非覆盖，保留 message_start 采集到的缓存字段
+                                _usage.update(usage_info)
 
                         elif ctype == "message_stop":
                             break
@@ -654,32 +697,34 @@ Onyx Mode: {onyx_mode}
                 debug_lines.append("── Parsed ──")
                 debug_lines.append(json.dumps(result, ensure_ascii=False, indent=2)[:2000])
 
+            # ── 透传平台缓存支持标记 ──
+            result["_cache_supported"] = plat_info.get("supports_prompt_cache", False)
+
             if _usage:
                 result["_usage"] = _usage
-                # ── 缓存诊断 ──
+                # ── 缓存诊断（模块级持久化，按 session_id 隔离）──
                 try:
                     from .cache_diagnostics import (
                         capture_prefix_shape, compare_shapes,
                         extract_cache_tokens_from_usage, format_cache_report,
                         SessionCacheStats,
                     )
-                    import threading as _thr
-                    _tl = _thr.local()
-                    _prev = getattr(_tl, "cache_prev_shape", None)
-                    _stats = getattr(_tl, "cache_session_stats", None)
+                    _slot = _get_cache_diag_slot(session_id)
+                    _prev = _slot["prev_shape"]
+                    _stats = _slot["stats"]
                     if _stats is None:
                         _stats = SessionCacheStats()
-                        _tl.cache_session_stats = _stats
+                        _slot["stats"] = _stats
                     _cur = capture_prefix_shape(
                         system_prompt=system_prompt or "",
                         tools=tools or [],
                         messages_prefix=memory_block or "",
-                        rewrite_version=getattr(_tl, "rewrite_version", 0),
+                        rewrite_version=_slot.get("rewrite_version", 0),
                     )
                     hit, miss = extract_cache_tokens_from_usage(_usage)
                     _diag = compare_shapes(_prev if _prev else _cur, _cur, hit, miss)
                     _stats.record(_diag)
-                    _tl.cache_prev_shape = _cur
+                    _slot["prev_shape"] = _cur
                     result["_cache_report"] = format_cache_report(_diag)
                     if debug_mode:
                         console.print(f"[dim]📊 {result['_cache_report']}[/]")

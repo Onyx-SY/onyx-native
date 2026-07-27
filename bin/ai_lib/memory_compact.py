@@ -811,10 +811,11 @@ def _normalize_summary_lines(summary: str, max_line_chars: int) -> List[str]:
 def _select_lines_by_priority(lines: List[str], budget: SummaryCompressionBudget) -> List[str]:
     """按优先级选择行，遵守预算限制"""
     selected = []
+    selected_idx: set = set()  # 直接维护索引集合，避免 O(n²) 查找
     
     for priority in range(4):
         for i, line in enumerate(lines):
-            if i in _selected_indices(selected, lines):
+            if i in selected_idx:
                 continue
             if _line_priority(line) != priority:
                 continue
@@ -828,19 +829,9 @@ def _select_lines_by_priority(lines: List[str], budget: SummaryCompressionBudget
                 continue
             
             selected.append(line)
+            selected_idx.add(i)
     
     return selected
-
-
-def _selected_indices(selected: List[str], lines: List[str]) -> set:
-    """返回已选中行的索引集合"""
-    indices = set()
-    for s in selected:
-        try:
-            indices.add(lines.index(s))
-        except ValueError:
-            pass
-    return indices
 
 
 def _line_priority(line: str) -> int:
@@ -1044,6 +1035,42 @@ _COMPACT_RESUME_INSTRUCTION = (
 )
 
 
+def _extract_actionable_reminder(summary: str, max_items: int = 4) -> str:
+    """
+    从压缩摘要中提取待办/错误要点，生成精简 Reminder 页脚。
+
+    只回显 Pending / Errors 的关键信息（不重复整份摘要），
+    放在上下文末尾，紧邻 LLM 下一步生成点，对抗 "lost in the middle"。
+    """
+    reminders = []
+    in_pending = False
+    in_errors = False
+
+    for line in summary.split("\n"):
+        stripped = line.strip()
+        if stripped == "## Pending":
+            in_pending = True
+            in_errors = False
+            continue
+        if stripped == "## Errors & Fixes":
+            in_errors = True
+            in_pending = False
+            continue
+        if stripped.startswith("## "):
+            in_pending = False
+            in_errors = False
+            continue
+        if (in_pending or in_errors) and stripped.startswith("- "):
+            reminders.append(stripped)
+            if len(reminders) >= max_items:
+                break
+
+    if not reminders:
+        return ""
+
+    return "## Reminder (do not repeat — just act)\n" + "\n".join(reminders)
+
+
 def compact_live_conversation(
     current_question: str,
     keep_last_rounds: int = 3,
@@ -1110,6 +1137,12 @@ def compact_live_conversation(
     for header, body in recent_rounds:
         result_parts.append(header)
         result_parts.append(body)
+
+    # ── Reminder 页脚：紧邻生成点回显 Pending / Errors，对抗 "lost in the middle" ──
+    reminder = _extract_actionable_reminder(summary)
+    if reminder:
+        result_parts.append("")
+        result_parts.append(reminder)
 
     return "\n".join(result_parts)
 

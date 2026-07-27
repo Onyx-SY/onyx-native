@@ -4,6 +4,7 @@
     "name": "深度求索DeepSeek",
     "api_url": "https://api.deepseek.com/v1/chat/completions",
     "stream_format": "openai",
+    "supports_prompt_cache": true,
     "models": [
       "deepseek-v4-pro",
       "deepseek-v4-flash"
@@ -23,6 +24,7 @@
     "name": "OpenAI",
     "api_url": "https://api.openai.com/v1/chat/completions",
     "stream_format": "openai",
+    "supports_prompt_cache": true,
     "models": [
       "gpt-5.5",
       "gpt-5.5-instant",
@@ -42,6 +44,7 @@
     "name": "Anthropic",
     "api_url": "https://api.anthropic.com/v1/messages",
     "stream_format": "anthropic",
+    "supports_prompt_cache": true,
     "models": [
       "claude-sonnet-4-6",
       "claude-opus-4-8",
@@ -60,6 +63,7 @@
     "name": "月之暗面Kimi",
     "api_url": "https://api.moonshot.cn/v1/chat/completions",
     "stream_format": "openai",
+    "supports_prompt_cache": false,
     "models": [
       "kimi-k2.6",
       "kimi-k2.7-code",
@@ -76,6 +80,7 @@
     "name": "智谱GLM",
     "api_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     "stream_format": "openai",
+    "supports_prompt_cache": false,
     "models": [
       "glm-5",
       "glm-5-turbo",
@@ -93,6 +98,7 @@
     "name": "通义千问qwen",
     "api_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
     "stream_format": "openai",
+    "supports_prompt_cache": false,
     "models": [
       "qwen3.5-plus",
       "qwen3.6-plus",
@@ -111,6 +117,7 @@
     "name": "字节跳动豆包Doubao",
     "api_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
     "stream_format": "openai",
+    "supports_prompt_cache": false,
     "models": [
       "doubao-seed-2.1-turbo",
       "doubao-seed-2.1-pro",
@@ -128,6 +135,7 @@
     "name": "零一万物Yi",
     "api_url": "https://api.lingyiwanwu.com/v1/chat/completions",
     "stream_format": "openai",
+    "supports_prompt_cache": false,
     "models": [
       "yi-lightning",
       "yi-vision-max"
@@ -143,6 +151,7 @@
     "name": "Meta Llama",
     "api_url": "https://api.llama-api.com/chat/completions",
     "stream_format": "openai",
+    "supports_prompt_cache": false,
     "models": [
       "llama4-maverick",
       "llama4-scout"

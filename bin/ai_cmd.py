@@ -3877,6 +3877,7 @@ def handle_ai(
     log_warning: Callable = None,
     security_log: Callable = None,
     _in_repl: bool = False,
+    conversation_history: List[Dict] = None,
 ) -> None:
     from io import StringIO
     import sys as sys_module
@@ -4343,92 +4344,15 @@ def handle_ai(
     _repeat_success = {}         # 操作签名 → 成功次数：>=3 时触发重复警告
 
     # ── 标准对话历史（messages 结构）──
-    conversation_history: List[Dict] = []
+    # REPL 模式：conversation_history 由外部维护，跨 handle_ai 调用持久保留
+    _external_history = conversation_history is not None
+    if not _external_history:
+        conversation_history: List[Dict] = []
     import platform as _pf
-    _env_info = (
-        f"System: {_pf.system()} - {_pf.release()}\n"
-        f"User: {os.environ.get('USER', '?')}\n"
-        f"Working directory: {os.getcwd()}\n"
-        f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        f"#AI tools\n{ai_tools_prompt}\n"
-    )
-    # 读取 onyx_ai.md 最高指示
-    _onyx_prompt_path = os.path.join(user_home_dir, ".ai_s", "onyx_ai.md")
-    _onyx_ai_prompt = ""
-    if os.path.exists(_onyx_prompt_path):
-        try:
-            with open(_onyx_prompt_path, "r", encoding="utf-8") as _f:
-                _onyx_ai_prompt = _f.read().strip()
-        except Exception:
-            pass
-    if _onyx_ai_prompt:
-        _env_info += f"\n#最高指示（持久记忆）\n{_onyx_ai_prompt}\n"
 
-    # ── 项目上下文自动注入（git 状态 + 指令文件）──
-    _project_context = ""
-    try:
-        _git_root = os.getcwd()
-        # git status（简短）
-        _git_status = _run_shell_cmd("git status --short 2>/dev/null | head -30")
-        if _git_status:
-            _project_context += f"#Git 状态\n{_git_status}\n"
-            # git 当前分支
-            _git_branch = _run_shell_cmd("git rev-parse --abbrev-ref HEAD 2>/dev/null")
-            if _git_branch:
-                _project_context = f"分支: {_git_branch}\n" + _project_context
-            # git diff（前 30KB）
-            _git_diff = _run_shell_cmd("git diff --no-color 2>/dev/null | head -500")
-            if _git_diff and len(_git_diff) > 100:
-                _diff_str = _git_diff[:30000]
-                if len(_git_diff) > 30000:
-                    _diff_str += f"\n…[diff 过长，截断至 30000 字符，共 {len(_git_diff)} 字符]"
-                _project_context += f"#Git 变更\n{_diff_str}\n"
-            # 最近 5 条 commit
-            _git_log = _run_shell_cmd("git log --oneline -5 2>/dev/null")
-            if _git_log:
-                _project_context += f"#最近提交\n{_git_log}\n"
-        # 指令文件自动发现（CLAUDE.md / AGENTS.md / .onyx/rules/*）
-        _instruction_files = []
-        for _root in [_git_root] if _git_status else [os.getcwd()]:
-            for _fname in ["CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"]:
-                _fpath = os.path.join(_root, _fname)
-                if os.path.exists(_fpath):
-                    _instruction_files.append(_fpath)
-            # .onyx/ 目录
-            _onyx_dir = os.path.join(_root, ".onyx")
-            if os.path.isdir(_onyx_dir):
-                for _fname in ["CLAUDE.md", "instructions.md"]:
-                    _fpath = os.path.join(_onyx_dir, _fname)
-                    if os.path.exists(_fpath):
-                        _instruction_files.append(_fpath)
-                _rules_dir = os.path.join(_onyx_dir, "rules")
-                if os.path.isdir(_rules_dir):
-                    for _rf in sorted(os.listdir(_rules_dir)):
-                        if _rf.endswith((".md", ".txt", ".mdc")):
-                            _instruction_files.append(os.path.join(_rules_dir, _rf))
-        # 读取指令文件内容（限制每个 4KB，总 12KB）
-        _total_inst_chars = 0
-        _inst_lines = []
-        for _fpath in _instruction_files:
-            if _total_inst_chars > 12000:
-                break
-            try:
-                with open(_fpath, "r", encoding="utf-8") as _f:
-                    _content = _f.read()[:4000]
-                _rel = os.path.relpath(_fpath, _git_root) if _git_root else _fpath
-                _inst_lines.append(f"### {_rel}\n{_content}")
-                _total_inst_chars += len(_content)
-            except Exception:
-                pass
-        if _inst_lines:
-            _project_context += "#项目指令\n" + "\n\n".join(_inst_lines) + "\n"
-    except Exception:
-        pass
-
-    if _project_context:
-        _env_info = _project_context + "\n" + _env_info
-
-    # ── 加载核心系统提示词 agreement.md ──
+    # ── 提前加载海马体索引 + agreement（供 _env_info 和 .prompt 使用）──
+    _hippocampus_index = build_stable_prefix(user_home_dir)
+    _agreement_text = ""
     try:
         _agreement_paths = [
             os.path.join(ROOT_DIR, "onyx", "etc", "ai", "agreement.md"),
@@ -4437,20 +4361,130 @@ def handle_ai(
         for _ap in _agreement_paths:
             if os.path.exists(_ap):
                 with open(_ap, "r", encoding="utf-8") as _af:
-                    _env_info = _af.read() + "\n\n" + _env_info
+                    _agreement_text = _af.read()
                 break
     except Exception:
         pass
 
-    _system_msg = {"role": "system", "content": _env_info}
-    conversation_history.append(_system_msg)
-    conversation_history.append({"role": "user", "content": initial_question})
+    if not _external_history or len(conversation_history) == 0:
+        # ── 首次进入：构建动态环境信息（不含静态部分 — 静态部分进入 .prompt 统一前缀）──
+        _env_info = (
+            f"System: {_pf.system()} - {_pf.release()}\n"
+            f"User: {os.environ.get('USER', '?')}\n"
+            f"Working directory: {os.getcwd()}\n"
+            f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        )
+
+        # ── 项目上下文自动注入（git 状态 + 指令文件）──
+        _project_context = ""
+        try:
+            _git_root = os.getcwd()
+            # git status（简短）
+            _git_status = _run_shell_cmd("git status --short 2>/dev/null | head -30")
+            if _git_status:
+                _project_context += f"#Git 状态\n{_git_status}\n"
+                # git 当前分支
+                _git_branch = _run_shell_cmd("git rev-parse --abbrev-ref HEAD 2>/dev/null")
+                if _git_branch:
+                    _project_context = f"分支: {_git_branch}\n" + _project_context
+                # git diff（前 30KB）
+                _git_diff = _run_shell_cmd("git diff --no-color 2>/dev/null | head -500")
+                if _git_diff and len(_git_diff) > 100:
+                    _diff_str = _git_diff[:30000]
+                    if len(_git_diff) > 30000:
+                        _diff_str += f"\n…[diff 过长，截断至 30000 字符，共 {len(_git_diff)} 字符]"
+                    _project_context += f"#Git 变更\n{_diff_str}\n"
+                # 最近 5 条 commit
+                _git_log = _run_shell_cmd("git log --oneline -5 2>/dev/null")
+                if _git_log:
+                    _project_context += f"#最近提交\n{_git_log}\n"
+            # 指令文件自动发现（CLAUDE.md / AGENTS.md / .onyx/rules/*）
+            _instruction_files = []
+            for _root in [_git_root] if _git_status else [os.getcwd()]:
+                for _fname in ["CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"]:
+                    _fpath = os.path.join(_root, _fname)
+                    if os.path.exists(_fpath):
+                        _instruction_files.append(_fpath)
+                # .onyx/ 目录
+                _onyx_dir = os.path.join(_root, ".onyx")
+                if os.path.isdir(_onyx_dir):
+                    for _fname in ["CLAUDE.md", "instructions.md"]:
+                        _fpath = os.path.join(_onyx_dir, _fname)
+                        if os.path.exists(_fpath):
+                            _instruction_files.append(_fpath)
+                    _rules_dir = os.path.join(_onyx_dir, "rules")
+                    if os.path.isdir(_rules_dir):
+                        for _rf in sorted(os.listdir(_rules_dir)):
+                            if _rf.endswith((".md", ".txt", ".mdc")):
+                                _instruction_files.append(os.path.join(_rules_dir, _rf))
+            # 读取指令文件内容（限制每个 4KB，总 12KB）
+            _total_inst_chars = 0
+            _inst_lines = []
+            for _fpath in _instruction_files:
+                if _total_inst_chars > 12000:
+                    break
+                try:
+                    with open(_fpath, "r", encoding="utf-8") as _f:
+                        _content = _f.read()[:4000]
+                    _rel = os.path.relpath(_fpath, _git_root) if _git_root else _fpath
+                    _inst_lines.append(f"### {_rel}\n{_content}")
+                    _total_inst_chars += len(_content)
+                except Exception:
+                    pass
+            if _inst_lines:
+                _project_context += "#项目指令\n" + "\n\n".join(_inst_lines) + "\n"
+        except Exception:
+            pass
+
+        if _project_context:
+            _env_info = _project_context + "\n" + _env_info
+
+        # ── 读取 onyx_ai.md 最高指示（追加到 _env_info 末尾，不进入前缀缓存）──
+        _onyx_prompt_path = os.path.join(user_home_dir, ".ai_s", "onyx_ai.md")
+        _onyx_ai_prompt = ""
+        if os.path.exists(_onyx_prompt_path):
+            try:
+                with open(_onyx_prompt_path, "r", encoding="utf-8") as _f:
+                    _onyx_ai_prompt = _f.read().strip()
+            except Exception:
+                pass
+        if _onyx_ai_prompt:
+            _env_info += f"\n#最高指示（持久记忆）\n{_onyx_ai_prompt}\n"
+
+        # ── 海马体索引：追加到动态部分末尾（不进入前缀缓存，避免微增导致断裂）──
+        if _hippocampus_index:
+            _env_info += f"\n#历史会话索引\n{_hippocampus_index}\n"
+
+        _system_msg = {"role": "system", "content": _env_info}
+        conversation_history.append(_system_msg)
+        conversation_history.append({"role": "user", "content": initial_question})
+    else:
+        # ── 已有上下文：直接追加新用户问题，不重建系统消息 ──
+        conversation_history.append({"role": "user", "content": initial_question})
 
     current_question = initial_question  # 用于日志/估算，API 实际走 conversation_history
 
-    # ── 缓存稳定前缀：只算一次，会话期间绝不变化 ──
-    # 注入 system prompt 第一条消息 → DeepSeek 前缀缓存命中
-    _stable_prefix = build_stable_prefix(user_home_dir)
+    # ── 统一前缀缓存：仅 agreement.md + 工具描述（真正 100% 静态）──
+    # 海马体索引已移至 _env_info 末尾（动态部分，不参与前缀缓存）
+    from .ai_lib.prompt_cache import (
+        build_prompt_file, delete_prompt_file, refresh_prompt_tmp,
+        track_and_rotate, get_prompt_prefix, format_hit_rate_summary,
+        ensure_tmp_dir, get_hit_rate_log_path,
+    )
+    # ── 统一前缀：仅 agreement.md + 工具描述（真正 100% 静态）──
+    # 海马体索引不进入前缀——它每轮微增会导致 API 缓存断裂，
+    # 改为追加到 _env_info 末尾（动态部分，不影响前缀缓存）
+    ensure_tmp_dir(user_home_dir)
+    delete_prompt_file(user_home_dir)
+    build_prompt_file(
+        home_dir=user_home_dir,
+        system_prompt=_agreement_text,
+        tools_prompt=ai_tools_prompt,
+    )
+    refresh_prompt_tmp(user_home_dir, current_session_id)
+
+    # _stable_prefix 指向统一前缀（来自 2.tmp，按 session_id 隔离）
+    _stable_prefix = get_prompt_prefix(user_home_dir, current_session_id)
 
     while continue_asking:
         _tool_calls_processed_this_round = False
@@ -5035,6 +5069,9 @@ def handle_ai(
                             }
                             conversation_history = [_compact_msg] + _recent
                             _saved = len(_old) - 1  # old messages replaced by 1 summary
+                            # 通知缓存诊断：rewrite 版本号 +1，归因缓存断裂为日志重写
+                            from .ai_lib.api import bump_rewrite_version as _bump
+                            _bump(current_session_id)
                             console.print(
                                 f"[dim]📦 对话压缩: {len(_old)} 条 → 摘要 "
                                 f"({_saved} 条节省, {_superseded} 条去重)[/]"
@@ -5096,6 +5133,8 @@ def handle_ai(
                                          if t.get("function", {}).get("name") in _plan_only]
                     else:
                         _active_tools = native_tools
+                    # ── 前缀缓存命中率追踪：记录本轮与上一轮的前缀匹配率 ──
+                    _hit_rate_this_round = track_and_rotate(user_home_dir, current_session_id)
                     api_raw_result = call_ai_api_sse(
                         question="", 
                         messages=conversation_history,
@@ -5111,6 +5150,7 @@ def handle_ai(
                     user_home_dir=user_home_dir,
                     tools=_active_tools,
                     memory_block=_stable_prefix,
+                    session_id=current_session_id,
                     )
                     _mcp_debug(f"call_ai_api_sse 返回: {'interrupted' if (api_raw_result or {}).get('_interrupted') else 'OK' if api_raw_result else 'None'}")
                 except Exception as _api_exc:
@@ -5360,13 +5400,35 @@ def handle_ai(
             console.print(render_analysis_panel(analysis_content))
         
         # ── Token usage stats (from stream_options.include_usage) ──
-        _usage_info = ai_result.get("_usage")
+        _usage_info = ai_result.get("_usage") if isinstance(ai_result, dict) else None
         if _usage_info:
             _total = _usage_info.get("total_tokens", 0)
             _prompt = _usage_info.get("prompt_tokens", 0)
             _completion = _usage_info.get("completion_tokens", 0)
-            _cache_hit = _usage_info.get("prompt_cache_hit_tokens", 0)
-            _cache_miss = _usage_info.get("prompt_cache_miss_tokens", 0)
+            # ── Anthropic 兼容：字段名不同（input_tokens / output_tokens）──
+            _input_t = _usage_info.get("input_tokens", 0)
+            _output_t = _usage_info.get("output_tokens", 0)
+            if not _prompt and _input_t:
+                _prompt = _input_t
+            if not _total:
+                _total = _prompt + _completion
+            if not _completion and _output_t:
+                _completion = _output_t
+                _total = _prompt + _completion
+            # 兼容多种 API 的 cache token 字段名（DeepSeek / OpenAI / Anthropic）
+            _cache_hit = (
+                _usage_info.get("prompt_cache_hit_tokens", 0)
+                or _usage_info.get("cache_hit_tokens", 0)
+                or _usage_info.get("cache_read_input_tokens", 0)
+                or _usage_info.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+            )
+            _cache_miss = (
+                _usage_info.get("prompt_cache_miss_tokens", 0)
+                or _usage_info.get("cache_miss_tokens", 0)
+                or _usage_info.get("cache_creation_input_tokens", 0)
+            )
+            if not _cache_miss and _prompt:
+                _cache_miss = _prompt - _cache_hit
             # 存下精确 token 值（末尾显示用，纯磁盘架构不依赖内存 tracker）
             if _prompt:
                 _thread_locals.last_prompt_tokens = _prompt
@@ -5382,11 +5444,39 @@ def handle_ai(
             _thread_locals.session_total_completion += _completion
             _thread_locals.session_total_cache_hit += _cache_hit
             _thread_locals.session_round_count = getattr(_thread_locals, 'session_round_count', 0) + 1
+            _cache_supported = ai_result.get("_cache_supported", True) if isinstance(ai_result, dict) else True
             parts = [f"⚡ {_total} tokens"]
-            if _cache_hit:
-                saved_pct = _cache_hit / (_cache_hit + _cache_miss) * 100 if (_cache_hit + _cache_miss) else 0
-                parts.append(f"💰 cache {saved_pct:.0f}% hit")
+            if _cache_supported:
+                if _cache_hit:
+                    saved_pct = _cache_hit / (_cache_hit + _cache_miss) * 100 if (_cache_hit + _cache_miss) else 0
+                    parts.append(f"💰 cache {saved_pct:.0f}% hit")
+                else:
+                    parts.append("💰 cache 0% hit")
+            else:
+                parts.append("💰 cache n/a (platform)")
+            # 本地前缀命中率（与 API 缓存互补）
+            try:
+                _local_rate = _hit_rate_this_round
+            except NameError:
+                _local_rate = None
+            if _local_rate and _local_rate > 0:
+                parts.append(f"📋 prefix {_local_rate:.0%}")
             console.print(f"  [dim]{' · '.join(parts)}[/]")
+        else:
+            # 无 _usage 时回退：估算 + 本地前缀命中率
+            try:
+                _local_rate = _hit_rate_this_round
+            except NameError:
+                _local_rate = None
+            _parts = []
+            if conversation_history:
+                _total_chars = sum(len(str(m.get("content", ""))) for m in conversation_history)
+                _est = _total_chars // 3 + 1500
+                _parts.append(f"⚡ ~{_est} tokens")
+            if _local_rate and _local_rate > 0:
+                _parts.append(f"📋 prefix {_local_rate:.0%}")
+            if _parts:
+                console.print(f"  [dim]{' · '.join(_parts)}[/]")
         
         # ---- Plan 确认流程（纯引导模式）----
         if plan_text and plan_text.strip():
@@ -5425,8 +5515,15 @@ def handle_ai(
 
             elif plan_choice == "confirm":
                 console.print(lang_text.get("plan_confirmed", "✅ 计划已确认，即将进入执行阶段"), style="bold green")
-                # 将确认后的计划内容追加到 AI 的上下文
-                conversation_history.append({"role": "user", "content": f"[用户已确认以下计划，请开始执行]:\n{_plan_display}"})
+                conversation_history.append({"role": "user", "content": "[用户已确认计划，请按步骤开始执行]"})
+                # ── 截断 conversation_history 中 submit_plan 的工具结果 ──
+                # AI 已经在第一轮看到过计划全文，确认后用简短标记替换，
+                # 避免后续每轮重复发送数百 token 的计划正文
+                for _i in range(len(conversation_history) - 1, -1, -1):
+                    _m = conversation_history[_i]
+                    if _m.get("role") == "tool" and _m.get("is_plan_result"):
+                        _m["content"] = "[计划已确认，按步骤执行]"
+                        break
                 _pending_plan = ""
                 plan_confirmed = True
                 continue_asking = True
@@ -5615,6 +5712,8 @@ def handle_ai(
                 continue_asking = False
 
             # ── 提取 submit_plan / mark_step_complete 结果 ──
+            # submit_plan 完整内容保留在 conversation_history 中（AI 首次需要看到），
+            # 同时存入 _pending_plan 供面板显示。确认后由 plan 流程截断。
             for _tc_idx, _tc in enumerate(tool_calls):
                 _tc_name = _tc.get("name", "")
                 if _tc_name.endswith("submit_plan"):
@@ -5670,11 +5769,13 @@ def handle_ai(
                     except Exception:
                         _trunc = res
                         _is_err = False
+                    _is_plan = tool_calls[i].get("name", "").endswith("submit_plan") if i < len(tool_calls) else False
                     conversation_history.append({
                         "role": "tool",
                         "tool_call_id": tc_ids[i],
                         "content": _trunc,
                         "is_error": _is_err,
+                        "is_plan_result": _is_plan,
                     })
             # 原生标记语言结果由 library 记忆系统持久化（record_ai_session），
             # 下一轮 build_memory_context 从磁盘加载注入提示词。
@@ -6099,6 +6200,16 @@ def handle_ai(
                     current_question = follow_up
                     conversation_history.append({"role": "user", "content": follow_up})
                     continue_asking = True
+
+    # ── 前缀缓存命中率汇总 ──
+    try:
+        _summary = format_hit_rate_summary(user_home_dir, current_lang, current_session_id)
+        console.print(f"\n[dim]{_summary}[/]")
+        # 存储日志路径到 _thread_locals（供 REPL Ctrl+X 查阅）
+        _log_path = get_hit_rate_log_path(user_home_dir, current_session_id)
+        _thread_locals._hit_rate_log_path = _log_path
+    except Exception:
+        pass
 
     # 恢复原始 SIGINT 处理器
     import signal as _signal

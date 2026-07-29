@@ -349,6 +349,9 @@ _MCP_DEBUG = False
 _AI_INTERRUPTED = False
 _MCP_DEBUG_START: float = 0.0  # --debug 启动时的基准时间
 
+# 持久化调试模式：ai --debug 进入 REPL 后，跨 handle_ai 调用保持 debug_mode=True
+_PERSIST_DEBUG = False
+
 
 def _mcp_debug(msg: str) -> None:
     """--debug 模式实时追踪：打印带时间戳的消息（输出到 stderr 确保立即可见）"""
@@ -3884,8 +3887,8 @@ def handle_ai(
     from contextlib import contextmanager
 
     # ── --debug 必须在最开头解析，否则 MCP 初始化卡住时没有追踪输出 ──
-    # 每次 handle_ai 调用先复位，避免上次 --debug 残留
-    global _MCP_DEBUG, _MCP_DEBUG_START
+    # 每次 handle_ai 调用先复位，避免上次 --debug 残留（_PERSIST_DEBUG 除外）
+    global _MCP_DEBUG, _MCP_DEBUG_START, _PERSIST_DEBUG
     _MCP_DEBUG = False
     _MCP_DEBUG_START = 0.0
     debug_mode = False
@@ -3893,10 +3896,16 @@ def handle_ai(
         debug_mode = True
         _MCP_DEBUG = True
         _MCP_DEBUG_START = time.time()
-        cmd_parts.remove("--debug")
+        # 不移除 --debug，留给 parse_arguments 处理（用于触发 interactive 模式）
         # 用 stderr 输出确保立即可见（stdout 可能被 Live Panel 等捕获）
         sys_module.stderr.write(f"[{time.time()-_MCP_DEBUG_START:06.2f}s] 🔍 DEBUG 模式已启用 — 实时追踪每个函数调用和耗时\n")
         sys_module.stderr.flush()
+    elif _PERSIST_DEBUG:
+        # ai --debug 进入 REPL 后，后续 handle_ai 调用自动继承 debug 模式
+        debug_mode = True
+        _MCP_DEBUG = True
+        if _MCP_DEBUG_START == 0.0:
+            _MCP_DEBUG_START = time.time()
 
     if user_home_dir is None:
         user_home_dir = USER_HOME_DIR
@@ -4048,6 +4057,21 @@ def handle_ai(
             if log_error:
                 log_error(f"Failed to check session file size: {str(e)}", request_id)
         return True
+
+    # ── --debug 无附加参数时进入交互式 REPL，而非报错 ──
+    if debug_mode and len(cmd_parts) <= 1:
+        _PERSIST_DEBUG = True  # 跨 handle_ai 调用保持 debug 模式（已在函数顶部声明 global）
+        from bin.ai_interactive import ai_interactive_session as _repl
+        _repl(
+            user_home_dir=user_home_dir,
+            onyx_module=onyx_module,
+            global_config=global_config,
+            user_info=user_info,
+            user_mode=user_mode,
+            parse_and_execute=parse_and_execute,
+        )
+        _PERSIST_DEBUG = False  # REPL 退出时复位
+        return
 
     parse_result = parse_arguments(cmd_parts, lang_text, onyx_module)
     if len(parse_result) == 9:
@@ -4367,12 +4391,10 @@ def handle_ai(
         pass
 
     if not _external_history or len(conversation_history) == 0:
-        # ── 首次进入：构建动态环境信息（不含静态部分 — 静态部分进入 .prompt 统一前缀）──
+        # ── 首次进入：构建静态环境信息（动态部分 cwd/time 由 api.py 追加到消息末尾）──
         _env_info = (
             f"System: {_pf.system()} - {_pf.release()}\n"
             f"User: {os.environ.get('USER', '?')}\n"
-            f"Working directory: {os.getcwd()}\n"
-            f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
         )
 
         # ── 项目上下文自动注入（git 状态 + 指令文件）──
@@ -4457,10 +4479,12 @@ def handle_ai(
 
         _system_msg = {"role": "system", "content": _env_info}
         conversation_history.append(_system_msg)
-        conversation_history.append({"role": "user", "content": initial_question})
+        _time_tag = f"\n\n[⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')} | 📂 {os.getcwd()}]"
+        conversation_history.append({"role": "user", "content": initial_question + _time_tag})
     else:
         # ── 已有上下文：直接追加新用户问题，不重建系统消息 ──
-        conversation_history.append({"role": "user", "content": initial_question})
+        _time_tag = f"\n\n[⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')} | 📂 {os.getcwd()}]"
+        conversation_history.append({"role": "user", "content": initial_question + _time_tag})
 
     current_question = initial_question  # 用于日志/估算，API 实际走 conversation_history
 
@@ -4486,6 +4510,15 @@ def handle_ai(
     # _stable_prefix 指向统一前缀（来自 2.tmp，按 session_id 隔离）
     _stable_prefix = get_prompt_prefix(user_home_dir, current_session_id)
 
+    # ── 会话级记忆上下文缓存：仅在首轮从磁盘加载，后续轮次复用 ──
+    # 当前会话的 library 记录在对话过程中持续增长（每轮追加写入），
+    # 若每轮重读会导致 #聊天记忆 内容变化 → DeepSeek 前缀缓存在此处断裂。
+    # 会话内 AI 已通过 conversation_history 持有全部上下文，无需每轮刷新。
+    _cached_memory_section = build_memory_context(
+        user_home_dir, current_chat_name, current_session_id,
+        referenced_memory_uuid, True, mode
+    )
+
     while continue_asking:
         _tool_calls_processed_this_round = False
         _commands_processed_this_round = False
@@ -4503,11 +4536,6 @@ def handle_ai(
         if memory_file:
             check_session_file_size(memory_file)
         
-        memory_section = build_memory_context(
-            user_home_dir, current_chat_name, current_session_id,
-            referenced_memory_uuid, (interaction_count == 1 and not message_appended), mode
-        )
-        
         # AI 引用记忆时显示提示（API 调用前，让用户提前看到）
         if referenced_memory_uuid:
             console.print(
@@ -4516,21 +4544,12 @@ def handle_ai(
             )
         
         no_memory_text = lang_text.get("no_memory", "No historical memory" if current_lang == "english" else "无历史记忆")
-        # 记忆上下文注入：每次循环都从磁盘加载 library 记忆
-        # ── 缓存优化：原地更新 #聊天记忆（不删除不挪位，保持前缀字节级稳定）──
-        if memory_section != no_memory_text:
-            _memory_content = f"#聊天记忆\n{memory_section}"
-            # 查找最后一条 #聊天记忆，原地更新；若不存在则追加
-            _mem_idx = -1
-            for _i in range(len(conversation_history) - 1, -1, -1):
-                _m = conversation_history[_i]
-                if _m.get("role") == "system" and _m.get("content", "").startswith("#聊天记忆"):
-                    _mem_idx = _i
-                    break
-            if _mem_idx >= 0:
-                conversation_history[_mem_idx]["content"] = _memory_content
-            else:
-                conversation_history.append({"role": "system", "content": _memory_content})
+        # 记忆上下文：仅单次模式（ai "question"）注入。
+        # 对话模式（ai 进入 REPL）不注入 — conversation_history 已持有全量上下文，
+        # 注入会导致 API 请求体变化 → DeepSeek 前缀缓存断裂。
+        if _cached_memory_section != no_memory_text and not _external_history and interaction_count == 1:
+            _memory_content = f"#聊天记忆\n{_cached_memory_section}"
+            conversation_history.append({"role": "system", "content": _memory_content})
 
         # Plan 模式前缀：告知 AI 当前处于 plan 模式，禁止执行命令和文件修改
         # mode=="plan"（用户 ai plan 命令）或 _PLAN_MODE_ACTIVE（AI 调用 EnterPlanMode）
@@ -5449,32 +5468,20 @@ def handle_ai(
             if _cache_supported:
                 if _cache_hit:
                     saved_pct = _cache_hit / (_cache_hit + _cache_miss) * 100 if (_cache_hit + _cache_miss) else 0
-                    parts.append(f"💰 cache {saved_pct:.0f}% hit")
+                    _cached_str = f"{_cache_hit:,} cached / {_cache_miss:,} new"
+                    parts.append(f"💰 cache {saved_pct:.1f}% hit ({_cached_str})")
                 else:
                     parts.append("💰 cache 0% hit")
             else:
                 parts.append("💰 cache n/a (platform)")
-            # 本地前缀命中率（与 API 缓存互补）
-            try:
-                _local_rate = _hit_rate_this_round
-            except NameError:
-                _local_rate = None
-            if _local_rate and _local_rate > 0:
-                parts.append(f"📋 prefix {_local_rate:.0%}")
             console.print(f"  [dim]{' · '.join(parts)}[/]")
         else:
-            # 无 _usage 时回退：估算 + 本地前缀命中率
-            try:
-                _local_rate = _hit_rate_this_round
-            except NameError:
-                _local_rate = None
+            # 无 _usage 时回退：估算 token 数
             _parts = []
             if conversation_history:
                 _total_chars = sum(len(str(m.get("content", ""))) for m in conversation_history)
                 _est = _total_chars // 3 + 1500
                 _parts.append(f"⚡ ~{_est} tokens")
-            if _local_rate and _local_rate > 0:
-                _parts.append(f"📋 prefix {_local_rate:.0%}")
             if _parts:
                 console.print(f"  [dim]{' · '.join(_parts)}[/]")
         
@@ -6198,18 +6205,9 @@ def handle_ai(
                     last_user_question = follow_up
                     message_appended = False
                     current_question = follow_up
-                    conversation_history.append({"role": "user", "content": follow_up})
+                    _time_tag = f"\n\n[⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')} | 📂 {os.getcwd()}]"
+                    conversation_history.append({"role": "user", "content": follow_up + _time_tag})
                     continue_asking = True
-
-    # ── 前缀缓存命中率汇总 ──
-    try:
-        _summary = format_hit_rate_summary(user_home_dir, current_lang, current_session_id)
-        console.print(f"\n[dim]{_summary}[/]")
-        # 存储日志路径到 _thread_locals（供 REPL Ctrl+X 查阅）
-        _log_path = get_hit_rate_log_path(user_home_dir, current_session_id)
-        _thread_locals._hit_rate_log_path = _log_path
-    except Exception:
-        pass
 
     # 恢复原始 SIGINT 处理器
     import signal as _signal

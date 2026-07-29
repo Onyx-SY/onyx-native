@@ -45,13 +45,11 @@ def _prompt_path(home_dir: str) -> str:
 
 
 def _tmp1_path(home_dir: str, session_id: str = "") -> str:
-    suffix = f".{session_id}" if session_id else ""
-    return os.path.join(get_tmp_dir(home_dir), f"1{suffix}.tmp")
+    return os.path.join(get_tmp_dir(home_dir), "1.tmp")
 
 
 def _tmp2_path(home_dir: str, session_id: str = "") -> str:
-    suffix = f".{session_id}" if session_id else ""
-    return os.path.join(get_tmp_dir(home_dir), f"2{suffix}.tmp")
+    return os.path.join(get_tmp_dir(home_dir), "2.tmp")
 
 
 def _hit_rate_dir(home_dir: str) -> str:

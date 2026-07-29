@@ -112,6 +112,7 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
     mode = "normal"
     times = 1
     mode_explicitly_set = False  # 用户是否显式指定了模式
+    debug_requested = False      # --debug 修饰符已出现
 
     i = 0
     while i < len(ai_args):
@@ -245,6 +246,11 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
             mode = arg
             mode_explicitly_set = True
             i += 1
+        elif arg == "--debug":
+            # --debug 是纯修饰符，不消耗问题参数。
+            # 仅 --debug 无问题时 → 应进入交互 REPL（由下方 interactive 分支处理）
+            debug_requested = True
+            i += 1
         elif arg.startswith("-"):
             i += 1
         else:
@@ -262,10 +268,10 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
         return ("chat_only", "", None, auto_exec, new_key, chat_action, chat_param, mode, times)
     if new_key is not None and not content:
         return ("key_only", "", None, auto_exec, new_key, None, None, mode, times)
-    if not content and new_key is None and not mode_explicitly_set:
+    if not content and new_key is None and not mode_explicitly_set and not debug_requested:
         return ("error", lang_text["param_error"], None, auto_exec, new_key, None, None, mode, times)
-    # 显式指定模式且无内容时进入交互模式
-    if not content and mode_explicitly_set:
+    # 显式指定模式或 --debug 且无内容时 → 进入交互 REPL
+    if not content and (mode_explicitly_set or debug_requested):
         return ("interactive", "", None, auto_exec, new_key, None, None, mode, times)
     return (content_type, content, extra_info, auto_exec, new_key, None, None, mode, times)
 

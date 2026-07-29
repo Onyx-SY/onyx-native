@@ -287,7 +287,7 @@ def format_cache_report(diag: CacheDiagnostics) -> str:
     miss = diag.cache_miss_tokens
     rate = diag.cache_hit_rate
 
-    pct = f"{rate:.0%}" if rate < 1 else "100%"
+    pct = f"{rate:.1%}" if rate < 1 else "100.0%"
 
     if not diag.prefix_changed:
         status = "∅ stable"
@@ -316,7 +316,7 @@ def format_cache_summary(stats: SessionCacheStats) -> str:
         Unexpected breaks: 0
     """
     lines = [
-        f"Session cache: {stats.aggregate_hit_rate:.0%} aggregate hit rate "
+        f"Session cache: {stats.aggregate_hit_rate:.1%} aggregate hit rate "
         f"across {stats.total_turns} turns",
     ]
     if stats.total_expected_breaks > 0:

@@ -8,6 +8,7 @@ Onyx AI API 调用模块 — SSE 流式调用、结果处理、记忆上下文
 import os
 import json
 import time
+import hashlib
 import platform
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable, Tuple
@@ -60,6 +61,74 @@ def bump_rewrite_version(session_id: str = "") -> None:
     """压缩/对话重写后调用，让 cache_diagnostics 正确归因缓存断裂。"""
     slot = _get_cache_diag_slot(session_id)
     slot["rewrite_version"] = slot.get("rewrite_version", 0) + 1
+
+
+# ── 载荷哈希追踪（模块级，按 session_id 隔离）──
+# 用于诊断 DeepSeek 前缀缓存行为：追踪每轮 API 调用的实际 JSON 载荷字节序列，
+# 计算与上一轮的字节级前缀匹配率，帮助判断缓存命中率是否符合预期。
+_PAYLOAD_HASH_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def _track_payload_hash(session_id: str, payload: dict, deb_dir: str = "") -> Dict[str, Any]:
+    """计算当前载荷与上一轮的字节级前缀匹配率，返回诊断信息。
+
+    返回 dict 包含：match_pct（匹配百分比）、match_bytes、total_bytes、
+    payload_hash[:16]、round_number。
+    无上一轮数据时 match_pct 为 None。
+    """
+    key = session_id or "_default"
+    slot = _PAYLOAD_HASH_STATE.get(key)
+    if slot is None:
+        slot = {"prev_hash": None, "prev_bytes": None, "round": 0}
+        _PAYLOAD_HASH_STATE[key] = slot
+
+    slot["round"] += 1
+    _payload_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=False).encode('utf-8')
+    _payload_hash = hashlib.sha256(_payload_bytes).hexdigest()[:16]
+    _prev_bytes = slot.get("prev_bytes")
+
+    info = {
+        "round": slot["round"],
+        "payload_hash": _payload_hash,
+        "total_bytes": len(_payload_bytes),
+        "match_bytes": 0,
+        "match_pct": None,
+    }
+
+    if _prev_bytes is not None:
+        # 逐字节比较，找到第一个差异位置
+        for i, (a, b) in enumerate(zip(_payload_bytes, _prev_bytes)):
+            if a == b:
+                info["match_bytes"] = i + 1
+            else:
+                break
+        if info["match_bytes"] == 0 and _payload_bytes == _prev_bytes:
+            info["match_bytes"] = len(_payload_bytes)
+        info["match_pct"] = (info["match_bytes"] / max(len(_payload_bytes), 1)) * 100
+
+        # 写入调试文件供离线 diff 分析
+        if deb_dir:
+            try:
+                _rstr = f"round_{slot['round']:03d}"
+                _pfile = os.path.join(deb_dir, f"payload_{_rstr}.json")
+                with open(_pfile, "w", encoding="utf-8") as _f:
+                    _f.write(_payload_bytes.decode('utf-8'))
+                info["payload_file"] = _pfile
+            except Exception:
+                pass
+
+    # 更新状态
+    slot["prev_hash"] = _payload_hash
+    slot["prev_bytes"] = _payload_bytes
+
+    return info
+
+
+def clear_payload_hash_state(session_id: str = "") -> None:
+    """清理会话的载荷哈希状态。"""
+    key = session_id or "_default"
+    _PAYLOAD_HASH_STATE.pop(key, None)
+
 
 from . import mcp_state as _mcp_state
 
@@ -245,10 +314,10 @@ Onyx Mode: {onyx_mode}
             pass
 
     # ── 构建 messages ──
-    # 缓存策略（统一前缀）:
-    #   [system] 统一前缀 (.prompt = agreement + tools + hippocampus + 分隔线)
-    #             ↑ 100% 稳定，DeepSeek 前缀缓存命中
-    #   [system] 动态环境 (cwd/time/git/onyx_ai.md)  ← 每轮变化，少量 miss
+    # 缓存策略（合并系统消息）:
+    #   [system] 统一前缀 = memory_block + env_info
+    #             ↑ memory_block 100% 静态，env_info 会话内稳定
+    #             ↑ 合并为单个 system 消息，避免连续 role:"system" 导致 DeepSeek 缓存断裂
     #   messages  ← 对话历史，append-only，前缀稳定
     if messages is None:
         _messages = []
@@ -261,14 +330,28 @@ Onyx Mode: {onyx_mode}
             _messages.append({"role": "system", "content": system_prompt})
         _messages.append({"role": "user", "content": env_info})
     else:
-        # 对话模式：统一前缀作为 messages[0] — 前缀 100% 稳定
-        # agreement.md 和 tools 已从 conversation_history[0] 移入 memory_block
-        # onyx_ai.md 仍在 conversation_history[0] 的末尾（动态部分，不影响前缀缓存）
+        # 对话模式 — 静态前缀 + 动态后置：
+        #   [0] system: memory_block          ← 100% 静态，跨会话缓存命中（~3584 tokens）
+        #   [1] user:   env_info + question   ← env_info 含 cwd/git/海马体，会变但不污染前缀
+        #   [2+] assistant/user...            ← 对话历史，append-only
+        # 关键：env_info 不合并进 memory_block，而是合并进第一条 user 消息。
+        #       这样 env_info 变化时只影响 [1]，不影响 [0] 的前缀缓存。
         _messages = []
         if memory_block:
-            # memory_block = .prompt 内容 + 分隔线（来自 prompt_cache.get_prompt_prefix）
             _messages.append({"role": "system", "content": memory_block})
-        _messages.extend(messages)
+            if messages and messages[0].get("role") == "system" and len(messages) > 1:
+                # env_info (messages[0]) + 第一条 user 消息 (messages[1]) → 合并为一条 user 消息
+                _merged_user = messages[0]["content"] + "\n\n" + str(messages[1].get("content", ""))
+                _messages.append({"role": "user", "content": _merged_user})
+                _messages.extend(messages[2:])
+            elif messages and messages[0].get("role") == "system":
+                # 只有 env_info 无 user 消息（极端情况）
+                _messages.append({"role": "user", "content": messages[0]["content"]})
+                _messages.extend(messages[1:])
+            else:
+                _messages.extend(messages)
+        else:
+            _messages.extend(messages)
 
     # 保留 reasoning_content（DeepSeek thinking 模式要求回传）
     # 仅对不支持 thinking 的平台剥离该字段
@@ -392,6 +475,40 @@ Onyx Mode: {onyx_mode}
 
     payload["stream_options"] = {"include_usage": True}
 
+    # ── 写入 AI 真实看到的完整内容到 ~/.ai_s/tmp/（每次覆盖）──
+    try:
+        _tmp_dir = os.path.join(os.path.expanduser("~"), ".ai_s", "tmp")
+        os.makedirs(_tmp_dir, exist_ok=True)
+
+        # ── ai_request.txt：人类可读的消息全文 ──
+        _req_path = os.path.join(_tmp_dir, "ai_request.txt")
+        _lines = [f"═══ API REQUEST ({plat_key}/{model}) — {datetime.now().strftime('%H:%M:%S')} ═══", ""]
+        for _idx, _m in enumerate(_messages):
+            _role = _m.get("role", "?")
+            _content = _m.get("content", "")
+            _tc = _m.get("tool_calls")
+            _lines.append(f"── [{_idx}] {_role.upper()} ──")
+            if _tc:
+                _tc_names = [t.get("function", {}).get("name", "?") for t in _tc]
+                _lines.append(f"[tool_calls: {', '.join(_tc_names)}]")
+            _lines.append(str(_content))
+            _lines.append("")
+        _lines.append(f"── TOOLS: {len(tools) if tools else 0} functions ──")
+        if tools:
+            for _t in tools:
+                _fn = _t.get("function", {})
+                _lines.append(f"  {_fn.get('name','?')}: {_fn.get('description','')[:120]}")
+        _lines.append("")
+        with open(_req_path, "w", encoding="utf-8") as _rf:
+            _rf.write("\n".join(_lines))
+
+        # ── ai_payload.json：原始 JSON 请求体（供 diff 对比两轮差异）──
+        _payload_path = os.path.join(_tmp_dir, "ai_payload.json")
+        with open(_payload_path, "w", encoding="utf-8") as _pf:
+            json.dump(payload, _pf, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
     api_url = plat_info["api_url"]
     stream_fmt = plat_info["stream_format"]
 
@@ -401,6 +518,16 @@ Onyx Mode: {onyx_mode}
 
     # 重置中断标志（使用模块引用以让信号处理器的修改可见）
     _mcp_state._AI_INTERRUPTED = False
+
+    # ── 载荷哈希诊断：追踪每轮 API 请求的字节级前缀变化 ──
+    _deb_dir = ""
+    if debug_mode:
+        try:
+            _deb_dir = os.path.join(os.path.expanduser("~"), ".ai_s", "deb", session_id or "default")
+            os.makedirs(_deb_dir, exist_ok=True)
+        except Exception:
+            pass
+    _payload_hash_info = _track_payload_hash(session_id, payload, _deb_dir)
 
     for retry in range(max_retries):
         try:
@@ -728,6 +855,23 @@ Onyx Mode: {onyx_mode}
                     result["_cache_report"] = format_cache_report(_diag)
                     if debug_mode:
                         console.print(f"[dim]📊 {result['_cache_report']}[/]")
+                        # ── 载荷字节级前缀匹配诊断 ──
+                        if _payload_hash_info.get("match_pct") is not None:
+                            _mb = _payload_hash_info["match_bytes"]
+                            _tb = _payload_hash_info["total_bytes"]
+                            _mp = _payload_hash_info["match_pct"]
+                            _icon = "✅" if _mp > 90 else ("⚠️" if _mp > 50 else "❌")
+                            _hint = (
+                                "← 仅 messages[0] 命中，后续被截断"
+                                if _mp < 50 else ""
+                            )
+                            console.print(
+                                f"[dim]🔍 载荷字节匹配: {_mp:.1f}% ({_mb:,}/{_tb:,} bytes) "
+                                f"{_icon} {_hint}[/]"
+                            )
+                        # ── 展示本次载荷哈希（短标识）──
+                        _ph = _payload_hash_info.get("payload_hash", "?")
+                        console.print(f"[dim]🔑 载荷哈希: {_ph} (round #{_payload_hash_info.get('round',0)})[/]")
                 except Exception:
                     pass  # best-effort
             if _reasoning_display:

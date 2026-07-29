@@ -544,26 +544,27 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         ch = getattr(_thread_locals, 'session_total_cache_hit', 0)
         if sp or sc:
             total = sp + sc
+            _cache_pct = f" ({ch / sp * 100:.1f}%)" if ch and sp else ""
             if lang == "chinese":
-                console.print(Panel(
+                _body = (
                     f"累计 Token 用量（API 精确值）\n\n"
                     f"  交互轮数: {rc}\n"
                     f"  Prompt:     {sp:,} tokens\n"
                     f"  Completion: {sc:,} tokens\n"
                     f"  合计:       {total:,} tokens\n"
-                    f"  Cache 命中: {ch:,} tokens" if ch else f"  合计: {total:,} tokens",
-                    title="📊 Token 统计", border_style="cyan"
-                ))
+                    f"  Cache 命中: {ch:,} tokens{_cache_pct}"
+                )
+                console.print(Panel(_body, title="📊 Token 统计", border_style="cyan"))
             else:
-                console.print(Panel(
+                _body = (
                     f"Cumulative Token Usage (API precise)\n\n"
-                    f"  Rounds:  {rc}\n"
-                    f"  Prompt:     {sp:,} tokens\n"
-                    f"  Completion: {sc:,} tokens\n"
-                    f"  Total:      {total:,} tokens\n"
-                    f"  Cache hit:  {ch:,} tokens" if ch else f"  Total: {total:,} tokens",
-                    title="📊 Token Stats", border_style="cyan"
-                ))
+                    f"  Rounds:      {rc}\n"
+                    f"  Prompt:      {sp:,} tokens\n"
+                    f"  Completion:  {sc:,} tokens\n"
+                    f"  Total:       {total:,} tokens\n"
+                    f"  Cache hit:   {ch:,} tokens{_cache_pct}"
+                )
+                console.print(Panel(_body, title="📊 Token Stats", border_style="cyan"))
         else:
             no_data = _t("no_token_data", lang)
             console.print(f"[dim]{no_data}[/]")

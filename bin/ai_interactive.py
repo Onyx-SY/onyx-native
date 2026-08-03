@@ -10,7 +10,10 @@ AI 独立交互会话 — 持久对话 REPL
 import os
 import sys
 import time
+import json
 import uuid
+import hashlib
+from datetime import datetime
 from typing import Dict, Any, Optional, Callable, List
 
 from prompt_toolkit import PromptSession
@@ -47,6 +50,13 @@ _SLASH_COMMANDS_CN: Dict[str, str] = {
     "/chat":   "管理聊天记忆 (list / switch <name> / new <name>)",
     "/mcp":    "MCP 服务器管理 (list / install <name> / remove <name>)",
     "/compact": "手动压缩对话历史，释放上下文空间",
+    "/memory-mode": "切换记忆模式 (global/project)，project 为当前目录专属记忆",
+    "/memmode": "同 /memory-mode",
+    "/save":   "保存当前会话到磁盘",
+    "/resume": "恢复已保存会话 (resume <名字|latest>)",
+    "/sessions": "列出已保存的会话",
+    "/cost":   "显示费用统计（今日/累计/本会话）",
+    "/doctor": "🔧 健康检查（key/MCP/记忆/环境）",
 }
 
 _SLASH_COMMANDS_EN: Dict[str, str] = {
@@ -69,6 +79,13 @@ _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/chat":   "Manage chat memory (list / switch <name> / new <name>)",
     "/mcp":    "MCP server management (list / install <name> / remove <name>)",
     "/compact": "Manually compress conversation history to free context",
+    "/memory-mode": "Switch memory mode (global/project); project = per-directory memory",
+    "/memmode": "Same as /memory-mode",
+    "/save":   "Save current session to disk",
+    "/resume": "Resume a saved session (resume <name|latest>)",
+    "/sessions": "List saved sessions",
+    "/cost":   "Show cost stats (today / total / session)",
+    "/doctor": "🔧 Health check (key/MCP/memory/env)",
 }
 
 _HELP_TEXT_CN = """\
@@ -135,8 +152,14 @@ _AI_PROMPT_STYLE = PromptStyle.from_dict({
 
 
 def _make_ai_prompt() -> str:
-    """生成 AI 模式提示符"""
-    return "🤖 > "
+    """生成 AI 模式提示符（显示当前目录）"""
+    try:
+        cwd = os.getcwd()
+        home = os.path.expanduser("~")
+        shown = cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd
+    except Exception:
+        shown = "."
+    return f"{shown} 🤖 > "
 
 
 # ─────────────────────────────── 配置写入辅助 ───────────────────────────────
@@ -154,6 +177,332 @@ def _save_conf(conf: dict, ctx: Dict[str, Any]) -> None:
     with open(key_conf_path, "w", encoding="utf-8") as f:
         _json.dump(write_conf, f, ensure_ascii=False, indent=2)
     os.chmod(key_conf_path, 0o600)
+
+
+# ─────────────────────────────── 记忆模式（global / project） ───────────────────────────────
+
+def _project_id_for_path(cwd: str) -> str:
+    """由路径生成稳定项目 ID（路径哈希前 12 位）"""
+    try:
+        return hashlib.sha1(os.path.abspath(cwd).encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        return uuid.uuid4().hex[:12]
+
+
+def _ensure_project_index(user_home_dir: str) -> Dict[str, Any]:
+    """加载/初始化项目路径表 ~/.ai_s/projects/index.json"""
+    index_path = os.path.join(user_home_dir, ".ai_s", "projects", "index.json")
+    try:
+        if os.path.exists(index_path):
+            with open(index_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "projects" in data:
+                return data
+    except Exception:
+        pass
+    data = {"projects": {}, "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        os.makedirs(os.path.dirname(index_path), exist_ok=True)
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return data
+
+
+def _save_project_index(user_home_dir: str, data: Dict[str, Any]) -> None:
+    index_path = os.path.join(user_home_dir, ".ai_s", "projects", "index.json")
+    try:
+        os.makedirs(os.path.dirname(index_path), exist_ok=True)
+        data["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _find_project(user_home_dir: str, cwd: str) -> Optional[str]:
+    """最长前缀匹配查找项目 ID；未找到返回 None"""
+    try:
+        index = _ensure_project_index(user_home_dir)
+        cwd_abs = os.path.abspath(cwd)
+        best_id, best_len = None, -1
+        for pid, info in index.get("projects", {}).items():
+            proj_path = os.path.abspath(info.get("path", ""))
+            if cwd_abs == proj_path or cwd_abs.startswith(proj_path + os.sep):
+                if len(proj_path) > best_len:
+                    best_id, best_len = pid, len(proj_path)
+        return best_id
+    except Exception:
+        return None
+
+
+def _register_project(user_home_dir: str, cwd: str) -> str:
+    """登记当前目录到项目路径表，返回项目 ID（已存在则复用）"""
+    cwd_abs = os.path.abspath(cwd)
+    existing = _find_project(user_home_dir, cwd_abs)
+    if existing:
+        return existing
+    pid = _project_id_for_path(cwd_abs)
+    try:
+        index = _ensure_project_index(user_home_dir)
+        name = os.path.basename(cwd_abs.rstrip(os.sep)) or cwd_abs
+        index.setdefault("projects", {})[pid] = {
+            "path": cwd_abs,
+            "name": name,
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _save_project_index(user_home_dir, index)
+    except Exception:
+        pass
+    return pid
+
+
+def _memory_base_dir(user_home_dir: str, memory_mode: str, cwd: str = None) -> str:
+    """计算当前记忆根目录：global → 主目录；project → ~/.ai_s/projects/<id>/"""
+    if memory_mode == "project":
+        cwd = cwd or os.getcwd()
+        pid = _register_project(user_home_dir, cwd)
+        return os.path.join(user_home_dir, ".ai_s", "projects", pid)
+    return user_home_dir
+
+
+def _auto_memory_mode(user_home_dir: str) -> str:
+    """自动默认规则：cwd==主目录 → global；其他目录 → project"""
+    try:
+        cwd = os.path.abspath(os.getcwd())
+        home = os.path.abspath(user_home_dir)
+        return "global" if cwd == home else "project"
+    except Exception:
+        return "global"
+
+
+# ─────────────────────────────── 会话持久化（/save /resume /sessions） ───────────────────────────────
+
+def _session_dir(ctx: Dict[str, Any]) -> str:
+    """会话保存目录（跟随当前记忆根目录）"""
+    mem_root = _memory_base_dir(ctx.get("user_home_dir", ""),
+                                ctx.get("memory_mode", "global"),
+                                ctx.get("cwd"))
+    return os.path.join(mem_root, ".ai_s", "sessions")
+
+
+def _save_ai_session(ctx: Dict[str, Any], name: str = "") -> str:
+    """保存当前会话到 sessions/ 目录，返回保存路径"""
+    import bin.ai_lib.mcp_state as _mcp_shared
+    if not name:
+        name = datetime.now().strftime("sess_%Y%m%d_%H%M%S")
+    sdir = _session_dir(ctx)
+    os.makedirs(sdir, exist_ok=True)
+    tl = _mcp_shared._thread_locals
+    payload = {
+        "name": name,
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "session_id": ctx.get("session_id", ""),
+        "chat_name": ctx.get("_chat_name", ""),
+        "mode": ctx.get("mode", "normal"),
+        "memory_mode": ctx.get("memory_mode", "global"),
+        "cwd": ctx.get("cwd", os.getcwd()),
+        "conversation_history": ctx.get("_conversation_history", []),
+        "tokens": {
+            "prompt": getattr(tl, "session_total_prompt", 0),
+            "completion": getattr(tl, "session_total_completion", 0),
+        },
+    }
+    path = os.path.join(sdir, f"{name}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return path
+    except Exception as e:
+        return f"ERR:{e}"
+
+
+def _list_ai_sessions(ctx: Dict[str, Any]) -> List[str]:
+    """列出所有已保存会话名"""
+    sdir = _session_dir(ctx)
+    if not os.path.isdir(sdir):
+        return []
+    try:
+        return sorted(f[:-5] for f in os.listdir(sdir) if f.endswith(".json"))
+    except Exception:
+        return []
+
+
+def _load_ai_session(ctx: Dict[str, Any], name: str) -> bool:
+    """恢复会话：载入 conversation_history / session_id 等，返回是否成功"""
+    sdir = _session_dir(ctx)
+    path = os.path.join(sdir, f"{name}.json")
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        ctx["_conversation_history"] = data.get("conversation_history", [])
+        ctx["session_id"] = data.get("session_id", ctx.get("session_id", ""))
+        if data.get("chat_name"):
+            ctx["_chat_name"] = data["chat_name"]
+        if data.get("mode"):
+            ctx["mode"] = data["mode"]
+        if data.get("memory_mode"):
+            ctx["memory_mode"] = data["memory_mode"]
+        if data.get("cwd"):
+            ctx["cwd"] = data["cwd"]
+        ctx["session_start"] = time.time()
+        return True
+    except Exception:
+        return False
+
+
+# ─────────────────────────────── 成本统计（/cost） ───────────────────────────────
+
+# 各平台每百万 token 估算单价（USD，近似值）
+_PLATFORM_PRICE = {
+    "deepseek": {"input": 0.27, "output": 1.10},
+    "openai":   {"input": 0.50, "output": 1.50},
+    "anthropic": {"input": 3.00, "output": 15.00},
+    "custom":   {"input": 0.50, "output": 1.50},
+}
+
+
+def _append_cost_record(ctx: Dict[str, Any], platform: str, model: str,
+                        prompt_tokens: int, completion_tokens: int) -> None:
+    """追加一条费用记录到当前记忆根目录的 cost.json（单价由 models.json 动态解析）"""
+    try:
+        from bin.ai_lib import cost as _cost
+        mem_root = _memory_base_dir(ctx.get("user_home_dir", ""),
+                                    ctx.get("memory_mode", "global"),
+                                    ctx.get("cwd"))
+        _cost.append_cost_record(mem_root, platform, model,
+                                 prompt_tokens, completion_tokens)
+    except Exception:
+        pass
+
+
+def _show_cost(ctx: Dict[str, Any]) -> None:
+    """显示费用统计（今日 / 累计 / 本会话）"""
+    from bin.ai_lib.mcp_state import _thread_locals
+    try:
+        mem_root = _memory_base_dir(ctx.get("user_home_dir", ""),
+                                    ctx.get("memory_mode", "global"),
+                                    ctx.get("cwd"))
+        cost_path = os.path.join(mem_root, ".ai_s", "cost.json")
+        data = []
+        if os.path.exists(cost_path):
+            with open(cost_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_cost = sum(r.get("cost_usd", 0) for r in data if r.get("ts", "").startswith(today))
+        total_cost = sum(r.get("cost_usd", 0) for r in data)
+        sp = getattr(_thread_locals, "session_total_prompt", 0)
+        sc = getattr(_thread_locals, "session_total_completion", 0)
+        lang = ctx.get("lang", "chinese")
+        # ── 当前用户 AI 单价（models.json 动态解析，默认取用户正在使用的模型）──
+        _price_line = ""
+        try:
+            from bin.ai_lib import cost as _cost
+            from bin.ai_cmd import load_key_conf as _load_kc
+            _kc = _load_kc() or {}
+            _plat = _kc.get("platform", "custom")
+            _model = _kc.get("model", "") or "?"
+            _pin, _pout = _cost.resolve_model_price(_plat, _model)
+            if lang == "chinese":
+                _price_line = (f"  当前模型: {_model} — 输入 ${_pin:.4f}/M，输出 ${_pout:.4f}/M\n"
+                               f"  ⚠️ {_cost.cost_disclaimer('chinese')}\n")
+            else:
+                _price_line = (f"  Current model: {_model} — in ${_pin:.4f}/M, out ${_pout:.4f}/M\n"
+                               f"  ⚠️ {_cost.cost_disclaimer('english')}\n")
+        except Exception:
+            pass
+        if lang == "chinese":
+            body = (
+                f"  今日费用:   ${today_cost:.4f}\n"
+                f"  累计费用:   ${total_cost:.4f}\n"
+                f"  本会话 Token: {sp + sc:,}（prompt {sp:,} + completion {sc:,}）\n"
+                f"  记录条数:   {len(data)}\n"
+                f"{_price_line}"
+            )
+            console.print(Panel(body, title="💰 成本统计", border_style="green"))
+        else:
+            body = (
+                f"  Today:      ${today_cost:.4f}\n"
+                f"  Total:      ${total_cost:.4f}\n"
+                f"  Session tokens: {sp + sc:,} (prompt {sp:,} + completion {sc:,})\n"
+                f"  Records:    {len(data)}\n"
+                f"{_price_line}"
+            )
+            console.print(Panel(body, title="💰 Cost Stats", border_style="green"))
+    except Exception as e:
+        console.print(f"[red]cost error: {e}[/]")
+
+
+# ─────────────────────────────── doctor 健康检查（/doctor） ───────────────────────────────
+
+def _run_doctor(ctx: Dict[str, Any]) -> None:
+    """一键健康检查：AI key / 平台模型 / MCP / 记忆目录 / 工具缓存 / 环境 / 语言"""
+    lang = ctx.get("lang", "chinese")
+    home = ctx.get("user_home_dir", "")
+    lines = []
+
+    def _item(ok: bool, label: str, detail: str = "") -> None:
+        mark = "✅" if ok else ("⚠️" if detail.startswith("!") else "❌")
+        if detail.startswith("!"):
+            detail = detail[1:]
+        lines.append(f"  {mark} {label}" + (f" — {detail}" if detail else ""))
+
+    try:
+        from bin.ai_cmd import load_key_conf
+        conf = load_key_conf()
+        if conf and conf.get("api_key"):
+            plat = conf.get("platform", "?")
+            model = conf.get("model", "未设置")
+            _item(True, "AI 密钥", f"平台={plat} 模型={model}")
+        else:
+            _item(False, "AI 密钥", "未配置（运行 ai 命令引导配置）")
+    except Exception as e:
+        _item(False, "AI 密钥", f"读取失败: {e}")
+
+    try:
+        from bin.ai_cmd import _SUPPORTED_PLATFORMS
+        _item(True, "平台模型", f"已加载 {len(_SUPPORTED_PLATFORMS)} 个平台")
+    except Exception:
+        _item(False, "平台模型", "models.json 加载失败")
+
+    try:
+        from bin.ai_cmd import list_mcp_servers
+        mcp_text = str(list_mcp_servers())
+        _item("error" not in mcp_text.lower(), "MCP 服务器", mcp_text[:60])
+    except Exception:
+        _item(False, "MCP 服务器", "模块异常")
+
+    try:
+        mem_root = _memory_base_dir(home, ctx.get("memory_mode", "global"), ctx.get("cwd"))
+        lib_dir = os.path.join(mem_root, ".ai_s", "library")
+        if os.path.isdir(lib_dir):
+            count = len([f for f in os.listdir(lib_dir) if f.endswith(".txt")])
+            _item(True, "记忆目录", f"{mem_root}（{count} 条记录）")
+        else:
+            _item(True, "记忆目录", f"{mem_root}（尚未创建记录）")
+    except Exception as e:
+        _item(False, "记忆目录", str(e))
+
+    try:
+        from bin.ai_cmd import ROOT_DIR
+        tools_dir = os.path.join(ROOT_DIR, "tools")
+        if os.path.isdir(tools_dir):
+            n = len([d for d in os.listdir(tools_dir) if os.path.isdir(os.path.join(tools_dir, d))])
+            _item(True, "工具目录", f"{n} 个工具")
+        else:
+            _item(True, "工具目录", "tools/ 不存在（TBS 模式）")
+    except Exception:
+        _item(False, "工具目录", "无法读取")
+
+    _item(True, "运行环境", f"cwd={ctx.get('cwd', os.getcwd())}")
+    _item(True, "记忆模式", "project（当前目录专属）" if ctx.get("memory_mode") == "project" else "global（全局 library）")
+    _item(True, "语言", lang)
+
+    title = "🔧 Onyx 健康检查" if lang == "chinese" else "🔧 Onyx Doctor"
+    console.print(Panel("\n".join(lines), title=title, border_style="cyan"))
 
 
 # ─────────────────────────────── 参数编辑辅助 ───────────────────────────────
@@ -688,6 +1037,95 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         console.print(f"[green]{_t('compact_queued', lang)}[/]")
         return True
 
+    elif cmd in ("/memory-mode", "/memmode"):
+        """记忆模式切换：global（全局 library）/ project（当前目录专属记忆）"""
+        if args:
+            new_mode = args[0].lower()
+            if new_mode in ("global", "g"):
+                ctx["memory_mode"] = "global"
+            elif new_mode in ("project", "p"):
+                ctx["memory_mode"] = "project"
+                ctx["cwd"] = os.getcwd()
+            else:
+                console.print(f"[yellow]Unknown mode: {new_mode} (global|project)[/]")
+                return True
+        else:
+            current = ctx.get("memory_mode", "global")
+            ctx["memory_mode"] = "project" if current == "global" else "global"
+            if ctx["memory_mode"] == "project":
+                ctx["cwd"] = os.getcwd()
+        mem_root = _memory_base_dir(ctx.get("user_home_dir", ""),
+                                    ctx.get("memory_mode", "global"),
+                                    ctx.get("cwd"))
+        # 切换后重置会话（历史上下文属于旧记忆空间）
+        ctx.pop("_conversation_history", None)
+        from bin.ai_lib.mcp_state import _thread_locals
+        for attr in ('session_total_prompt', 'session_total_completion',
+                     'session_total_cache_hit', 'session_round_count',
+                     'last_prompt_tokens', 'last_completion_tokens',
+                     'last_cache_hit', 'last_cache_miss'):
+            if hasattr(_thread_locals, attr):
+                delattr(_thread_locals, attr)
+        mode_name = "project（当前目录专属）" if ctx["memory_mode"] == "project" else "global（全局 library）"
+        console.print(f"[green]🔁 记忆模式 → {mode_name}[/]")
+        console.print(f"[dim]   记忆根目录: {mem_root}[/]")
+        return True
+
+    elif cmd == "/save":
+        """保存当前会话"""
+        name = args[0] if args else ""
+        path = _save_ai_session(ctx, name)
+        if path.startswith("ERR:"):
+            console.print(f"[red]{_t('export_fail', lang).format(path[4:])}[/]")
+        else:
+            fname = os.path.basename(path)
+            console.print(f"[green]💾 会话已保存: {fname}[/]")
+        return True
+
+    elif cmd == "/sessions":
+        """列出已保存会话"""
+        names = _list_ai_sessions(ctx)
+        if not names:
+            console.print(f"[dim]{_t('export_no_data', lang)}[/]")
+            return True
+        console.print(f"\n💾 已保存会话（{len(names)}）:")
+        for i, n in enumerate(names, 1):
+            console.print(f"  [{i}] {n}")
+        return True
+
+    elif cmd == "/resume":
+        """恢复已保存会话"""
+        if not args:
+            console.print("[yellow]用法: /resume <名字|latest>[/]")
+            return True
+        target = args[0]
+        names = _list_ai_sessions(ctx)
+        if not names:
+            console.print(f"[dim]{_t('export_no_data', lang)}[/]")
+            return True
+        if target == "latest":
+            name = names[-1]
+        elif target in names:
+            name = target
+        else:
+            console.print(f"[yellow]未找到会话: {target}（可用 /sessions 查看）[/]")
+            return True
+        if _load_ai_session(ctx, name):
+            console.print(f"[green]🔄 已恢复会话: {name}[/]")
+        else:
+            console.print(f"[red]恢复失败: {name}[/]")
+        return True
+
+    elif cmd == "/cost":
+        """显示成本统计"""
+        _show_cost(ctx)
+        return True
+
+    elif cmd == "/doctor":
+        """一键健康检查"""
+        _run_doctor(ctx)
+        return True
+
     else:
         console.print(f"[yellow]{_t('unknown_cmd', lang).format(cmd)}[/]")
         return True
@@ -721,6 +1159,8 @@ def ai_interactive_session(
         return
 
     # ── 上下文 ──
+    # 记忆模式自动默认规则：cwd==主目录 → global（全局 library）；其他目录 → project（当前目录专属记忆）
+    _auto_mode = _auto_memory_mode(user_home_dir)
     ctx = {
         "user_home_dir": user_home_dir,
         "lang": current_lang,
@@ -729,6 +1169,8 @@ def ai_interactive_session(
         "quiet": False,
         "show_time": True,
         "session_start": time.time(),
+        "memory_mode": _auto_mode,
+        "cwd": os.getcwd(),
         "_key_changed": False,
         "_chat_changed": False,
     }
@@ -738,8 +1180,19 @@ def ai_interactive_session(
         title=f"🤖 Onyx AI — {_t('title', current_lang)}"
     ))
 
+    # ── 记忆模式提示：启动时始终显示当前记忆模式/根目录（cwd 自动判断），告知用户可切换 ──
+    mode_label = "project（当前目录专属）" if _auto_mode == "project" else "global（全局 library）"
+    mem_root = user_home_dir
+    try:
+        mem_root = _memory_base_dir(user_home_dir, _auto_mode, ctx["cwd"])
+    except Exception as _mem_err:
+        console.print(f"[yellow]⚠️ 记忆根目录计算失败（已回退 global）: {_mem_err}[/]")
+    console.print(f"[dim]🧠 记忆模式: {mode_label}（cwd={ctx['cwd']}）— 可用 /memory-mode 切换[/]")
+    console.print(f"[dim]   记忆根目录: {mem_root}[/]")
+
     # ── / 指令补全 ──
-    slash_cmds = list((_SLASH_COMMANDS_CN if current_lang == "chinese" else _SLASH_COMMANDS_EN).keys())
+    # 补全列表 = 命令表 key（与 _dispatch_slash 分支一一对应，不会出现"补全里有但实际不存在"的命令）
+    slash_cmds = sorted((_SLASH_COMMANDS_CN if current_lang == "chinese" else _SLASH_COMMANDS_EN).keys())
     completer = WordCompleter(slash_cmds, ignore_case=True, sentence=True)
 
     # ── 对话循环 ──
@@ -833,11 +1286,16 @@ def _call_ai_engine(
         # ── REPL 持久对话：conversation_history 跨轮保留，AI 记住完整上下文 ──
         # 始终传 list（首轮传空 list，handle_ai 检测到 len==0 自动构建 system 消息）
         _conv_hist = ctx.get("_conversation_history", [])
+        # ── 记忆模式：project 模式下 memory_base_dir 指向 ~/.ai_s/projects/<id>/ ──
+        # handle_ai 内部记忆相关调用（library/chat/tmp/cost）全部跟随该根目录；
+        # API key / MCP 配置仍走全局 user_home_dir，互不影响。
+        _mem_base = _memory_base_dir(user_home_dir, ctx.get("memory_mode", "global"), ctx.get("cwd"))
         handle_ai(
             cmd_parts=cmd_parts,
             request_id=call_request_id,
             onyx_module=onyx_module,
             user_home_dir=user_home_dir,
+            memory_base_dir=_mem_base if ctx.get("memory_mode") == "project" else None,
             global_config=global_config,
             user_info=user_info or {"name": "default", "session_id": ctx["session_id"]},
             user_mode=user_mode,
@@ -848,5 +1306,19 @@ def _call_ai_engine(
         )
         # handle_ai 原地修改了 _conv_hist → 存回 ctx 供下一轮使用
         ctx["_conversation_history"] = _conv_hist
+        # ── 成本统计：本轮 token 用量写入 cost.json（跟随记忆模式）──
+        try:
+            from bin.ai_lib.mcp_state import _thread_locals as _tl
+            from bin.ai_cmd import load_key_conf as _load_kc
+            _kc = _load_kc() or {}
+            _append_cost_record(
+                ctx,
+                _kc.get("platform", "custom"),
+                _kc.get("model", ""),
+                getattr(_tl, "last_prompt_tokens", 0) or 0,
+                getattr(_tl, "last_completion_tokens", 0) or 0,
+            )
+        except Exception:
+            pass
     except Exception as e:
         console.print(f"[red]{_t('ai_error', ctx.get('lang', 'chinese')).format(str(e))}[/]")

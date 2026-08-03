@@ -16,6 +16,20 @@ def handle_clear(cmd_parts: List[str], request_id: str) -> None:
     log_info("Clear screen executed", request_id)
 
 
+def handle_pwd(cmd_parts: List[str], request_id: str) -> None:
+    """pwd 命令：AI 虚拟沙盒激活时显示虚拟根（隐藏真实 cwd），普通场景显示真实工作目录"""
+    # AI 虚拟沙盒激活 → 显示虚拟路径（cwd 映射为 /）
+    try:
+        from bin.ai_lib.sandbox import is_active, display
+        if is_active():
+            print(display(os.getcwd()))
+            return
+    except Exception:
+        pass
+    # 普通场景：保持原生行为
+    print(os.getcwd())
+
+
 def handle_exit(cmd_parts: List[str], request_id: str) -> None:
     """退出程序"""
     from core.context import get_ctx
@@ -197,7 +211,7 @@ def handle_sado(cmd_parts: List[str], request_id: str) -> None:
         SADO_CONFIG=ctx.SADO_CONFIG, SADO_CONFIG_PATH=ctx.SADO_CONFIG_PATH,
         user_info=ctx.user_info, OS_OR_TBS=ctx.OS_OR_TBS, sys_type=ctx.sys_type,
         parse_and_execute=lambda c, ir=False, ia=False: _parse_exec(ctx, c, ir, ia),
-        alias_cache=ctx.ALIAS_CACHE,
+        alias_cache={},  # 别名系统已移除
         log_info=_log_info, log_error=_log_error,
         get_current_lang=lambda: ctx.global_config["display_info"]["language"]["current"],
         Fore=ctx.Fore, Style=ctx.Style,
@@ -298,16 +312,6 @@ def handle_autocmd(cmd_parts: List[str], request_id: str) -> None:
     log_info(f"autocmd invoked: {cmd_parts}", request_id)
     # 委托原有实现
     from Onyx import handle_autocmd as _orig
-    _orig(cmd_parts, request_id)
-
-
-def handle_unalias(cmd_parts: List[str], request_id: str) -> None:
-    """unalias 命令"""
-    from core.context import get_ctx
-    from core.log_manager import log_info
-    ctx = get_ctx()
-    log_info(f"unalias invoked: {cmd_parts}", request_id)
-    from Onyx import handle_unalias as _orig
     _orig(cmd_parts, request_id)
 
 

@@ -9,6 +9,7 @@ import os
 import json
 import secrets
 import shutil
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -297,6 +298,140 @@ def _consume_tool_results() -> List[Dict]:
     return data
 
 
+# ── 自动压缩（移植 claw-code：library 超预算自动折叠，不再仅手动 /compact）──
+
+_ENTRY_SEPARATOR = "\n\n---\n\n"
+_AUTO_COMPACT_MAX_ENTRIES = 20          # 条目数阈值（与 CompactConfig.max_entries 一致）
+_AUTO_COMPACT_MAX_TOKENS = 10_000       # 估算 token 阈值（与 CompactConfig.max_tokens 一致）
+_AUTO_COMPACT_MIN_FILE_SIZE = 64 * 1024 # 小于 64KB 的 library 文件不扫描
+_AUTO_COMPACT_MIN_SAVINGS = 4 * 1024    # 节省少于 4KB 不重写（避免无谓磁盘写）
+_AUTO_COMPACT_COOLDOWN = 60.0           # 同一文件两次压缩最小间隔（秒）
+_AUTO_COMPACT_ELIDE_BLOCK = 1024        # 条目内代码块超过 1KB 即 elide
+_AUTO_COMPACT_ELIDE_KEEP = 300          # elide 后保留前 N 字符
+
+_last_auto_compact: Dict[str, float] = {}  # fpath → 上次压缩时间
+
+
+def split_library_entries(content: str, fname: str) -> List[Dict]:
+    """按条目分隔符拆分 library 文件内容为条目 dict 列表。"""
+    entries = []
+    for part in content.split(_ENTRY_SEPARATOR):
+        part = part.strip()
+        if not part:
+            continue
+        time_str = ""
+        import re as _re
+        _m = _re.search(r"## (?:Interaction|交互记录) — ([\d\- :.]+)", part)
+        if _m:
+            time_str = _m.group(1)
+        entries.append({
+            "session_id": fname[:-4] if fname.endswith(".txt") else fname,
+            "time": time_str,
+            "content": part,
+        })
+    return entries
+
+
+def elide_oversized_blocks(content: str,
+                           max_block: int = _AUTO_COMPACT_ELIDE_BLOCK,
+                           keep: int = _AUTO_COMPACT_ELIDE_KEEP) -> Tuple[str, int]:
+    """
+    把条目内超长 ``` 代码块（旧版本写入的原始工具输出/文件全文）替换为 elided 标记。
+    保留代码块围栏 + 前 keep 字符，让 AI 仍能看到内容性质。
+
+    Returns:
+        (elided_content, saved_chars)
+    """
+    import re as _re
+    saved = 0
+    _block_re = _re.compile(r"(```[^\n]*\n)(.*?)(```)", _re.DOTALL)
+
+    def _repl(m):
+        nonlocal saved
+        inner = m.group(2)
+        if len(inner) <= max_block:
+            return m.group(0)
+        marker = f"[elided tool result — {len(inner)} bytes dropped to save context; " \
+                 f"re-run the tool if the data is needed again]\n"
+        saved += len(inner) - (keep + len(marker))
+        return m.group(1) + inner[:keep] + marker + m.group(3)
+
+    out = _block_re.sub(_repl, content)
+    return out, saved
+
+
+def maybe_compact_library(home_dir: str) -> bool:
+    """
+    自动压缩 library：文件超阈值时执行「条目内大块 elide + Trident 条目级压缩」。
+    保留最近 preserve_recent 条原样（与 claw-code compact.rs 一致）。
+    带冷却与最小收益保护，压缩失败不影响主流程。
+
+    Returns:
+        True 表示至少一个文件发生了压缩重写。
+    """
+    global _last_auto_compact
+    try:
+        from .memory_compact import estimate_tokens, compact_library_entries, CompactConfig
+    except Exception:
+        return False
+    library_dir = get_ai_session_library_dir(home_dir)
+    changed = False
+    now = time.time()
+    try:
+        for fname in sorted(os.listdir(library_dir)):
+            if not fname.endswith(".txt"):
+                continue
+            fpath = os.path.join(library_dir, fname)
+            # 冷却保护：刚压缩过的文件不重复扫描
+            _last_ts = _last_auto_compact.get(fpath, 0.0)
+            if now - _last_ts < _AUTO_COMPACT_COOLDOWN:
+                continue
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+            if len(content) < _AUTO_COMPACT_MIN_FILE_SIZE:
+                continue
+
+            # ── 1) 条目内大块 elide（旧文件残留的原始工具输出）──
+            content2, saved_chars = elide_oversized_blocks(content)
+
+            # ── 2) 条目级 Trident 压缩 ──
+            entries = split_library_entries(content2, fname)
+            needs_compact = (
+                len(entries) > _AUTO_COMPACT_MAX_ENTRIES
+                or estimate_tokens(content2) > _AUTO_COMPACT_MAX_TOKENS
+            )
+            if needs_compact:
+                try:
+                    _cfg = CompactConfig()
+                    _result = compact_library_entries(entries, _cfg)
+                    if _result.final_count < _result.original_count:
+                        rebuilt = _ENTRY_SEPARATOR.join(
+                            e["content"] for e in _result.entries if e.get("content")
+                        )
+                        saved_chars += max(0, len(content2) - len(rebuilt))
+                        content2 = rebuilt
+                except Exception:
+                    pass
+
+            if saved_chars < _AUTO_COMPACT_MIN_SAVINGS:
+                continue
+            # 原子写回
+            tmp_path = fpath + ".compact.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(content2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, fpath)
+            _last_auto_compact[fpath] = time.time()
+            changed = True
+    except Exception:
+        pass
+    return changed
+
+
 # ── 会话管理 ──
 
 def get_ai_session_library_dir(home_dir: str) -> str:
@@ -441,7 +576,7 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
         content.append(f"- **{'Referenced Memory' if md else '引用记忆'}**: `{referenced_memory}`")
         content.append("")
     
-    # 命令执行
+    # 命令执行（输出只存高信号片段，原文在会话中）
     for idx, cmd in enumerate(commands, 1):
         cmd_result = cmd_results.get(cmd, "Not executed or execution failed" if md else "未执行或执行失败")
         if cmd_result and "STDERR:" in cmd_result and "STDOUT:" in cmd_result:
@@ -449,12 +584,12 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
             stderr_part = cmd_result.split("STDERR:")[1].strip()
             filtered_result = []
             if stdout_part:
-                filtered_result.append(f"**{'Output' if md else '输出'}**:\n```\n{stdout_part}\n```")
+                filtered_result.append(f"**{'Output' if md else '输出'}**:\n```\n{_cap_text(stdout_part, _LIB_CMD_OUTPUT_MAX_CHARS)}\n```")
             if stderr_part:
-                filtered_result.append(f"**{'Error' if md else '错误'}**:\n```\n{stderr_part}\n```")
+                filtered_result.append(f"**{'Error' if md else '错误'}**:\n```\n{_cap_text(stderr_part, _LIB_CMD_OUTPUT_MAX_CHARS)}\n```")
             cmd_result = "\n".join(filtered_result) if filtered_result else (f"*{('No output' if md else '无输出')}*")
         content.append(f"#### {'Command' if md else '命令'} #{idx}: `{cmd}`")
-        content.append(cmd_result or f"*{('No output' if md else '无输出')}*")
+        content.append(_cap_text(cmd_result or "", _LIB_CMD_OUTPUT_MAX_CHARS) or f"*{('No output' if md else '无输出')}*")
         content.append("")
     
     # 工具调用（完整路径，不截断）
@@ -509,11 +644,31 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
         f.flush()
         os.fsync(f.fileno())
     
-    # ── 记忆压缩已改为手动触发（/compact 命令），不再自动执行 ──
-    # try:
-    #     maybe_compact_library(home_dir)
-    # except Exception:
-    #     pass  # 压缩失败不影响主流程
+    # ── 自动压缩：library 超预算自动折叠（移植 claw-code 自动压缩，冷却+最小收益保护）──
+    try:
+        maybe_compact_library(home_dir)
+    except Exception:
+        pass  # 压缩失败不影响主流程
+
+
+# ── 写入降噪常量（移植 claw-code：工具原文只活会话，library 只存高信号）──
+# 单块原文上限（字符）。EDIT 的 search/replace 属高信号内容，接近完整保留。
+_LIB_VIEW_MAX_CHARS = 800      # VIEW 文件内容
+_LIB_GREP_MAX_CHARS = 600      # grep 结果
+_LIB_GLOB_MAX_CHARS = 400      # glob 结果
+_LIB_INFO_MAX_CHARS = 500      # get_file_info 结果
+_LIB_WRITE_MAX_CHARS = 500     # WRITE 内容
+_LIB_EDIT_MAX_CHARS = 1000     # EDIT search/replace（高信号）
+_LIB_APPEND_MAX_CHARS = 400    # APPEND 内容
+_LIB_INSERT_MAX_CHARS = 400    # INSERT 内容
+_LIB_CMD_OUTPUT_MAX_CHARS = 400  # 命令输出
+
+
+def _cap_text(text: str, limit: int) -> str:
+    """截断文本到 limit 字符，超限时追加省略标记。"""
+    if not text or len(text) <= limit:
+        return text
+    return text[:limit] + f"\n... (truncated, {len(text)} chars total)"
 
 
 # ── 文件操作结果格式化 ──
@@ -537,32 +692,28 @@ def _format_tool_results(tool_results: List[Dict]) -> str:
             rng = params.get("range", "")
             range_str = f" (range={rng})" if rng else " (full)"
             lines.append(f"#### 📖 {name} — `{path}`{range_str}")
-            # 结果已带行号（_exec_read_file 返回格式）
+            # 结果已带行号（_exec_read_file 返回格式）；只存高信号片段
             if result:
-                lines.append(result[:5000])
-                if len(result) > 5000:
-                    lines.append(f"... (truncated, {len(result)} chars)")
+                lines.append(_cap_text(result, _LIB_VIEW_MAX_CHARS))
         
         elif name == "grep_search":
             pattern = params.get("pattern", "?")
             path = params.get("path", ".")
             lines.append(f"#### 🔍 {name} — pattern=`{pattern}` in `{path}`")
             if result:
-                lines.append(result[:3000])
-                if len(result) > 3000:
-                    lines.append(f"... ({len(result)} chars total)")
+                lines.append(_cap_text(result, _LIB_GREP_MAX_CHARS))
         
         elif name == "glob_search":
             pattern = params.get("pattern", "?")
             lines.append(f"#### 🔎 {name} — `{pattern}`")
             if result:
-                lines.append(result[:2000])
+                lines.append(_cap_text(result, _LIB_GLOB_MAX_CHARS))
         
         elif name == "get_file_info":
             path = params.get("path", "?")
             lines.append(f"#### ℹ️ {name} — `{path}`")
             if result:
-                lines.append(result[:500])
+                lines.append(_cap_text(result, _LIB_INFO_MAX_CHARS))
         
         lines.append("")
     
@@ -630,9 +781,8 @@ def _format_native_results(markup_results: List[Dict]) -> str:
                             "toml": "toml", "md": "markdown", "html": "html", "css": "css"}
                 lang = lang_map.get(ext, "")
                 lines.append(f"```{lang}")
-                lines.append(content[:5000])  # 单文件最多 5000 字符
-                if len(content) > 5000:
-                    lines.append(f"... (truncated, {len(content)} chars total)")
+                # 只存高信号片段（原文已在会话中，需要时可重新读取）
+                lines.append(_cap_text(content, _LIB_VIEW_MAX_CHARS))
                 lines.append("```")
             else:
                 lines.append(f"  {message}")
@@ -643,21 +793,18 @@ def _format_native_results(markup_results: List[Dict]) -> str:
             old_content = r.get("old_content", "")
             
             lines.append(f"#### {icon} ✏️ EDIT — `{abs_path}`")
+            # search/replace 是高信号内容：编辑语义核心，接近完整保留
             if search:
-                search_display = search[:1000]
+                search_display = _cap_text(search, _LIB_EDIT_MAX_CHARS)
                 lines.append(f"- **Search:**")
                 lines.append(f"  ```")
                 lines.append(search_display)
-                if len(search) > 1000:
-                    lines.append(f"  ... (truncated, {len(search)} chars total)")
                 lines.append(f"  ```")
             if replace:
-                replace_display = replace[:1000]
+                replace_display = _cap_text(replace, _LIB_EDIT_MAX_CHARS)
                 lines.append(f"- **Replace:**")
                 lines.append(f"  ```")
                 lines.append(replace_display)
-                if len(replace) > 1000:
-                    lines.append(f"  ... (truncated, {len(replace)} chars total)")
                 lines.append(f"  ```")
             if old_content and not search:
                 lines.append(f"- **Old content:** `{old_content[:200]}`")
@@ -675,9 +822,7 @@ def _format_native_results(markup_results: List[Dict]) -> str:
                             "md": "markdown", "html": "html", "css": "css"}
                 lang = lang_map.get(ext, "")
                 lines.append(f"```{lang}")
-                lines.append(content[:3000])
-                if len(content) > 3000:
-                    lines.append(f"... (truncated, {len(content)} chars total)")
+                lines.append(_cap_text(content, _LIB_WRITE_MAX_CHARS))
                 lines.append("```")
         
         elif op_type == "delete" or op_type == "delete_by_content":
@@ -696,9 +841,7 @@ def _format_native_results(markup_results: List[Dict]) -> str:
             lines.append(f"  {message}")
             if content:
                 lines.append(f"```")
-                lines.append(content[:1000])
-                if len(content) > 1000:
-                    lines.append(f"... (truncated, {len(content)} chars total)")
+                lines.append(_cap_text(content, _LIB_APPEND_MAX_CHARS))
                 lines.append("```")
         
         elif op_type == "insert":
@@ -708,9 +851,7 @@ def _format_native_results(markup_results: List[Dict]) -> str:
             lines.append(f"  {message}")
             if content:
                 lines.append(f"```")
-                lines.append(content[:1000])
-                if len(content) > 1000:
-                    lines.append(f"... (truncated, {len(content)} chars total)")
+                lines.append(_cap_text(content, _LIB_INSERT_MAX_CHARS))
                 lines.append("```")
         
         elif op_type == "batch":

@@ -55,21 +55,23 @@ from typing import Dict, List, Tuple, Optional, Any, Callable, Union
 
 from pathlib import Path
 
-from argon2.exceptions import VerifyMismatchError
-
-
-
 from bin.activite_cmd import handle_activite_core
-from man import start_background_scan
-
-from prompt_toolkit.formatted_text import FormattedText
 
 # === 热路径模块级导入（从函数内提升，避免每条命令重复 import 查找）===
-from lib.build_tool_index import refresh_tool_index
-from lib.scan_path_cmds import refresh_system_cmds
-from lib.parse_and_execute import parse_and_execute as _parse_and_execute
+# parse_and_execute 惰性加载：lib.parse_and_execute 导入耗时 ~0.24s，
+# 只在首次执行命令时加载——Main.py 启动不再等待（行为不变）
 from lib.terminal.exe import run_cmd_sync as _run_cmd_sync
 from lib.parse import resolve_paths_in_multiline_text
+
+_parse_and_execute = None  # 惰性占位
+
+
+def _get_parse_and_execute():
+    """惰性加载 lib.parse_and_execute（启动提速，行为不变）。"""
+    global _parse_and_execute
+    if _parse_and_execute is None:
+        from lib.parse_and_execute import parse_and_execute as _parse_and_execute
+    return _parse_and_execute
 
 # 真正的argon2id加密（底层实现，无版本兼容问题）
 def argon2id_hash(password: str, salt: str) -> str:
@@ -98,6 +100,7 @@ def argon2id_verify(password: str, stored_hash: str) -> bool:
     password_bytes = password.encode("utf-8")
     stored_hash_bytes = stored_hash.encode("utf-8")
     
+    from argon2.exceptions import VerifyMismatchError
     try:
         from argon2.low_level import verify_secret
         from argon2.low_level import Type
@@ -326,8 +329,11 @@ CURRENT_PROCESSES: List[Tuple[int, float, str, str]] = []  # 运行中进程（P
  
 log_file_handler: Optional[open] = None      # 日志文件句柄
 
-# 5. 别名与命令历史
-ALIAS_CACHE: Dict[str, Any] = {}            # 命令别名缓存
+# 5. 命令历史
+_PENDING_ALIAS_SCRIPT: str = ""             # 待发送到 PTY 的工具别名脚本
+_PENDING_ALIAS_DATA: List[List[str]] = []    # 结构化别名数据（后台线程填充）
+_alias_ready: threading.Event = threading.Event()  # 别名数据就绪信号
+_alias_thread: Optional[threading.Thread] = None  # 后台别名生成线程
 COMMAND_HISTORY: List[Tuple[str, float, str, str, str]] = []  # 命令历史（命令+时间+会话ID+请求ID+目录）
 USER_CONFIG_PATH: str = ""                  # 用户配置路径
 USER_HISTORY_PATH: str = ""                 # 命令历史路径
@@ -398,10 +404,16 @@ SADO_CONFIG_PATH: str = ""  # 在 init_user_home 后设置
 SADO_CONFIG: List[Dict[str, Any]] = []  # 存储 sado 配置
 
 def init_sado_config(request_id: str) -> None:
+    global SADO_CONFIG_PATH, SADO_CONFIG
     _sync_globals_to_ctx()
     from core.bootstrap import init_sado_config as _isc
     from core.context import get_ctx
     _isc(get_ctx(), request_id)
+    # bootstrap 只在 ctx 上修正了路径/配置，需回写模块全局，
+    # 否则启动末尾的 _sync_globals_to_ctx() 会用空值覆盖 ctx，导致 sado 误报"配置文件不存在"
+    ctx = get_ctx()
+    SADO_CONFIG_PATH = ctx.SADO_CONFIG_PATH
+    SADO_CONFIG = ctx.SADO_CONFIG
 
 def init_onyxlog_permission(request_id: str) -> None:
     """
@@ -615,7 +627,7 @@ def init_user_mapping() -> None:
 
 
 def scan_path_for_system_cmds(request_id: str) -> None:
-    """初始化扫描模块：注入参数到 scan_path_cmds.py"""
+    """初始化扫描模块：注入参数到 scan_path_cmds.py + 同步扫描工具别名"""
     from lib.scan_path_cmds import init_scan_path_cmds, scan_path_for_system_cmds
 
     init_scan_path_cmds(
@@ -630,21 +642,13 @@ def scan_path_for_system_cmds(request_id: str) -> None:
     )
     log_info("扫描模块初始化完成", request_id)
     
-    request_id_local = str(uuid.uuid4())
-    
-    # 异步刷新工具索引（非阻塞）
-    from lib.build_tool_index import refresh_tool_index
-    refresh_tool_index(
-        request_id=request_id_local,
-        force=True,
-        log_info_func=log_info,
-        log_error_func=log_error
-    )
+    # 后台生成工具 alias（避免阻塞启动）
+    _start_alias_background_thread(request_id)
     
     # 异步刷新系统命令（非阻塞）
     from lib.scan_path_cmds import refresh_system_cmds
     refresh_system_cmds(
-        request_id=request_id_local,
+        request_id=request_id,
         force=True,
         log_info_func=log_info,
         log_error_func=log_error
@@ -1474,11 +1478,124 @@ def check_admin_permission() -> None:
 
 
 
-def init_tool_dirs() -> bool:
+def _get_tool_count_cache_path() -> str:
+    """工具数量缓存文件路径"""
+    return os.path.join(USER_HOME_DIR, ".cache", "onyx", "onyx", "tool_count.json")
+
+
+def _read_tool_count_from_cache() -> int:
+    """从缓存文件读取工具数量（无阻塞）"""
+    try:
+        path = _get_tool_count_cache_path()
+        if os.path.isfile(path):
+            with open(path, 'r') as f:
+                return json.load(f).get("count", 0)
+    except Exception:
+        pass
+    return 0
+
+
+def _write_tool_count_to_cache(count: int, data: List[List[str]]) -> None:
+    """将工具数量和别名数据写入缓存文件"""
+    try:
+        path = _get_tool_count_cache_path()
+        os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump({
+                "count": count,
+                "data": data,
+                "timestamp": time.time()
+            }, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _start_alias_background_thread(request_id: str = "") -> None:
+    """后台线程：扫描工具目录并缓存别名脚本和结构化数据。
+    幂等：若已有线程在跑或数据已就绪则跳过，避免重复扫描。
+    扫描结果同时写入 TOOL_INDEX_CACHE 和 tool_count.json 缓存文件。
+    """
+    global _PENDING_ALIAS_SCRIPT, _PENDING_ALIAS_DATA, _alias_thread, _alias_ready
+    
+    # 已就绪或正在扫描 → 不重复启动
+    if _alias_ready.is_set():
+        return
+    if _alias_thread is not None and _alias_thread.is_alive():
+        return
+    
+    def _run():
+        global _PENDING_ALIAS_SCRIPT, _PENDING_ALIAS_DATA, _alias_ready
+        global TOOL_INDEX_CACHE
+        try:
+            _sync_globals_to_ctx()
+            from core.bootstrap import generate_tool_alias_all as _gtaa
+            from core.context import get_ctx
+            cmds, data = _gtaa(get_ctx(), request_id)
+            if cmds:
+                _PENDING_ALIAS_SCRIPT = "; ".join(cmds)
+                _PENDING_ALIAS_DATA = data
+                # 填充 TOOL_INDEX_CACHE（供后续 /tools 等查询）
+                if not TOOL_INDEX_CACHE:
+                    for tool_name, cat, script_path in data:
+                        TOOL_INDEX_CACHE[tool_name] = {
+                            "name": tool_name,
+                            "category": cat,
+                            "path": script_path
+                        }
+                # 写入工具数量缓存文件（供 banner 秒读）
+                _write_tool_count_to_cache(len(data), data)
+                from core.log_manager import log_info
+                log_info(f"工具别名 {len(cmds)} 条（后台扫描完成）", request_id)
+        except Exception as e:
+            from core.log_manager import log_error
+            log_error(f"后台别名扫描失败: {str(e)}", request_id)
+        finally:
+            _alias_ready.set()
+    
+    _alias_ready.clear()
+    _alias_thread = threading.Thread(target=_run, daemon=True, name="alias-scanner")
+    _alias_thread.start()
+
+
+def _send_alias_to_shell(request_id: str) -> None:
+    """完全后台静默加载别名到 shell：0阻塞，不显示任何面板。"""
+    global _PENDING_ALIAS_SCRIPT, _PENDING_ALIAS_DATA, _alias_ready
+    
+    def _do_send():
+        global _PENDING_ALIAS_SCRIPT, _PENDING_ALIAS_DATA
+        _alias_ready.wait()
+        if not _PENDING_ALIAS_SCRIPT:
+            return
+        try:
+            import tempfile, os as _os
+            alias_file = _os.path.join(tempfile.gettempdir(), f"onyx_aliases_{_os.getpid()}.sh")
+            with open(alias_file, 'w', encoding='utf-8') as f:
+                f.write(_PENDING_ALIAS_SCRIPT)
+            run_cmd_sync(f". '{alias_file}' 2>/dev/null; rm -f '{alias_file}'",
+                         request_id, is_tool=False, tool_perm=0)
+            _PENDING_ALIAS_SCRIPT = ""
+            _PENDING_ALIAS_DATA = []
+        except Exception as e:
+            from core.log_manager import log_error
+            log_error(f"别名发送失败: {str(e)}", request_id)
+    
+    # 始终后台执行 run_cmd_sync，主线程零阻塞
+    threading.Thread(target=_do_send, daemon=True, name="alias-sender").start()
+
+
+def generate_tool_alias_commands(request_id: str = "") -> List[str]:
+    """同步扫描工具目录，生成 shell alias 命令列表"""
     _sync_globals_to_ctx()
-    from core.bootstrap import init_tool_dirs as _itd
+    from core.bootstrap import generate_tool_alias_commands as _gtac
     from core.context import get_ctx
-    return _itd(get_ctx())
+    return _gtac(get_ctx(), request_id)
+
+def generate_tool_alias_data(request_id: str = "") -> List[List[str]]:
+    """同步扫描工具目录，返回结构化别名数据 [(tool_name, category, script_path), ...]"""
+    _sync_globals_to_ctx()
+    from core.bootstrap import generate_tool_alias_data as _gtad
+    from core.context import get_ctx
+    return _gtad(get_ctx(), request_id)
 
 def load_user_config() -> None:
     _sync_globals_to_ctx()
@@ -1591,23 +1708,7 @@ def set_tool_permission(tool_dir: str, perm: int, request_id: str) -> bool:
     from core.context import get_ctx
     return _stp(get_ctx(), tool_dir, perm, request_id)
 
-def load_tool_config(tool_dir: str) -> Dict[str, str]:
-    from core.tool_registry import load_tool_config as _ltc
-    from core.context import get_ctx
-    return _ltc(get_ctx(), tool_dir)
-
-def set_tool_config(tool_dir: str, config_key: str, value: str, request_id: str) -> bool:
-    from core.tool_registry import set_tool_config as _stc
-    from core.context import get_ctx
-    return _stc(get_ctx(), tool_dir, config_key, value, request_id)
-
-
 # -------------------------- 工具查找与执行（第二级优先级） --------------------------
-def is_cli_tool(tool_config: Dict[str, str]) -> bool:
-    from core.tool_registry import is_cli_tool
-    return is_cli_tool(tool_config)
-    
-
 
 def build_tool_index(request_id: str, batch_size: int = 10, sleep_interval: float = 0.2) -> None:
     from core.tool_registry import build_tool_index as _bti
@@ -1826,30 +1927,7 @@ def get_process_risk_level(pid: int, cmd: str) -> Tuple[int, str]:
     else:
         return 1, risk_map["1"]
 
-# -------------------------- 工具查找辅助函数 --------------------------
-# _find_tool_in_dir / _find_tool_entry / _is_cli_tool / _get_tool_type / _get_tool_permission
-# → 已迁移至 core/tool_registry.py
-from core.tool_registry import (
-    _find_tool_entry,
-    get_tool_permission_from_dir as _get_tool_permission,
-)
-from core.tool_registry import _get_tool_type
-
-# _is_valid_tool_path (内联于 core/tool_registry)
-def _is_valid_tool_path(path: str, no_level_limit: bool) -> bool:
-    if no_level_limit:
-        return True
-    rel_path = os.path.relpath(path, TOOL_MAIN_DIR)
-    path_depth = len([p for p in rel_path.split(os.sep) if p.strip()])
-    return path_depth == 2
-
-def _is_cli_tool(tool_dir: str) -> bool:
-    from core.tool_registry import load_tool_config as _ltc
-    from core.context import get_ctx
-    return is_cli_tool(_ltc(get_ctx(), tool_dir))
-
-
-# -------------------------- 命令解析与执行（优先级：1.工具箱命令→2.工具→3.系统命令） --------------------------
+# -------------------------- 命令解析与执行（优先级：1.内置命令→2.工具→3.系统命令） --------------------------
 
 
 def replace_virtual_path_in_cmd(cmd: str, request_id: str) -> str:
@@ -1874,21 +1952,14 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
     _refresh_request_counter += 1
     request_id_local = str(_refresh_request_counter)
     
-    # 异步刷新缓存
-    refresh_tool_index(request_id=request_id_local, force=False, log_info_func=log_info, log_error_func=log_error)
-    refresh_system_cmds(request_id=request_id_local, force=False, log_info_func=log_info, log_error_func=log_error)
-    
     effective_root = ctx.ROOT_DIR if ctx._SANDBOX_ENABLED else "/"
     
-    from bin.ai_cmd import clear_ai_cmd_cache
-    _parse_and_execute(
+    _get_parse_and_execute()(
         cmd=cmd,
         is_recursive=is_recursive,
         is_ai_triggered=is_ai_triggered,
         BUILTIN_COMMANDS=ctx.BUILTIN_COMMANDS,
-        ALIAS_CACHE=ctx.ALIAS_CACHE,
         CMD_MAPPING_CACHE=ctx.CMD_MAPPING_CACHE,
-        TOOL_INDEX_CACHE=ctx.TOOL_INDEX_CACHE,
         current_sys_cmds=ctx.current_sys_cmds,
         sys_type=ctx.sys_type,
         user_mode=ctx.user_mode,
@@ -1908,21 +1979,16 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
         PATH_INDEX_MSG_PATH=ctx.PATH_INDEX_MSG_PATH,
         DIR_CACHE_MSG_PATH=ctx.DIR_CACHE_MSG_PATH,
         CMD_MAPPING_MSG_PATH=ctx.CMD_MAPPING_MSG_PATH,
-        TOOL_INDEX_MSG_PATH=ctx.TOOL_INDEX_MSG_PATH,
         get_current_lang_func=get_current_lang,
         resolve_path_func=resolve_path,
         check_sandbox_path_func=check_sandbox_path,
         validate_param_path_func=validate_param_path,
-        check_tool_permission_func=check_tool_permission,
         run_cmd_sync_func=run_cmd_sync,
-        execute_tool_func=execute_tool,
         replace_virtual_path_in_cmd_func=replace_virtual_path_in_cmd,
         get_virtual_path_func=get_virtual_path,
         check_blocked_cmd_func=check_blocked_cmd,
         is_interactive_command_func=is_interactive_command,
         read_config_file_func=read_config_file,
-        clear_ai_cmd_cache_func=clear_ai_cmd_cache,
-        build_tool_index_func=build_tool_index,
         load_cmd_mapping_cache_func=load_cmd_mapping_cache,
         log_info_func=log_info,
         log_error_func=log_error,
@@ -2126,23 +2192,6 @@ def handle_set_adv_pwd(cmd_parts: List[str], request_id: str) -> None:
     _hsp(get_ctx(), cmd_parts, request_id)
 
 
-def handle_unalias(cmd_parts: List[str], request_id: str) -> None:
-    from bin.alias_cmd import handle_unalias_core
-    handle_unalias_core(
-        cmd_parts=cmd_parts,
-        request_id=request_id,
-        ALIAS_CACHE=ALIAS_CACHE,
-        save_user_config=save_user_config,
-        log_info=log_info,
-        log_error=log_error,
-        Fore=Fore,
-        Style=Style
-    )
-
-    save_user_config()
-
-
-
 def handle_autocmd(cmd_parts: List[str], request_id: str) -> None:
     """autocmd命令入口（对外接口）"""
     from bin.autocmd_cmd import handle_autocmd_core, load_autocmd_core, save_autocmd_core
@@ -2172,6 +2221,12 @@ def handle_clear(cmd_parts: List[str], request_id: str) -> None:
     print('\033[3J\033[2J\033[H', end='')
     
     log_info("Clear screen executed", request_id)
+
+
+def handle_pwd(cmd_parts: List[str], request_id: str) -> None:
+    """pwd 命令：AI 虚拟沙盒激活时显示虚拟根 /，普通场景显示真实工作目录"""
+    from core.handlers.builtins import handle_pwd as _hpwd
+    _hpwd(cmd_parts, request_id)
 
 def handle_exit(cmd_parts: List[str], request_id: str) -> None:
     log_info("程序退出", request_id)
@@ -2238,7 +2293,7 @@ def handle_sado(cmd_parts: List[str], request_id: str) -> None:
         OS_OR_TBS=OS_OR_TBS,
         sys_type=sys_type,
         parse_and_execute=parse_and_execute,
-        alias_cache=ALIAS_CACHE,           # 新增：传递别名缓存
+        alias_cache={},  # 别名系统已移除
         log_info=log_info,
         log_error=log_error,
         get_current_lang=get_current_lang,
@@ -2440,24 +2495,6 @@ def save_history_incremental() -> None:
         except Exception as e:
             log_error(f"命令历史保存失败：{str(e)}", user_info["session_id"])
 
-def save_user_config() -> None:
-    """保存用户配置（别名）"""
-    if not global_config["user_config"]["auto_load_user_config"]:
-        return
-    
-    try:
-        user_config = {"alias": ALIAS_CACHE}
-        with open(USER_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(user_config, f, ensure_ascii=False, indent=2)
-        log_info("用户配置（别名）保存完成", user_info["session_id"])
-    except Exception as e:
-        log_error(f"用户配置保存失败：{str(e)}", user_info["session_id"])
-        
-        
-
-
-
-
 def load_autocmd() -> None:
     """加载开机自启命令（程序启动时调用）"""
     global AUTO_CMDS
@@ -2521,8 +2558,11 @@ def _lazy_which(cmd_parts: List[str], request_id: str) -> None:
 BUILTIN_COMMANDS: Dict[str, Callable[[List[str], str], None]] = {
     # 基础TBS命令
     "clear": handle_clear,
+    "pwd": handle_pwd,
     "exit": handle_exit,
-    "refresh": lambda cmd_parts, req_id: executor.submit(build_tool_index, req_id) if executor else None,
+    "refresh": lambda cmd_parts, req_id: executor.submit(
+        lambda: generate_tool_alias_commands(str(uuid.uuid4())), req_id
+    ) if executor else None,
     
     "activite": handle_activite,
     "manage": _lazy_manage,
@@ -2532,9 +2572,7 @@ BUILTIN_COMMANDS: Dict[str, Callable[[List[str], str], None]] = {
     "set-adv-pwd": handle_set_adv_pwd,
     "autocmd": handle_autocmd,
     "help": _lazy_help,
-    "mktool": handle_mktool,
 
-    "unalias": handle_unalias,
     "source": _lazy_source,
     "which": _lazy_which,
     "sado": handle_sado,
@@ -2732,26 +2770,6 @@ def show_welcome():
      
      
 
-def resolve_alias(cmd_parts: List[str], request_id: str) -> List[str]:
-    """
-    解析命令中的别名（接口函数）
-    将参数传递给 lib.parse_and_execute.resolve_alias
-    """
-    from lib.parse_and_execute import resolve_alias as _resolve_alias
-    
-    global ALIAS_CACHE, validate_param_path, log_info
-    
-    return _resolve_alias(
-        cmd_parts=cmd_parts,
-        request_id=request_id,
-        ALIAS_CACHE=ALIAS_CACHE,
-        validate_param_path_func=validate_param_path,
-        log_info_func=log_info
-    )
-
-
-
-
 def handle_up_arrow(current_input: str) -> Tuple[str, int]:
     """处理上箭头按键：切换到上一条历史命令"""
     global CURRENT_HISTORY_INDEX, INPUT_BUFFER
@@ -2802,7 +2820,7 @@ def universal_input(prompt_func: Callable[[], Union['FormattedText', str]] = gen
         prompt_func=prompt_func,
 
         sys_type=sys_type,
-        alias_cache=ALIAS_CACHE,
+        alias_cache={},  # 别名系统已移除
         user_home_dir=USER_HOME_DIR,
         command_history=COMMAND_HISTORY,
         max_history_len=MAX_HISTORY_LEN,
@@ -3107,13 +3125,10 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
             return False
         record_step("14.init_sado_config")
 
-        # 10. 工具目录初始化
-        if not init_tool_dirs():
-            print(Fore.RED + msg["fatal_tool_dir_fail"] + Style.RESET_ALL)
-            return False
-        record_step("15.init_tool_dirs")
+        # 10. 后台生成工具 alias（不阻塞、不计时、不统计）
+        _start_alias_background_thread(request_id)
 
-        # 11. 加载或扫描系统命令（必须在工具索引之前，防止 build_cmd_mapping_cache 提前写入残缺缓存）
+        # 11. 加载或扫描系统命令
         from lib.makecache import load_cmd_mapping_cache as lib_load_cmd_mapping_cache
         
         # 先尝试加载缓存
@@ -3168,10 +3183,6 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
                 name="sys-cmd-scanner"
             ).start()
         record_step("16.load_or_scan_system_cmds")
-
-        # 12. 构建工具索引（在系统命令缓存判定之后）
-        build_tool_index(request_id)
-        record_step("17.build_tool_index")
 
         # 17b. 后台手册页扫描已移至 main_loop 提示符显示后延迟执行
         record_step("17b.start_man_scan_deferred")
@@ -3423,8 +3434,7 @@ def _sync_globals_to_ctx() -> None:
     ctx.PROCESS_LOCK = PROCESS_LOCK
     ctx.executor = executor
     ctx.CURRENT_PROCESSES = CURRENT_PROCESSES
-    # 别名/历史
-    ctx.ALIAS_CACHE = ALIAS_CACHE
+    # 历史
     ctx.BUILTIN_COMMANDS = BUILTIN_COMMANDS
     # 其他
     ctx.AI_TOOL_OUTPUT_CACHE = AI_TOOL_OUTPUT_CACHE
@@ -3541,7 +3551,8 @@ def main_loop() -> None:
         # 准备参数
         program_version = global_config["program_info"].get("version", "1.0.0")
         system_display = "Linux(?)" if (OS_OR_TBS == "OS" and sys_type == "Termux") else sys_type
-        tool_count = len(TOOL_INDEX_CACHE)
+        # 工具数量从缓存文件读取（不阻塞），后台线程第一次启动后写入
+        tool_count = _read_tool_count_from_cache() or len(TOOL_INDEX_CACHE)
         
         # 显示启动横幅
         show_start_banner(
@@ -3556,16 +3567,8 @@ def main_loop() -> None:
         show_banner_ms = (time.perf_counter() - stage_start) * 1000
         log_info(f"   阶段4-显示启动横幅: 完成 (耗时: {show_banner_ms:.2f}ms)", request_id)
 
-        # ========== 阶段5: 执行 RC 文件 ==========
-        stage_start = time.perf_counter()
-        
-        if global_config.get("rc_load_enabled", True):
-            log_info(lang_msgs["rc_executing"], request_id)
-            source_rc_files(request_id)
-            log_info(lang_msgs["rc_executed"], request_id)
-        
-        rc_files_ms = (time.perf_counter() - stage_start) * 1000
-        log_info(f"   阶段5-执行RC文件: 完成 (耗时: {rc_files_ms:.2f}ms)", request_id)
+        # ========== 阶段5.5: 后台静默加载 alias（不显示任何面板）==========
+        _send_alias_to_shell(request_id)
 
         # ========== 阶段6: 显示启动小贴士 + 就绪提示 ==========
         stage_start = time.perf_counter()
@@ -3595,7 +3598,6 @@ def main_loop() -> None:
         log_info(f"   │ 阶段2 (环境初始化)    : {init_env_ms:>8.2f} ms  │", request_id)
         log_info(f"   │ 阶段3 (导入Banner)    : {import_banner_ms:>8.2f} ms  │", request_id)
         log_info(f"   │ 阶段4 (显示横幅)      : {show_banner_ms:>8.2f} ms  │", request_id)
-        log_info(f"   │ 阶段5 (执行RC文件)    : {rc_files_ms:>8.2f} ms  │", request_id)
         log_info(f"   │ 阶段6 (显示就绪提示)  : {show_ready_ms:>8.2f} ms  │", request_id)
         log_info(f"   ├─────────────────────────────────────────────────────────┤", request_id)
         log_info(f"   │ 总启动耗时           : {total_startup_ms:>8.2f} ms  │", request_id)
@@ -3628,6 +3630,7 @@ def main_loop() -> None:
         # man 手册页扫描：直接启动，不再延迟
         def _deferred_start_man_scan():
             try:
+                from man import start_background_scan
                 start_background_scan()
                 log_info("后台手册页扫描已启动", request_id)
             except Exception as e:
@@ -3647,6 +3650,12 @@ def main_loop() -> None:
         except (ImportError, OSError):
             pass
         # ────────────────────────────────────────────────────────────
+        
+        # ── RC 文件执行：启动流程最后一步，紧随其后渲染第一个命令提示符 ──
+        # （系统级 onyx.onyxrc + 用户级 .onyxrc；rc 中的 clear 等命令此时执行，
+        #   会清掉启动输出，随后提示符干净渲染）
+        if global_config.get("rc_load_enabled", True):
+            source_rc_files(request_id)
         
         # 记录命令执行次数
         cmd_count = 0
@@ -3786,7 +3795,6 @@ from core.tool_registry import (
     build_tool_index as _core_build_tool_index,
     find_similar_tools as _core_find_similar_tools,
     find_similar_cmds as _core_find_similar_cmds,
-    load_tool_config as _core_load_tool_config,
 )
 from core.config_loader import load_config as _core_load_config
 from core.log_manager import (

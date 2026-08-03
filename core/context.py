@@ -93,22 +93,10 @@ class AppContext:
     history_save_interval: int = 30
     MAX_HISTORY_LEN: int = 0
 
-    # ---- 别名 ----
-    ALIAS_CACHE: Dict[str, Any] = field(default_factory=dict)
-
     # ---- 内置命令 ----
     BUILTIN_COMMANDS: Dict[str, Callable] = field(default_factory=dict)
     AUTO_CMD_PATH: Optional[str] = None
     AUTO_CMDS: List = field(default_factory=list)
-
-    # ---- 工具 ----
-    TOOL_INDEX_CACHE: Dict[str, ToolInfo] = field(default_factory=dict)
-    SUPPORTED_MAIN_FILES: List[str] = field(default_factory=lambda: [
-        "Main.py", "Main.pyc", "main.py", "main.pyc",
-        "tool.py", "tool.pyc", "entry.py", "entry.pyc"])
-    MAIN_FILE_KEYWORDS: List[str] = field(default_factory=lambda: [
-        "main", "主", "entry", "入口", "start", "启动", "launch"])
-    SUPPORTED_EXEC_SUFFIXES: Dict[str, List[str]] = field(default_factory=dict)
 
     # ---- 进程 ----
     PROCESS_LOCK: Any = None

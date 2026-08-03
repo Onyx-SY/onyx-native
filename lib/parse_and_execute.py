@@ -232,27 +232,6 @@ class _LocalToolInfo:
 
 # ========== 本地相似命令查找函数 ==========
 
-def _find_similar_tools_local(wrong_cmd: str, tool_cache: Dict[str, Any]) -> List[Tuple[str, str]]:
-    """
-    本地查找相似工具命令（排除自身和内部 _ 前缀名称）
-    """
-    similar_tools = []
-    wrong_lower = wrong_cmd.lower()
-    
-    for tool_name, tool_info in tool_cache.items():
-        # 跳过内部变量/函数（_ 前缀）
-        if tool_name.startswith('_'):
-            continue
-        # 跳过完全匹配自身
-        if tool_name.lower() == wrong_lower:
-            continue
-        if wrong_lower in tool_name.lower():
-            tool_type = tool_info.get("tool_type", "other") if isinstance(tool_info, dict) else "other"
-            similar_tools.append((tool_name, tool_type))
-    
-    return similar_tools[:10]
-
-
 def _find_similar_cmds_local(wrong_cmd: str, cmd_mapping: Dict[str, Any]) -> List[str]:
     """
     本地查找相似系统命令（排除自身和内部 _ 前缀名称）
@@ -277,12 +256,11 @@ def _find_similar_cmds_local(wrong_cmd: str, cmd_mapping: Dict[str, Any]) -> Lis
     return similar_cmds
 
 
-def _get_cached_cmd_local(cmd_name: str, tool_cache: Dict[str, Any], 
-                           cmd_mapping: Dict[str, Any],
+def _get_cached_cmd_local(cmd_name: str, cmd_mapping: Dict[str, Any],
                            builtin_commands: Dict) -> Tuple[str, Any]:
     """
     本地获取缓存命令，不依赖外部函数
-    返回: (类型, 信息) 类型: 'builtins', 'tools', 'system', 'none'
+    返回: (类型, 信息) 类型: 'builtins', 'system', 'none'
     """
     cmd_lower = cmd_name.lower()
     
@@ -290,12 +268,7 @@ def _get_cached_cmd_local(cmd_name: str, tool_cache: Dict[str, Any],
     if builtin_commands and cmd_lower in builtin_commands:
         return ("builtins", builtin_commands[cmd_lower])
     
-    # 2. 匹配工具命令
-    tools = cmd_mapping.get("tools", {})
-    if cmd_lower in tools:
-        return ("tools", tools[cmd_lower])
-    
-    # 3. 匹配系统命令
+    # 2. 匹配系统命令
     system_cmds = cmd_mapping.get("system", [])
     if isinstance(system_cmds, list):
         for sys_cmd in system_cmds:
@@ -484,22 +457,6 @@ def _is_other_terminal_command(cmd_head: str, sys_type: str,
     return is_other_terminal_command(cmd_head, sys_type, other_terminal_cmds)
 
 
-def _is_tool_command_local(cmd_head: str, tool_cache: Dict[str, Any],
-                            cmd_mapping: Dict[str, Any]) -> Tuple[bool, Any]:
-    """
-    本地检查是否是工具命令（不依赖外部函数）
-    返回 (是否是工具, 工具信息)
-    
-    cmd_mapping[\"tools\"] 已由 _get_global_cache 预合并 tool_index，一次查找即可。
-    tool_cache 参数保留兼容性但不再使用。
-    """
-    cmd_lower = cmd_head.lower()
-    tools = cmd_mapping.get("tools")
-    if tools is not None and cmd_lower in tools:
-        return True, tools[cmd_lower]
-    return False, None
-
-
 def _is_system_command_local(cmd_head: str, cmd_mapping: Dict[str, Any], sys_type: str) -> bool:
     """本地检查是否是系统命令（O(1) frozenset 查找，替代 O(n) 列表扫描）"""
     system_set = cmd_mapping.get("_system_set")
@@ -513,7 +470,6 @@ def _is_system_command_local(cmd_head: str, cmd_mapping: Dict[str, Any], sys_typ
 
 
 def _determine_cmd_type_local(cmd_head: str, builtin_commands: Dict,
-                               tool_cache: Dict[str, Any],
                                cmd_mapping: Dict[str, Any],
                                sys_type: str,
                                other_terminal_cmds: Dict = None,
@@ -521,8 +477,8 @@ def _determine_cmd_type_local(cmd_head: str, builtin_commands: Dict,
                                is_multiline_line: bool = False) -> str:
     """
     本地判断命令类型（不依赖外部函数）
-    返回: 'builtin' | 'other_terminal' | 'tool' | 'system' | 'unknown'
-    优先级：内置 > 其余终端内置 > 工具 > 系统 > 未知
+    返回: 'builtin' | 'other_terminal' | 'system' | 'unknown'
+    优先级：内置 > 其余终端内置 > 系统 > 未知
     
     特殊规则：
     - sudo 后的命令不会是 builtin（sudo 不能执行内置命令）
@@ -533,10 +489,6 @@ def _determine_cmd_type_local(cmd_head: str, builtin_commands: Dict,
         if _is_other_terminal_command(cmd_head, sys_type, other_terminal_cmds):
             return 'other_terminal'
         
-        is_tool, _ = _is_tool_command_local(cmd_head, tool_cache, cmd_mapping)
-        if is_tool:
-            return 'tool'
-        
         if _is_system_command_local(cmd_head, cmd_mapping, sys_type):
             return 'system'
         
@@ -546,10 +498,6 @@ def _determine_cmd_type_local(cmd_head: str, builtin_commands: Dict,
     if is_multiline_line:
         if _is_other_terminal_command(cmd_head, sys_type, other_terminal_cmds):
             return 'other_terminal'
-        
-        is_tool, _ = _is_tool_command_local(cmd_head, tool_cache, cmd_mapping)
-        if is_tool:
-            return 'tool'
         
         if _is_system_command_local(cmd_head, cmd_mapping, sys_type):
             return 'system'
@@ -562,10 +510,6 @@ def _determine_cmd_type_local(cmd_head: str, builtin_commands: Dict,
     
     if _is_other_terminal_command(cmd_head, sys_type, other_terminal_cmds):
         return 'other_terminal'
-    
-    is_tool, _ = _is_tool_command_local(cmd_head, tool_cache, cmd_mapping)
-    if is_tool:
-        return 'tool'
     
     if _is_system_command_local(cmd_head, cmd_mapping, sys_type):
         return 'system'
@@ -588,9 +532,8 @@ def _build_command_for_execution(cmd_str: str, clean_cmd: str, redirect_config: 
     has_here_doc = (redirect_config.get('here_delimiter') and 
                     redirect_config.get('here_doc') is not None)
     
-    if cmd_type in ('system', 'other_terminal'):
+    if cmd_type in ('system', 'other_terminal', 'tool'):
         # 系统命令：直接使用 clean_cmd，保持原始格式
-        # 不要进行额外的路径替换
         replaced_cmd = clean_cmd
         
         non_here_redirect = {}
@@ -603,40 +546,6 @@ def _build_command_for_execution(cmd_str: str, clean_cmd: str, redirect_config: 
             full_cmd = _append_redirect_to_cmd(replaced_cmd, non_here_redirect)
         else:
             full_cmd = replaced_cmd
-            
-    elif cmd_type == 'tool' and tool_info:
-        # 兼容 dict 和对象两种格式
-        if isinstance(tool_info, dict):
-            tool_path = tool_info.get("path", "")
-        else:
-            tool_path = tool_info.path if hasattr(tool_info, 'path') else ""
-        
-        if tool_path:
-            # 提取原命令中命令头后面的原始字符串（保留引号、管道等）
-            stripped = clean_cmd.lstrip()
-            first_space = stripped.find(' ')
-            if first_space != -1:
-                args_str = stripped[first_space:].lstrip()
-            else:
-                args_str = ''
-            
-            if tool_path.endswith(('.py', '.pyc')) and sys.executable:
-                tool_cmd = f"{sys.executable} {shlex.quote(tool_path)} {args_str}"
-            else:
-                tool_cmd = f"{shlex.quote(tool_path)} {args_str}"
-            
-            non_here_redirect = {}
-            if redirect_config:
-                for key in ['stdout', 'stderr', 'stdin']:
-                    if key in redirect_config and redirect_config[key]:
-                        non_here_redirect[key] = redirect_config[key]
-            
-            if non_here_redirect:
-                full_cmd = _append_redirect_to_cmd(tool_cmd, non_here_redirect)
-            else:
-                full_cmd = tool_cmd
-        else:
-            full_cmd = cmd_str
     else:
         full_cmd = cmd_str
     
@@ -949,221 +858,6 @@ def _append_redirect_to_cmd(cmd: str, redirect_config: Dict) -> str:
     return ' '.join(parts)
 
 
-def _resolve_tool_command_in_line(line: str,
-                                   tool_cache: Dict[str, Any],
-                                   cmd_mapping: Dict[str, Any],
-                                   sys_type: str,
-                                   other_terminal_cmds: Dict = None,
-                                   current_sys_cmds: Dict = None,
-                                   builtin_commands: Dict = None,
-                                   resolve_path_func=None,
-                                   virtual_root_dir: str = None,
-                                   is_multiline_line: bool = False) -> str:
-    """
-    解析一行中的工具命令
-    
-    对于一行中可能包含多个分号分隔的命令，逐段解析工具路径
-    """
-    if not line or not line.strip():
-        return line
-    
-    # 按分号拆分为多个子命令
-    sub_parts = split_by_semicolon(line, sys_type)
-    
-    if len(sub_parts) <= 1:
-        # 单个命令，直接解析
-        return _resolve_single_command_tool(line, tool_cache, cmd_mapping,
-                                             sys_type, other_terminal_cmds,
-                                             current_sys_cmds, builtin_commands,
-                                             resolve_path_func, virtual_root_dir,
-                                             is_multiline_line)
-    
-    # 多个分号分隔的命令，逐个解析
-    resolved_parts = []
-    for i, part in enumerate(sub_parts):
-        if not part.strip():
-            resolved_parts.append(part)
-            continue
-        # 第2个及之后的分号段都是多行上下文
-        is_sub_multiline = is_multiline_line or (i > 0)
-        resolved = _resolve_single_command_tool(part, tool_cache, cmd_mapping,
-                                                  sys_type, other_terminal_cmds,
-                                                  current_sys_cmds, builtin_commands,
-                                                  resolve_path_func, virtual_root_dir,
-                                                  is_sub_multiline)
-        resolved_parts.append(resolved)
-    
-    return '; '.join(resolved_parts)
-
-
-def _resolve_single_command_tool(cmd_str: str,
-                                   tool_cache: Dict[str, Any],
-                                   cmd_mapping: Dict[str, Any],
-                                   sys_type: str,
-                                   other_terminal_cmds: Dict = None,
-                                   current_sys_cmds: Dict = None,
-                                   builtin_commands: Dict = None,
-                                   resolve_path_func=None,
-                                   virtual_root_dir: str = None,
-                                   is_multiline_line: bool = False) -> str:
-    """
-    解析单个命令中的工具路径
-    
-    支持：
-    - 普通工具命令：onyx-edit a → python /path/to/onyx-edit/Main.py a
-    - sudo 工具命令：sudo onyx-scan → sudo python /path/to/onyx-scan/Main.py
-    - 可执行文件路径：/path/to/binary args → 解析后的路径
-    - 非二进制文件：/path/to/script.py → python cmd.py source /path/to/script.py
-    
-    重要：工具命令解析后使用 __TOOL_CMD__: 前缀标记，避免被二次解析
-    重要：保留参数的原始引号，不要使用 shlex.split 破坏结构
-    
-    修复：对工具命令的参数进行虚拟路径解析
-    """
-    if not cmd_str or not cmd_str.strip():
-        return cmd_str
-    
-    # 检查是否包含管道符（不在引号内），如果包含则不解析工具命令
-    if has_pipeline(cmd_str, sys_type):
-        # 包含管道符的命令，不要解析工具，保持原样
-        return cmd_str
-    
-    # 使用 smart_shlex_split 但只用于提取命令头
-    parts = smart_shlex_split(cmd_str, sys_type)
-    if not parts:
-        return cmd_str
-
-    # shell 关键字（then/else/elif/do/in）→ 跳过，取后续 token 作为命令头
-    _SHELL_KW = frozenset({'then', 'else', 'elif', 'do', 'in'})
-    _head_idx = 0
-    while _head_idx < len(parts) and parts[_head_idx].lower() in _SHELL_KW:
-        _head_idx += 1
-    if _head_idx >= len(parts):
-        return cmd_str
-    
-    cmd_head = parts[_head_idx]
-    is_sudo = _is_sudo_command(cmd_head)
-    
-    # 确定实际命令头（sudo 之后可能还有关键字，如 sudo then onyx-nmap）
-    if is_sudo and _head_idx + 1 < len(parts):
-        _actual_idx = _head_idx + 1
-        while _actual_idx < len(parts) and parts[_actual_idx].lower() in _SHELL_KW:
-            _actual_idx += 1
-        if _actual_idx < len(parts):
-            actual_cmd_head = parts[_actual_idx]
-            actual_args_start = _actual_idx + 1
-        else:
-            actual_cmd_head = cmd_head
-            actual_args_start = _head_idx + 1
-    else:
-        actual_cmd_head = cmd_head
-        actual_args_start = _head_idx + 1
-    
-    # 合计跳过的 token 数（关键字 + sudo）
-    _total_skip = actual_args_start - 1  # 实际命令头之前的 token 数
-    
-    # 检查是否是工具命令
-    is_tool, tool_info = _is_tool_command_local(actual_cmd_head, tool_cache, cmd_mapping)
-    
-    if is_tool and tool_info:
-        # 兼容 dict 和对象格式
-        if isinstance(tool_info, dict):
-            tool_path = tool_info.get("path", "")
-        else:
-            tool_path = tool_info.path if hasattr(tool_info, 'path') else ""
-        
-        if tool_path:
-            # 提取参数：跳过前导 token（关键字 + sudo + 工具名），保留原始引号
-            stripped = cmd_str.lstrip()
-            _skip_n = _total_skip + 1  # +1 跳过工具名本身
-            for _ in range(_skip_n):
-                sp = stripped.find(' ')
-                if sp == -1:
-                    stripped = ''
-                    break
-                stripped = stripped[sp:].lstrip()
-            args_str = stripped
-            
-            # 对工具命令的参数进行虚拟路径解析
-            if resolve_path_func and args_str:
-                args_str = resolve_paths_in_multiline_text(args_str, resolve_path_func)
-            
-            # 构建工具命令
-            if tool_path.endswith(('.py', '.pyc')) and sys.executable:
-                tool_cmd = f"{sys.executable} {shlex.quote(tool_path)} {args_str}"
-            else:
-                tool_cmd = f"{shlex.quote(tool_path)} {args_str}"
-            
-            if is_sudo:
-                result = f"sudo {tool_cmd}".strip()
-            else:
-                result = tool_cmd.strip()
-            
-            return f"__TOOL_CMD__:{result}"
-    
-    # 不是工具命令，继续其他类型判断
-    # 检查是否是文件路径（未知命令但可能是可执行文件）
-    if resolve_path_func and ('/' in actual_cmd_head or actual_cmd_head.startswith('.')):
-        stripped = cmd_str.lstrip()
-        _skip_n = _total_skip + 1  # +1 跳过命令头本身
-        for _ in range(_skip_n):
-            sp = stripped.find(' ')
-            if sp == -1:
-                stripped = ''
-                break
-            stripped = stripped[sp:].lstrip()
-        args_str = stripped
-        
-        resolved = handle_executable_path(actual_cmd_head, resolve_path_func, virtual_root_dir)
-        if resolved != actual_cmd_head:
-            if is_sudo:
-                result = f"sudo {resolved} {args_str}".strip()
-            else:
-                result = f"{resolved} {args_str}".strip()
-            return f"__TOOL_CMD__:{result}"
-    
-    return cmd_str
-
-
-def _resolve_multiline_commands_tools(multiline_cmd: str,
-                                        tool_cache: Dict[str, Any],
-                                        cmd_mapping: Dict[str, Any],
-                                        sys_type: str,
-                                        other_terminal_cmds: Dict = None,
-                                        current_sys_cmds: Dict = None,
-                                        builtin_commands: Dict = None,
-                                        resolve_path_func=None,
-                                        virtual_root_dir: str = None) -> str:
-    """
-    解析多行命令中每一行的工具命令
-    """
-    if not multiline_cmd or not multiline_cmd.strip():
-        return multiline_cmd
-    
-    lines = multiline_cmd.split('\n')
-    resolved_lines = []
-    
-    for i, line in enumerate(lines):
-        if not line.strip():
-            resolved_lines.append(line)
-            continue
-        
-        if line.strip().startswith('<<'):
-            resolved_lines.append(line)
-            continue
-        
-        is_multiline_line = (i > 0)
-        
-        resolved_line = _resolve_tool_command_in_line(
-            line, tool_cache, cmd_mapping, sys_type,
-            other_terminal_cmds, current_sys_cmds, builtin_commands,
-            resolve_path_func, virtual_root_dir, is_multiline_line
-        )
-        resolved_lines.append(resolved_line)
-    
-    return '\n'.join(resolved_lines)
-
-
 def _check_adv_danger_prompt_config(root_dir: str, read_config_file_func=None) -> bool:
     """
     检查 Adv 模式是否需要二次确认
@@ -1203,6 +897,26 @@ def _adv_confirm_prompt(cmd_str: str, current_lang: str, msg: Dict,
         print()
         return False
     return response.upper() == captcha
+
+
+# === builtin-adv-syntax：内置命令高级语法允许开关 ===
+def _is_builtin_adv_syntax_allowed(read_config_file_func=None) -> bool:
+    """
+    检查 builtin-adv-syntax 配置（~/.config/onyx/builtin-adv-syntax）
+    manage set builtin-adv-syntax true 开启后，内置命令允许使用高级语法
+    """
+    if not read_config_file_func:
+        return False
+    try:
+        config_path = os.path.expanduser('~/.config/onyx/builtin-adv-syntax')
+        content = read_config_file_func(config_path, 'false')
+        if content is True:
+            return True
+        if content and str(content).strip().lower() == 'true':
+            return True
+    except Exception:
+        pass
+    return False
 
 
 # 全局调试标志
@@ -1258,6 +972,7 @@ _LANG_MESSAGES = {
         "adv_confirm_exec": "⚠️ 高级模式，确认执行？(y/N): ",
         "fine_grained_no_redirect": "❌ 当前在细颗粒控制路径中，不允许使用重定向或 Here Document",
         "builtin_no_advanced": "内置命令「{cmd}」不支持高级语法（重定向、管道、逻辑操作符等）",
+        "builtin_adv_hint": "\n💡 提示：可通过 `manage set builtin-adv-syntax true` 允许执行（注意：可能存在兼容性问题，建议仅在必要时开启）",
         "path_sandbox_blocked": "❌ 路径沙箱拦截：路径 {path} 不在允许范围内",
         "dangerous_cmd_blocked": "❌ 高危命令被拦截：{cmd} (匹配模式: {pattern})",
         "and_operator_skip": "&& 操作符：前一个命令失败，跳过后续命令",
@@ -1281,6 +996,7 @@ _LANG_MESSAGES = {
         "adv_confirm_exec": "⚠️ Advanced mode, confirm? (y/N): ",
         "fine_grained_no_redirect": "❌ Redirection/Here Doc not allowed in fine-grained path",
         "builtin_no_advanced": "Builtin「{cmd}」doesn't support advanced syntax",
+        "builtin_adv_hint": "\n💡 Hint: run `manage set builtin-adv-syntax true` to allow it (note: may cause compatibility issues; enable only when necessary)",
         "path_sandbox_blocked": "❌ Path sandbox blocked: {path}",
         "dangerous_cmd_blocked": "❌ Dangerous cmd blocked: {cmd} (pattern: {pattern})",
         "and_operator_skip": "&&: previous failed, skipping",
@@ -1304,32 +1020,28 @@ _CTX_MUTABLE_KEYS = frozenset({"current_sys_cmds", "OTHER_TERMINAL_CMDS", "CURRE
 _CTX_TEMPLATE: Optional[Dict[str, Any]] = None
 
 _CTX_KEYS = (
-    "BUILTIN_COMMANDS", "ALIAS_CACHE", "CMD_MAPPING_CACHE", "TOOL_INDEX_CACHE", "current_sys_cmds",
+    "BUILTIN_COMMANDS", "CMD_MAPPING_CACHE", "current_sys_cmds",
     "sys_type", "user_mode", "global_config", "executor", "PROCESS_LOCK",
     "CURRENT_PROCESSES", "AI_TOOL_OUTPUT_CACHE", "USER_HOME_DIR", "ROOT_DIR",
     "TOOL_MAIN_DIR", "PYTHON_EXE", "executable_config", "SANDBOX_CONFIG",
     "DEBUG_PARSECMD_PATH", "DEBUG_TIMES_PATH", "PATH_INDEX_MSG_PATH",
-    "DIR_CACHE_MSG_PATH", "CMD_MAPPING_MSG_PATH", "TOOL_INDEX_MSG_PATH",
+    "DIR_CACHE_MSG_PATH", "CMD_MAPPING_MSG_PATH",
     "OTHER_TERMINAL_CMDS", "get_current_lang_func", "resolve_path_func",
     "check_sandbox_path_func", "validate_param_path_func", "get_cached_cmd_func",
-    "check_tool_permission_func", "find_similar_tools_func", "find_similar_cmds_func",
-    "run_cmd_sync_func", "run_cmd_with_redirect_func", "execute_tool_func",
+    "find_similar_cmds_func",
+    "run_cmd_sync_func", "run_cmd_with_redirect_func",
     "replace_virtual_path_in_cmd_func", "get_virtual_path_func", "check_blocked_cmd_func",
     "is_interactive_command_func", "read_config_file_func", "clear_ai_cmd_cache_func",
-    "build_tool_index_func", "load_cmd_mapping_cache_func",
+    "load_cmd_mapping_cache_func",
     "log_info_func", "log_error_func", "log_warning_func", "security_log_func",
-    "Fore", "Style", "ToolInfo", "username",
+    "Fore", "Style", "username",
 )
 
 
 def _get_global_cache(sys_type: str, force_refresh: bool = False,
-                      CMD_MAPPING_CACHE: Dict = None,
-                      TOOL_INDEX_CACHE: Dict = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+                      CMD_MAPPING_CACHE: Dict = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    获取全局缓存（带 TTL，避免频繁读取 msgpack 文件）
-    
-    优先使用 Onyx.py 传入的 CMD_MAPPING_CACHE / TOOL_INDEX_CACHE（零磁盘 I/O），
-    仅在内存缓存不可用时 fallback 到 msgpack 文件读取。
+    获取全局命令缓存（带 TTL，避免频繁读取 msgpack 文件）
     """
     global _GLOBAL_TOOL_CACHE, _GLOBAL_CMD_MAPPING, _GLOBAL_CACHE_SYS_TYPE, _GLOBAL_CACHE_TIMESTAMP
     
@@ -1346,52 +1058,23 @@ def _get_global_cache(sys_type: str, force_refresh: bool = False,
         mapping = sys_cache.get("mapping", {})
         
         cmd_mapping: Dict[str, Any] = {
-            "tools": dict(mapping.get("tools", {})),
             "system": list(mapping.get("system", [])),
         }
-        
-        # 合并 TOOL_INDEX_CACHE 中的工具（key 格式: toolname_sysType → 提取 toolname）
-        if TOOL_INDEX_CACHE:
-            _suffix = f"_{sys_type}"
-            for cache_key, tool_info in TOOL_INDEX_CACHE.items():
-                # 跳过系统工具（sys_ 前缀），它们已在 system 列表中
-                if cache_key.startswith("sys_"):
-                    continue
-                if _suffix in cache_key:
-                    tool_name = cache_key.split(_suffix)[0].lower()
-                else:
-                    tool_name = cache_key.lower()
-                
-                if tool_name not in cmd_mapping["tools"]:
-                    if hasattr(tool_info, 'path'):
-                        cmd_mapping["tools"][tool_name] = {
-                            "path": tool_info.path,
-                            "tool_perm": getattr(tool_info, 'tool_perm', 3),
-                            "tool_type": getattr(tool_info, 'tool_type', "other"),
-                        }
         
         # 预计算 O(1) 系统命令查找集合
         cmd_mapping["_system_set"] = frozenset(c.lower() for c in cmd_mapping["system"])
         
-        tool_cache = cmd_mapping["tools"]
-        
-        _GLOBAL_TOOL_CACHE = tool_cache
+        _GLOBAL_TOOL_CACHE = {}
         _GLOBAL_CMD_MAPPING = cmd_mapping
         _GLOBAL_CACHE_SYS_TYPE = sys_type
         _GLOBAL_CACHE_TIMESTAMP = now
-        return tool_cache, cmd_mapping
+        return _GLOBAL_TOOL_CACHE, _GLOBAL_CMD_MAPPING
     
-    # === 回退路径：msgpack 文件（兼容没有内存缓存的调用方）===
-    _GLOBAL_TOOL_CACHE = _load_tool_index_cache()
+    # === 回退路径：msgpack 文件 ===
     _GLOBAL_CMD_MAPPING = _load_cmd_mapping_cache(sys_type)
+    _GLOBAL_TOOL_CACHE = {}
     _GLOBAL_CACHE_SYS_TYPE = sys_type
     _GLOBAL_CACHE_TIMESTAMP = now
-    
-    # 合并工具索引到命令映射，确保工具命令一次命中（消除回退路径）
-    if _GLOBAL_TOOL_CACHE and _GLOBAL_CMD_MAPPING is not None:
-        tools = _GLOBAL_CMD_MAPPING.setdefault("tools", {})
-        if not tools:  # 仅当 tools 为空时才合并（msgpack 已有则不覆盖）
-            tools.update(_GLOBAL_TOOL_CACHE)
     
     return _GLOBAL_TOOL_CACHE, _GLOBAL_CMD_MAPPING
 
@@ -1399,7 +1082,7 @@ def _get_global_cache(sys_type: str, force_refresh: bool = False,
 def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: bool = False,
                      # 核心模块依赖
                      BUILTIN_COMMANDS=None,
-                     ALIAS_CACHE=None,
+                     TOOL_PATH_MAP=None,      # 工具路径映射表
                      CMD_MAPPING_CACHE=None,  # 内存缓存（优先于 msgpack，零 I/O）
                      TOOL_INDEX_CACHE=None,   # 工具索引内存缓存
                      current_sys_cmds=None,   # 保留参数但不再使用
@@ -1493,19 +1176,16 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 _CACHED_SYS_TYPE = 'sh'
         sys_type = _CACHED_SYS_TYPE
     
-    # ========== 加载工具/命令缓存（优先内存，fallback msgpack）==========
-    tool_cache, cmd_mapping = _get_global_cache(
+    # ========== 加载系统命令缓存（优先内存，fallback msgpack）==========
+    _, cmd_mapping = _get_global_cache(
         sys_type,
-        CMD_MAPPING_CACHE=CMD_MAPPING_CACHE,
-        TOOL_INDEX_CACHE=TOOL_INDEX_CACHE
+        CMD_MAPPING_CACHE=CMD_MAPPING_CACHE
     )
     
     # 统计缓存中的命令数量（用于调试）
-    tool_count = len(tool_cache)
     system_cmd_count = len(cmd_mapping.get("system", []))
     if _DEBUG_PARSECMD_FLAG:
         source = "内存" if (CMD_MAPPING_CACHE and sys_type in CMD_MAPPING_CACHE) else "msgpack"
-        print(Fore.CYAN + f"[Debug] 从{source}加载工具缓存: {tool_count} 个工具" + Style.RESET_ALL)
         print(Fore.CYAN + f"[Debug] 从{source}加载系统命令缓存: {system_cmd_count} 个命令" + Style.RESET_ALL)
     
     # 语言
@@ -1583,11 +1263,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
         print(Fore.RED + msg["quote_error"].format(quote_error_msg) + Style.RESET_ALL)
         return
     
-    # ========== Step 2: 别名解析 ==========
-    if ALIAS_CACHE:
-        cmd = resolve_alias_in_cmd(cmd, ALIAS_CACHE, log_info_func, request_id, sys_type)
-    
-    # ========== Step 3: 命令展开（变量不再展开，保留原样）==========
+    # ========== Step 2: 命令展开（变量不再展开，保留原样）==========
     expanded_cmd = remove_comments(cmd, sys_type)
     
     if not expanded_cmd or not expanded_cmd.strip():
@@ -1608,25 +1284,6 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
     
     if is_simple_command:
         clean_cmd_simple, redirect_config_simple = parse_redirects_from_command(expanded_cmd, sys_type)
-        resolved_simple = _resolve_tool_command_in_line(
-            clean_cmd_simple, tool_cache, cmd_mapping, sys_type,
-            OTHER_TERMINAL_CMDS, current_sys_cmds, BUILTIN_COMMANDS,
-            resolve_path_func, ROOT_DIR
-        )
-        if resolved_simple != clean_cmd_simple:
-            clean_cmd_simple = resolved_simple
-        
-        if clean_cmd_simple.startswith("__TOOL_CMD__:"):
-            actual_cmd_simple = clean_cmd_simple[len("__TOOL_CMD__:"):]
-            if not check_dangerous_commands(actual_cmd_simple, user_mode, log_info_func, log_error_func, request_id, USER_HOME_DIR):
-                return
-            # 快速路径：命令已完全解析，跳过 _execute_command_unified 的开销
-            _execute_resolved_command(
-                actual_cmd_simple, redirect_config_simple,
-                run_cmd_sync_func, log_info_func, log_error_func,
-                request_id, 'tool'
-            )
-            return
         
         # 简单命令的类型判断 + 执行（跳过 Steps 3.5-8 的复杂拆分）
         cmd_parts_simple = smart_shlex_split(clean_cmd_simple, sys_type)
@@ -1637,7 +1294,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
         actual_head_simple = cmd_parts_simple[1].lower() if is_sudo_simple and len(cmd_parts_simple) > 1 else cmd_head_simple
         
         cmd_type_simple = _determine_cmd_type_local(actual_head_simple, BUILTIN_COMMANDS,
-                                                     tool_cache, cmd_mapping,
+                                                     cmd_mapping,
                                                      sys_type, OTHER_TERMINAL_CMDS,
                                                      is_sudo=is_sudo_simple)
         
@@ -1710,57 +1367,6 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 cmd_head=actual_head_simple
             )
             return
-        
-        elif cmd_type_simple == 'tool':
-            is_t, t_info = _is_tool_command_local(actual_head_simple, tool_cache, cmd_mapping)
-            if t_info:
-                if adv_need_confirm:
-                    if not _adv_confirm_prompt(clean_cmd_simple, current_lang, msg, log_info_func, request_id):
-                        print(Fore.YELLOW + msg["adv_confirm_cancelled"] + Style.RESET_ALL)
-                        return
-                
-                if check_tool_permission_func:
-                    if isinstance(t_info, dict):
-                        perm = t_info.get("tool_perm", 3)
-                    else:
-                        perm = t_info.tool_perm if hasattr(t_info, 'tool_perm') else 3
-                    if not check_tool_permission_func(perm):
-                        return
-                
-                all_paths, resolved_paths = _collect_and_resolve_paths(clean_cmd_simple, redirect_config_simple, resolve_path_func, _cwd)
-                
-                advanced_syntax = check_advanced_syntax(clean_cmd_simple, redirect_config_simple, sys_type)
-                if resolved_paths:
-                    if not check_fine_grained_advanced_syntax(
-                        resolved_paths, ROOT_DIR, username, user_mode,
-                        advanced_syntax, log_info_func, log_error_func, request_id,
-                        USER_HOME_DIR, is_ai_call=is_ai_triggered
-                    ):
-                        return
-                
-                if resolved_paths:
-                    if not check_path_permission_for_cmd(
-                        actual_head_simple, resolved_paths, username, user_mode,
-                        log_info_func, log_error_func, request_id, msg,
-                        USER_HOME_DIR, is_ai_call=is_ai_triggered
-                    ):
-                        return
-                
-                if not check_dangerous_commands(clean_cmd_simple, user_mode, log_info_func, log_error_func, request_id, USER_HOME_DIR):
-                    return
-                
-                _execute_command_unified(
-                    expanded_cmd, clean_cmd_simple, redirect_config_simple, 'tool', t_info,
-                    request_id, True,
-                    run_cmd_sync_func,
-                    replace_virtual_path_in_cmd_func,
-                    sys_type,
-                    log_info_func, log_error_func,
-                    msg, Fore, Style,
-                    debug_parsecmd=debug_parsecmd,
-                    cmd_head=actual_head_simple
-                )
-                return
         
         elif cmd_type_simple == 'system':
             if adv_need_confirm:
@@ -1868,21 +1474,6 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if debug_parsecmd:
                 print(Fore.CYAN + f"[Debug] shell结构路径解析后: {expanded_cmd[:200]}..." + Style.RESET_ALL)
         
-        # 使用本地工具解析
-        resolved_multiline = _resolve_multiline_commands_tools(
-            expanded_cmd, tool_cache, cmd_mapping, sys_type,
-            OTHER_TERMINAL_CMDS, current_sys_cmds, BUILTIN_COMMANDS,
-            resolve_path_func, ROOT_DIR
-        )
-        if resolved_multiline != expanded_cmd:
-            if debug_parsecmd:
-                print(Fore.CYAN + f"[Debug] 多行工具解析：{expanded_cmd[:100]}... → {resolved_multiline[:100]}..." + Style.RESET_ALL)
-            if log_info_func:
-                log_info_func(msg["multiline_tool_resolved"].format(
-                    line=expanded_cmd[:100], resolved=resolved_multiline[:100]
-                ), request_id)
-            expanded_cmd = resolved_multiline
-        
         if adv_need_confirm:
             if not _adv_confirm_prompt(expanded_cmd, current_lang, msg, log_info_func, request_id):
                 print(Fore.YELLOW + msg["adv_confirm_cancelled"] + Style.RESET_ALL)
@@ -1940,35 +1531,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
     # ========== Step 8: 解析重定向 ==========
     clean_cmd, redirect_config = parse_redirects_from_command(final_cmd, sys_type)
     
-    # ========== Step 9: 解析工具命令（使用本地缓存）==========
-    resolved_cmd = _resolve_tool_command_in_line(
-        clean_cmd, tool_cache, cmd_mapping, sys_type,
-        OTHER_TERMINAL_CMDS, current_sys_cmds, BUILTIN_COMMANDS,
-        resolve_path_func, ROOT_DIR
-    )
-    if resolved_cmd != clean_cmd:
-        if debug_parsecmd:
-            print(Fore.CYAN + f"[Debug] 工具解析：{clean_cmd} → {resolved_cmd}" + Style.RESET_ALL)
-        clean_cmd = resolved_cmd
-    
-    # ========== Step 9.5: 处理已标记的工具命令 ==========
-    if clean_cmd.startswith("__TOOL_CMD__:"):
-        actual_cmd = clean_cmd[len("__TOOL_CMD__:"):]
-        if debug_parsecmd:
-            print(Fore.CYAN + f"[Debug] 检测到标记的工具命令，跳过类型判断直接执行: {actual_cmd[:100]}..." + Style.RESET_ALL)
-        
-        if not check_dangerous_commands(actual_cmd, user_mode, log_info_func, log_error_func, request_id, USER_HOME_DIR):
-            return
-        
-        # 快速路径：命令已完全解析，跳过 _execute_command_unified 的开销
-        _execute_resolved_command(
-            actual_cmd, redirect_config,
-            run_cmd_sync_func, log_info_func, log_error_func,
-            request_id, 'tool'
-        )
-        return
-    
-    # ========== Step 10: 判断命令类型（使用本地函数）==========
+    # ========== Step 9: 判断命令类型（使用本地函数）==========
     cmd_parts = smart_shlex_split(clean_cmd, sys_type)
     if not cmd_parts:
         return
@@ -1983,7 +1546,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
         actual_cmd_head = cmd_parts[1].lower()
     
     cmd_type = _determine_cmd_type_local(actual_cmd_head, BUILTIN_COMMANDS,
-                                          tool_cache, cmd_mapping,
+                                          cmd_mapping,
                                           sys_type, OTHER_TERMINAL_CMDS,
                                           is_sudo=is_sudo)
     
@@ -2077,11 +1640,18 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
         has_advanced = advanced_syntax.get('has_any_advanced', False)
         
         if has_advanced:
-            error_msg = msg["builtin_no_advanced"].format(cmd=actual_cmd_head)
-            print(Fore.YELLOW + error_msg + Style.RESET_ALL)
-            if log_error_func:
-                log_error_func(f"内置命令使用了高级语法：{actual_cmd_head}", request_id)
-            return
+            builtin_adv_allowed = _is_builtin_adv_syntax_allowed(read_config_file_func)
+            if not builtin_adv_allowed:
+                # 默认行为：拦截 + 提醒如何通过配置开启（附兼容性警告）
+                error_msg = msg["builtin_no_advanced"].format(cmd=actual_cmd_head)
+                print(Fore.YELLOW + error_msg + Style.RESET_ALL)
+                print(Fore.CYAN + msg["builtin_adv_hint"] + Style.RESET_ALL)
+                if log_error_func:
+                    log_error_func(f"内置命令使用了高级语法：{actual_cmd_head}", request_id)
+                return
+            # 已开启 builtin-adv-syntax：用户已手动确认，不再提醒，直接交给底层 Shell 执行
+            if log_info_func:
+                log_info_func(f"内置命令高级语法已允许（builtin-adv-syntax=true）：{final_cmd}", request_id)
         
         if user_mode and hasattr(user_mode, 'current_mode') and user_mode.current_mode != "adv":
             if global_config and not is_command_allowed_in_mode(
@@ -2099,6 +1669,69 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 USER_HOME_DIR, is_ai_call=is_ai_triggered
             ):
                 return
+        
+        if has_advanced:
+            # ===== 已开启 builtin-adv-syntax：整条命令原样交给底层 Shell 执行（彻底兼容 bash）=====
+            # 与系统命令路径一致的安全检查（命令将直接在 shell 中执行）
+            if adv_need_confirm:
+                if not _adv_confirm_prompt(clean_cmd, current_lang, msg, log_info_func, request_id):
+                    print(Fore.YELLOW + msg["adv_confirm_cancelled"] + Style.RESET_ALL)
+                    return
+            
+            if resolved_paths:
+                if not check_fine_grained_advanced_syntax(
+                    resolved_paths, ROOT_DIR, username, user_mode,
+                    advanced_syntax, log_info_func, log_error_func, request_id,
+                    USER_HOME_DIR, is_ai_call=is_ai_triggered
+                ):
+                    return
+            
+            if not check_dangerous_commands(
+                clean_cmd, user_mode, log_info_func, log_error_func, request_id,
+                USER_HOME_DIR
+            ):
+                return
+            
+            if user_mode and hasattr(user_mode, 'current_mode') and user_mode.current_mode != "adv":
+                for path in all_paths:
+                    if path and path != 'STDOUT':
+                        if check_sandbox_path_func and not check_sandbox_path_func(path, request_id):
+                            print(Fore.RED + msg["path_sandbox_blocked"].format(path=path) + Style.RESET_ALL)
+                            return
+            
+            if ROOT_DIR:
+                if not check_protected_dir_for_cmd(clean_cmd, ROOT_DIR, get_virtual_path_func, log_error_func, request_id):
+                    return
+            
+            if redirect_config.get('here_delimiter') and redirect_config.get('here_doc') is None:
+                print(Fore.CYAN + msg["here_doc_waiting"].format(delim=redirect_config['here_delimiter']) + Style.RESET_ALL)
+                lines = []
+                try:
+                    while True:
+                        try:
+                            line = safe_input("")
+                            if line.strip() == redirect_config['here_delimiter']:
+                                break
+                            lines.append(line)
+                        except EOFError:
+                            break
+                except Exception:
+                    pass
+                redirect_config['here_doc'] = '\n'.join(lines)
+            
+            _execute_command_unified(
+                final_cmd, clean_cmd, redirect_config, 'system', None,
+                request_id, True,
+                run_cmd_sync_func,
+                replace_virtual_path_in_cmd_func,
+                sys_type,
+                log_info_func, log_error_func,
+                msg, Fore, Style,
+                debug_parsecmd=debug_parsecmd,
+                cmd_head=actual_cmd_head
+            )
+            _sync_cwd_from_shell(log_info_func, request_id, 'system')
+            return
         
         if log_info_func:
             log_info_func(f"执行内置命令：{actual_cmd_head}", request_id)
@@ -2190,65 +1823,7 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
         )
         return
     
-    # ========== Step 11d: 工具命令 ==========
-    if cmd_type == 'tool':
-        if adv_need_confirm:
-            if not _adv_confirm_prompt(clean_cmd, current_lang, msg, log_info_func, request_id):
-                print(Fore.YELLOW + msg["adv_confirm_cancelled"] + Style.RESET_ALL)
-                return
-        
-        is_tool, tool_info = _is_tool_command_local(actual_cmd_head, tool_cache, cmd_mapping)
-        
-        if not tool_info:
-            print(Fore.RED + msg["cmd_not_found"].format(cmd=actual_cmd_head) + Style.RESET_ALL)
-            return
-        
-        # 兼容 dict 和对象格式
-        if isinstance(tool_info, dict):
-            tool_perm = tool_info.get("tool_perm", 3)
-        else:
-            tool_perm = tool_info.tool_perm if hasattr(tool_info, 'tool_perm') else 3
-        
-        if check_tool_permission_func:
-            if not check_tool_permission_func(tool_perm):
-                return
-        
-        all_paths, resolved_paths = _collect_and_resolve_paths(clean_cmd, redirect_config, resolve_path_func, _cwd)
-        
-        advanced_syntax = check_advanced_syntax(clean_cmd, redirect_config, sys_type)
-        if resolved_paths:
-            if not check_fine_grained_advanced_syntax(
-                resolved_paths, ROOT_DIR, username, user_mode,
-                advanced_syntax, log_info_func, log_error_func, request_id,
-                USER_HOME_DIR, is_ai_call=is_ai_triggered
-            ):
-                return
-        
-        if resolved_paths:
-            if not check_path_permission_for_cmd(
-                actual_cmd_head, resolved_paths, username, user_mode,
-                log_info_func, log_error_func, request_id, msg,
-                USER_HOME_DIR, is_ai_call=is_ai_triggered
-            ):
-                return
-        
-        if not check_dangerous_commands(clean_cmd, user_mode, log_info_func, log_error_func, request_id, USER_HOME_DIR):
-            return
-        
-        success, result = _execute_command_unified(
-            final_cmd, clean_cmd, redirect_config, 'tool', tool_info,
-            request_id, True,
-            run_cmd_sync_func,
-            replace_virtual_path_in_cmd_func,
-            sys_type,
-            log_info_func, log_error_func,
-            msg, Fore, Style,
-            debug_parsecmd=debug_parsecmd,
-            cmd_head=actual_cmd_head
-        )
-        return
-    
-    # ========== Step 11e: 系统命令 ==========
+    # ========== Step 11d: 系统命令 ==========
     if cmd_type == 'system':
         if adv_need_confirm:
             if not _adv_confirm_prompt(clean_cmd, current_lang, msg, log_info_func, request_id):
@@ -2340,15 +1915,12 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             # bash 执行完了，用 which 快速判断命令是否真的不存在
             # （只查 PATH，shell 函数/alias 不在此列，但不影响体验）
             if not _shutil.which(actual_cmd_head):
-                similar_tools = _find_similar_tools_local(actual_cmd_head, tool_cache)
                 similar_cmds = _find_similar_cmds_local(actual_cmd_head, cmd_mapping)
-                if similar_tools or similar_cmds:
+                if similar_cmds:
                     if current_lang == "chinese":
                         print(Fore.YELLOW + "你是不是想输入：" + Style.RESET_ALL)
                     else:
                         print(Fore.YELLOW + "Did you mean:" + Style.RESET_ALL)
-                    for name, tool_type in similar_tools[:10]:
-                        print(Fore.YELLOW + f"  {name}" + Style.RESET_ALL)
                     for name in similar_cmds[:10]:
                         print(Fore.YELLOW + f"  {name}" + Style.RESET_ALL)
         return

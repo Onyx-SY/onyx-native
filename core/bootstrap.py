@@ -147,24 +147,92 @@ def verify_admin_password(ctx: "AppContext") -> bool:
 
 
 # ============================================================
-# init_tool_dirs
+# generate_tool_alias_commands
 # ============================================================
 
-def init_tool_dirs(ctx: "AppContext") -> bool:
-    """创建工具目录结构"""
+def generate_tool_alias_all(ctx: "AppContext", request_id: str = "") -> tuple:
+    """同步扫描工具目录，一次扫描同时产出 shell 命令列表和结构化数据。
+    
+    Returns:
+        (commands: List[str], data: List[List[str]])
+        commands: ['alias name=\\'python "path"\\'', ...]
+        data:     [[tool_name, category, script_path], ...]
+    """
     from core.log_manager import log_info, log_error
-    current_lang = ctx.global_config.get("display_info", {}).get("language", {}).get("current", "chinese")
+    commands: List[str] = []
+    data: List[List[str]] = []
+    
+    if not ctx.TOOL_MAIN_DIR or not os.path.isdir(ctx.TOOL_MAIN_DIR):
+        return commands, data
+    
     try:
-        if not os.path.exists(ctx.TOOL_MAIN_DIR):
-            os.makedirs(ctx.TOOL_MAIN_DIR, mode=0o755 if ctx.sys_type != "Windows" else 0o777)
-        for cat in ctx.global_config.get("tool_category_dirs", []):
+        for cat in os.listdir(ctx.TOOL_MAIN_DIR):
             cat_path = os.path.join(ctx.TOOL_MAIN_DIR, cat)
-            if not os.path.exists(cat_path):
-                os.makedirs(cat_path, mode=0o755 if ctx.sys_type != "Windows" else 0o777)
-        return True
+            if not os.path.isdir(cat_path) or cat.startswith("."):
+                continue
+            for tool_name in os.listdir(cat_path):
+                tool_dir = os.path.join(cat_path, tool_name)
+                if not os.path.isdir(tool_dir) or tool_name.startswith("."):
+                    continue
+                entry = _find_tool_entry(tool_dir, tool_name)
+                if entry:
+                    script_path = os.path.join(tool_dir, entry)
+                    cmd = f'alias {tool_name}=\'python "{script_path}"\''
+                    commands.append(cmd)
+                    data.append([tool_name, cat, script_path])
+        
+        if request_id:
+            log_info(f"工具别名生成完成：共 {len(commands)} 条", request_id)
     except Exception as e:
-        log_error(f"工具目录创建失败：{str(e)}", ctx.user_info.get("session_id", str(uuid.uuid4())))
-        return False
+        if request_id:
+            log_error(f"工具别名生成失败：{str(e)}", request_id)
+    
+    return commands, data
+
+
+def generate_tool_alias_commands(ctx: "AppContext", request_id: str) -> List[str]:
+    """同步扫描工具目录，生成 shell alias 命令列表（兼容接口，内部委托 generate_tool_alias_all）"""
+    cmds, _ = generate_tool_alias_all(ctx, request_id)
+    return cmds
+
+
+def generate_tool_alias_data(ctx: "AppContext", request_id: str = "") -> List[List[str]]:
+    """同步扫描工具目录，返回结构化别名数据（兼容接口，内部委托 generate_tool_alias_all）"""
+    _, data = generate_tool_alias_all(ctx, request_id)
+    return data
+
+
+def _find_tool_entry(tool_dir: str, tool_name: str) -> Optional[str]:
+    """在工具目录中查找入口脚本"""
+    try:
+        files = os.listdir(tool_dir)
+    except (PermissionError, OSError):
+        return None
+    
+    main_names = {"Main.py", "main.py", "tool.py", "entry.py", "Main.pyc", "main.pyc"}
+    name_lower = tool_name.lower()
+    
+    for f in files:
+        base = os.path.splitext(f)[0].lower()
+        ext = os.path.splitext(f)[1].lower()
+        if base == name_lower and ext in (".py", ".pyc"):
+            return f
+    
+    for f in files:
+        if f in main_names:
+            return f
+    
+    for f in files:
+        base = os.path.splitext(f)[0].lower()
+        ext = os.path.splitext(f)[1].lower()
+        if ext in (".py", ".pyc") and any(kw in base for kw in ("main", "entry", "start", "tool")):
+            return f
+    
+    for f in files:
+        if f.endswith((".py", ".pyc")):
+            return f
+    
+    return None
 
 
 # ============================================================
@@ -178,7 +246,6 @@ def load_user_config(ctx: "AppContext") -> None:
         try:
             with open(ctx.USER_CONFIG_PATH, "r", encoding="utf-8") as f:
                 config = json.load(f)
-            ctx.ALIAS_CACHE = config.get("aliases", {})
             ctx.MAX_HISTORY_LEN = config.get("max_history_len", ctx.MAX_HISTORY_LEN)
             ctx.global_config["system_info"]["max_history_len"] = ctx.MAX_HISTORY_LEN
             if "current_prompt_type" in config:

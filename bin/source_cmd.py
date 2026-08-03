@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-source 命令处理器 — 跨 shell 支持
-支持：bash / zsh / fish / cmd / powershell / Onyx 脚本(.onyxrc)
+source 命令处理器 — 统一走 Onyx 解析执行
+
+脚本内容逐条交给 parse_and_execute：内置命令（clear/cd/manage 等）在 Python 层执行，
+系统命令由 Onyx 再交给底层 shell，保证虚拟路径/沙箱/权限链路完整。
+支持多行结构合并（if/for/while/case/heredoc/续行）。
 """
 
 import os
@@ -12,30 +15,22 @@ from typing import List
 
 def handle_source(cmd_parts: List[str], request_id: str) -> None:
     """延迟导入版：首次调用时才 import Onyx 重依赖，避免启动开销"""
-    from lib.get_terminal_type import get_terminal_type
-
     if len(cmd_parts) < 2:
         return
 
-    script_path = _resolve_script_path(cmd_parts[1])
+    script_path = _resolve_script_path(cmd_parts[1], request_id)
     if not script_path:
         return
 
-    shell_type = get_terminal_type()
-
-    # ── 原生 shell source（bash/zsh/fish/cmd/powershell） ──
-    if shell_type in ('bash', 'zsh', 'fish', 'sh'):
-        _source_unix_shell(script_path, shell_type, request_id)
-    elif shell_type == 'cmd':
-        _source_cmd(script_path, request_id)
-    elif shell_type == 'powershell':
-        _source_powershell(script_path, request_id)
-    else:
-        # ── 回退：Onyx 脚本逐行解析 ──
-        _source_onyx_script(script_path, request_id)
+    # 统一走 Onyx 脚本解析：脚本内每条命令都交给 parse_and_execute，
+    # 由 Onyx 识别内置命令（clear/cd/manage…）并在 Python 层执行，
+    # 系统命令再由 Onyx 交给底层 shell。
+    # 不再直接把 `source <file>` 丢给底层 shell——那会让脚本内的
+    # clear/cd 等绕过 Onyx 检查，导致虚拟路径/沙箱链路断裂。
+    _source_onyx_script(script_path, request_id)
 
 
-def _resolve_script_path(path: str) -> str:
+def _resolve_script_path(path: str, request_id: str) -> str:
     """解析脚本路径并做沙盒检查"""
     from Onyx import resolve_path, check_sandbox_path, Fore, Style, global_config
 
@@ -59,138 +54,7 @@ def _resolve_script_path(path: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Unix shell: bash / zsh / fish — 通过持久 shell 一次性 source
-# ═══════════════════════════════════════════════════════════════════
-def _source_unix_shell(script_path: str, shell_type: str, request_id: str) -> None:
-    """通过持久 shell 执行 source <file>，读取环境变量变更"""
-    from lib.terminal.exe import _get_persistent_shell
-    from Onyx import log_info, Fore, Style, global_config
-
-    current_lang = global_config["display_info"]["language"]["current"]
-    cwd = os.path.dirname(script_path) or os.getcwd()
-
-    try:
-        shell = _get_persistent_shell(cwd=cwd)
-    except Exception as e:
-        print(Fore.RED + {
-            "chinese": f"无法获取持久 shell: {e}",
-            "english": f"Cannot get persistent shell: {e}"
-        }[current_lang] + Style.RESET_ALL)
-        return
-
-    # 构建 source 命令
-    if shell_type == 'fish':
-        source_cmd = f"source '{script_path}'\n"
-    else:
-        source_cmd = f"source '{script_path}'\n"
-
-    output_buffer: List[str] = []
-    try:
-        return_code, _ = shell.execute(source_cmd, output_buffer,
-                                       log_info=log_info if hasattr(log_info, '__call__') else None)
-        if return_code != 0:
-            print(Fore.YELLOW + {
-                "chinese": f"source 执行完成（退出码: {return_code}）",
-                "english": f"source completed (exit code: {return_code})"
-            }[current_lang] + Style.RESET_ALL)
-    except Exception as e:
-        print(Fore.RED + {
-            "chinese": f"source 执行失败: {e}",
-            "english": f"source execution failed: {e}"
-        }[current_lang] + Style.RESET_ALL)
-
-    # 打印脚本输出
-    if output_buffer:
-        for line in output_buffer:
-            sys.stdout.write(line)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Windows CMD — 通过持久 shell 执行 batch 文件
-# ═══════════════════════════════════════════════════════════════════
-def _source_cmd(script_path: str, request_id: str) -> None:
-    """通过持久 shell (cmd.exe) 执行 call <file>"""
-    from lib.terminal.exe import _get_persistent_shell
-    from Onyx import log_info, Fore, Style, global_config
-
-    current_lang = global_config["display_info"]["language"]["current"]
-    cwd = os.path.dirname(script_path) or os.getcwd()
-
-    try:
-        shell = _get_persistent_shell(cwd=cwd)
-    except Exception as e:
-        print(Fore.RED + {
-            "chinese": f"无法获取持久 shell: {e}",
-            "english": f"Cannot get persistent shell: {e}"
-        }[current_lang] + Style.RESET_ALL)
-        return
-
-    # cmd.exe: call 命令执行 batch 文件，环境变量在当前 shell 生效
-    source_cmd = f"call \"{script_path}\"\n"
-
-    output_buffer: List[str] = []
-    try:
-        return_code, _ = shell.execute(source_cmd, output_buffer)
-        if return_code != 0:
-            print(Fore.YELLOW + {
-                "chinese": f"call 执行完成（退出码: {return_code}）",
-                "english": f"call completed (exit code: {return_code})"
-            }[current_lang] + Style.RESET_ALL)
-    except Exception as e:
-        print(Fore.RED + {
-            "chinese": f"call 执行失败: {e}",
-            "english": f"call execution failed: {e}"
-        }[current_lang] + Style.RESET_ALL)
-
-    if output_buffer:
-        for line in output_buffer:
-            sys.stdout.write(line)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# PowerShell — 通过持久 shell dot-source .ps1 文件
-# ═══════════════════════════════════════════════════════════════════
-def _source_powershell(script_path: str, request_id: str) -> None:
-    """通过持久 shell (pwsh/powershell) 执行 . <file>（dot-sourcing）"""
-    from lib.terminal.exe import _get_persistent_shell
-    from Onyx import log_info, Fore, Style, global_config
-
-    current_lang = global_config["display_info"]["language"]["current"]
-    cwd = os.path.dirname(script_path) or os.getcwd()
-
-    try:
-        shell = _get_persistent_shell(cwd=cwd)
-    except Exception as e:
-        print(Fore.RED + {
-            "chinese": f"无法获取持久 shell: {e}",
-            "english": f"Cannot get persistent shell: {e}"
-        }[current_lang] + Style.RESET_ALL)
-        return
-
-    # PowerShell dot-sourcing: 点空格路径，使脚本中的函数/变量在当前作用域生效
-    source_cmd = f". '{script_path}'\n"
-
-    output_buffer: List[str] = []
-    try:
-        return_code, _ = shell.execute(source_cmd, output_buffer)
-        if return_code != 0:
-            print(Fore.YELLOW + {
-                "chinese": f"dot-source 执行完成（退出码: {return_code}）",
-                "english": f"dot-source completed (exit code: {return_code})"
-            }[current_lang] + Style.RESET_ALL)
-    except Exception as e:
-        print(Fore.RED + {
-            "chinese": f"dot-source 执行失败: {e}",
-            "english": f"dot-source execution failed: {e}"
-        }[current_lang] + Style.RESET_ALL)
-
-    if output_buffer:
-        for line in output_buffer:
-            sys.stdout.write(line)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Onyx 脚本 — 保持逐行解析（不做合并，保证命令 fidelity）
+# Onyx 脚本 — 逐行解析 + 多行结构合并，逐条交给 Onyx 执行
 # ═══════════════════════════════════════════════════════════════════
 def _source_onyx_script(script_path: str, request_id: str) -> None:
     """

@@ -29,13 +29,20 @@ console = RichConsole()
 # ============================================================
 _INQUIRERPY_AVAILABLE = False
 _inquirer = None
+_INQUIRERPY_TRIED = False
 
-try:
-    from InquirerPy import inquirer as _inquirer
-    from InquirerPy.base.control import Choice
-    _INQUIRERPY_AVAILABLE = True
-except ImportError:
-    pass
+
+def _ensure_inquirer():
+    """延迟加载 InquirerPy（避免模块级导入拉入 prompt_toolkit ~1s）。行为与原来完全一致。"""
+    global _inquirer, _INQUIRERPY_AVAILABLE, _INQUIRERPY_TRIED
+    if not _INQUIRERPY_TRIED:
+        _INQUIRERPY_TRIED = True
+        try:
+            from InquirerPy import inquirer as _inquirer
+            _INQUIRERPY_AVAILABLE = True
+        except ImportError:
+            _INQUIRERPY_AVAILABLE = False
+    return _inquirer
 
 
 def _has_tty() -> bool:
@@ -69,7 +76,7 @@ def select_option(
 
     default = default or options[0]
 
-    if _INQUIRERPY_AVAILABLE and _has_tty():
+    if _ensure_inquirer() is not None and _has_tty():
         try:
             choices = options  # InquirerPy select 直接接受字符串列表
             result = _inquirer.select(
@@ -145,7 +152,7 @@ def confirm_dangerous(
     
     返回: (confirmed: bool, user_response: str, refuse_reason: str)
     """
-    if _INQUIRERPY_AVAILABLE and _has_tty():
+    if _ensure_inquirer() is not None and _has_tty():
         try:
             # 显示警告面板
             panel = Panel(
@@ -224,7 +231,7 @@ def text_input(
     """
     单行文本输入。
     """
-    if _INQUIRERPY_AVAILABLE and _has_tty():
+    if _ensure_inquirer() is not None and _has_tty():
         try:
             result = _inquirer.text(
                 message=message,
@@ -310,7 +317,7 @@ def render_tool_table(tool_results: List[Dict[str, str]]) -> Table:
     )
     table.add_column("#", style="dim", width=3)
     table.add_column("工具", style="bold")
-    table.add_column("参数", style="dim")
+    table.add_column("参数", style="dim", overflow="fold")
     table.add_column("状态")
     table.add_column("输出")
 
@@ -321,7 +328,7 @@ def render_tool_table(tool_results: List[Dict[str, str]]) -> Table:
         table.add_row(
             str(i),
             tc.get("name", "?"),
-            tc.get("params", "")[:40],
+            tc.get("params", ""),
             f"[{status_style}]{status_icon}[/{status_style}]",
             tc.get("output", "")[:80],
         )

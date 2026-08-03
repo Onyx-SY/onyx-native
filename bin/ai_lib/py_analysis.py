@@ -1,30 +1,39 @@
 """
 Python 内置代码分析 — 零依赖，纯 ast 实现。
-替代外部 LSP server（pyright/pylsp 等）的基础分析功能。
+
+定位：纯辅助工具，零主观判断、零决策。
+  1. exec_py_diagnostics — 纯粹的编译尝试：仅在 compile() 失败（真实语法/编译错误）时报告错误。
+     不输出任何启发式提示（未使用导入 / 裸 except / 不可达代码 / 死代码等），因此不存在误报。
+  2. exec_py_symbols     — 唯一用途：归拢文件中所有定义的函数/类及其精确位置（path:line）。
+
+所有输出为中英双语（通过 i18n 模块）。
 """
 
 import ast
 import os
 
+from .i18n import _ as _t
 
-# ── 共享辅助函数 ──
 
 _MAX_PY_SIZE = 1024 * 1024 * 2  # 2MB
+
+
+# ── 共享辅助函数 ──
 
 def read_py_source(path: str) -> tuple:
     """读取 .py 文件内容，返回 (source, None) 或 (None, 错误信息)。"""
     if not os.path.isfile(path):
-        return None, f"❌ 文件不存在: {path}"
+        return None, _t("py_file_not_found", "bilingual", path=path)
     if not path.endswith(".py"):
-        return None, "⚠️ 仅支持 .py 文件"
+        return None, _t("py_only_supported", "bilingual")
     size = os.path.getsize(path)
     if size > _MAX_PY_SIZE:
-        return None, f"⚠️ 文件过大 ({size / 1024 / 1024:.1f}MB)"
+        return None, _t("py_file_too_large", "bilingual", size=size / 1024 / 1024)
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             return f.read(), None
     except Exception as e:
-        return None, f"❌ 读取失败: {e}"
+        return None, _t("py_read_failed", "bilingual", err=e)
 
 
 def parse_py_source(source: str, path: str = "") -> tuple:
@@ -32,98 +41,66 @@ def parse_py_source(source: str, path: str = "") -> tuple:
     try:
         return ast.parse(source, filename=path), None
     except SyntaxError as e:
-        return None, f"❌ 语法错误:\n  行 {e.lineno}: {e.msg}\n  {e.text or ''}"
+        return None, _format_syntax_error(e)
+
+
+def compile_py_source(source: str, path: str = "") -> tuple:
+    """真正的编译尝试：compile() 成功返回 (True, None)，失败返回 (False, 错误信息)。"""
+    try:
+        compile(source, path, "exec")
+        return True, None
+    except SyntaxError as e:
+        return False, _format_syntax_error(e)
+
+
+def _format_syntax_error(e: SyntaxError) -> str:
+    line = getattr(e, "lineno", None)
+    text = (getattr(e, "text", "") or "").strip()
+    return _t(
+        "py_syntax_error", "bilingual",
+        line=line if line is not None else "?",
+        msg=getattr(e, "msg", "?"),
+        text=text,
+    )
 
 
 def _node_end(node) -> int:
     return getattr(node, 'end_lineno', node.lineno)
 
 
-# ── py_diagnostics ──
+# ── py_diagnostics — 纯编译尝试 ──
 
 def exec_py_diagnostics(path: str) -> str:
-    """检查 Python 文件的语法错误和常见问题。"""
+    """检查 Python 文件：仅当真实编译失败（语法错误）时报告错误。
+
+    这是纯粹的编译尝试 —— 不做任何启发式判断（未使用导入、裸 except、
+    不可达代码等一律不报告），因此不存在误报。
+    """
     source, err = read_py_source(path)
     if err:
         return err
     if not source.strip():
-        return f"📋 {path}: 空文件"
-    if not source.endswith("\n"):
-        source += "\n"  # ast.parse 对末行无换行的文件也能处理，但确保安全
+        return _t("py_diag_empty", "bilingual", path=path)
 
-    tree, err = parse_py_source(source, path)
-    if err:
+    ok, err = compile_py_source(source, path)
+    if not ok:
         return err
-
-    # 收集所有被引用的名字（不含定义站点）
-    used_names = set()
-    def_names = {}  # name → lineno（仅顶层函数/类）
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            used_names.add(node.id)
-
-    issues = []
-
-    # ── 只处理 module.body 中的顶层节点，避免嵌套干扰 ──
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            def_names[node.name] = node.lineno
-        elif isinstance(node, ast.ClassDef):
-            def_names[node.name] = node.lineno
-
-    # ── 未使用的导入 ──
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                name = alias.asname or alias.name.split(".")[0]
-                if name not in used_names:
-                    issues.append(f"  ⚠️ 行 {node.lineno}: 未使用的导入 `{alias.name}`")
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                local_name = alias.asname or alias.name
-                if local_name not in used_names:
-                    issues.append(f"  ⚠️ 行 {node.lineno}: 未使用的导入 `{alias.name}`")
-
-    # ── 裸 except ──
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ExceptHandler) and node.type is None:
-            issues.append(f"  ⚠️ 行 {node.lineno}: bare except（应指定异常类型）")
-
-    # ── return/raise 后的不可达代码（仅函数/异步函数级别） ──
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            body = node.body
-            for i, stmt in enumerate(body):
-                if isinstance(stmt, (ast.Return, ast.Raise)):
-                    if i + 1 < len(body) and not isinstance(body[i + 1], ast.Pass):
-                        issues.append(f"  💀 行 {body[i + 1].lineno}: "
-                                      f"{type(stmt).__name__} 后存在不可达代码")
-
-    # ── 死代码：顶层函数/类定义了但未在当前文件使用 ──
-    for name, lineno in def_names.items():
-        if name not in used_names:
-            issues.append(f"  💤 行 {lineno}: `{name}` 已定义但未在当前文件中使用")
-
-    if not issues:
-        return f"✅ {path}: 语法正确，无明显问题"
-    return f"📋 {path}: 发现 {len(issues)} 个问题\n" + "\n".join(issues)
+    return _t("py_diag_ok", "bilingual", path=path)
 
 
-# ── py_symbols ──
+# ── py_symbols — 归拢所有函数/类定义及其位置（唯一用途）──
 
 def exec_py_symbols(path: str) -> str:
-    """提取 Python 文件的符号表（函数、类、方法及装饰器、类型注释）。"""
+    """提取文件中所有定义的函数/类及其精确位置。"""
     source, err = read_py_source(path)
     if err:
         return err
     if not source.strip():
-        return f"ℹ️ {path}: 空文件"
+        return _t("py_sym_empty", "bilingual", path=path)
 
     tree, err = parse_py_source(source, path)
     if err:
         return err
-
-    source_lines = source.split("\n")
 
     def _decorators(node) -> str:
         parts = []
@@ -175,119 +152,49 @@ def exec_py_symbols(path: str) -> str:
             parts.append(f"**{node.args.kwarg.arg}")
         return ", ".join(parts)
 
-    def _body_lines(node) -> int:
-        start, end = node.lineno, _node_end(node)
-        c = 0
-        for i in range(start, end):
-            line = source_lines[i - 1].strip() if i <= len(source_lines) else ""
-            if line and not line.startswith("#") and not line.startswith(('"""', "'''")):
-                c += 1
-        return c
-
     symbols = []
 
     def _visit(node, depth=0):
         ind = "  " * depth
+        loc = f"@ {path}:{node.lineno}-{_node_end(node)}"
         if isinstance(node, ast.ClassDef):
-            deco = _decorators(node)
-            methods = []
-            for child in node.body:
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    e = _node_end(child)
-                    methods.append(
-                        f"  {ind}  {_decorators(child)}ƒ `{child.name}"
-                        f"({_params(child)}){_return_type(child)}` "
-                        f"(行 {child.lineno}-{e}, {_body_lines(child)} 行)"
-                    )
-            cls_end = _node_end(node)
-            symbols.append(
-                f"{ind}◈ {deco}class `{node.name}` "
-                f"(行 {node.lineno}-{cls_end}, {_body_lines(node)} 行)"
-            )
-            symbols.extend(methods)
-            for child in node.body:
-                if isinstance(child, ast.ClassDef):
-                    _visit(child, depth + 1)
+            symbols.append(f"{ind}◈ {_decorators(node)}class `{node.name}` {loc}")
+            _walk_stmts(node.body, depth + 1)
         elif isinstance(node, ast.FunctionDef):
-            e = _node_end(node)
             symbols.append(
                 f"{ind}{_decorators(node)}ƒ def `{node.name}({_params(node)})"
-                f"{_return_type(node)}` (行 {node.lineno}-{e}, {_body_lines(node)} 行)"
+                f"{_return_type(node)}` {loc}"
             )
+            _walk_stmts(node.body, depth + 1)
         elif isinstance(node, ast.AsyncFunctionDef):
-            e = _node_end(node)
             symbols.append(
                 f"{ind}{_decorators(node)}ƒ async `{node.name}({_params(node)})"
-                f"{_return_type(node)}` (行 {node.lineno}-{e}, {_body_lines(node)} 行)"
+                f"{_return_type(node)}` {loc}"
             )
+            _walk_stmts(node.body, depth + 1)
 
-    for child in tree.body:
-        _visit(child)
+    def _walk_stmts(stmts, depth):
+        """递归遍历语句块，捕捉 if/for/try/match 等分支内嵌套的定义。"""
+        for stmt in stmts:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                _visit(stmt, depth)
+                continue
+            for attr in ("body", "orelse", "finalbody"):
+                sub = getattr(stmt, attr, None)
+                if isinstance(sub, list):
+                    _walk_stmts(sub, depth)
+            handlers = getattr(stmt, "handlers", None)
+            if isinstance(handlers, list):
+                for h in handlers:
+                    _walk_stmts(h.body, depth)
+            # Python 3.10+ match-case 分支
+            cases = getattr(stmt, "cases", None)
+            if isinstance(cases, list):
+                for c in cases:
+                    _walk_stmts(c.body, depth)
+
+    _walk_stmts(tree.body, 0)
 
     if not symbols:
-        return f"ℹ️ {path}: 未找到符号"
-    return f"📋 {path}: {len(symbols)} 个符号\n" + "\n".join(symbols)
-
-
-# ── py_definition ──
-
-def exec_py_definition(path: str, line: int, character: int) -> str:
-    """查找 Python 文件中某位置的符号定义。"""
-    source, err = read_py_source(path)
-    if err:
-        return err
-
-    tree, err = parse_py_source(source, path)
-    if err:
-        return err
-
-    source_lines = source.split("\n")
-    if line < 1 or line > len(source_lines):
-        return f"❌ 行号超出范围: {line}（共 {len(source_lines)} 行）"
-
-    cursor_line = source_lines[line - 1]
-    col = min(character, len(cursor_line))
-    start = col
-    while start > 0 and (cursor_line[start - 1].isalnum() or cursor_line[start - 1] == '_'):
-        start -= 1
-    end = col
-    while end < len(cursor_line) and (cursor_line[end].isalnum() or cursor_line[end] == '_'):
-        end += 1
-    symbol_name = cursor_line[start:end]
-
-    if not symbol_name:
-        return f"ℹ️ 行 {line} 列 {character} 未找到符号"
-
-    # 判断光标是否在某个类/函数体内（用于作用域感知）
-    cursor_within_class = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            if node.lineno <= line <= _node_end(node):
-                cursor_within_class = node.name
-
-    definitions = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == symbol_name:
-                preview = source_lines[node.lineno - 1].strip()[:80]
-                # 如果光标在类内，优先返回同类的成员
-                if cursor_within_class:
-                    # 检查这个定义是否在同一个类里
-                    for parent in ast.walk(tree):
-                        if isinstance(parent, ast.ClassDef) and parent.name == cursor_within_class:
-                            if node in parent.body:
-                                definitions.insert(0, f"  📄 `{path}:{node.lineno}` — `{preview}`")
-                                break
-                    else:
-                        definitions.append(f"  📄 `{path}:{node.lineno}` — `{preview}`")
-                else:
-                    definitions.append(f"  📄 `{path}:{node.lineno}` — `{preview}`")
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == symbol_name:
-                    preview = source_lines[node.lineno - 1].strip()[:80]
-                    definitions.append(f"  📄 `{path}:{node.lineno}` — `{preview}`")
-
-    if not definitions:
-        return f"ℹ️ `{symbol_name}` 在 {path}:{line} 未找到定义"
-    return f"🎯 `{symbol_name}` 定义（共 {len(definitions)} 处）:\n" + "\n".join(definitions[:5])
+        return _t("py_sym_none", "bilingual", path=path)
+    return _t("py_sym_count", "bilingual", path=path, count=len(symbols)) + "\n" + "\n".join(symbols)

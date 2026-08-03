@@ -155,9 +155,10 @@ def set_terminal_type(term_type: str) -> None:
 
 
 def get_posix_mode() -> bool:
-    """根据终端类型返回是否使用 POSIX 模式（shlex.split）"""
+    """根据终端类型返回是否使用 POSIX 模式（shlex.split）
+    cmd / powershell 使用非 POSIX：反斜杠按字面量处理，符合各自引号/转义规则"""
     term_type = get_detected_terminal_type()
-    return term_type not in ('cmd',)
+    return term_type not in ('cmd', 'powershell')
 
 
 _OTHER_TERMINAL_CMDS_CACHE: Optional[Dict[str, List[str]]] = None
@@ -639,18 +640,22 @@ class PathResolver:
                 else:
                     path = str(Path.home()) + path[1:]
 
-        # 支持 CMD 的环境变量展开 %VAR%
-        if '%' in path:
-            def cmd_var_replacer(match):
-                var_name = match.group(1)
-                return os.environ.get(var_name, match.group(0))
-            path = re.sub(r'%([^%]+)%', cmd_var_replacer, path)
-
-        if '$' in path:
-            def replacer(match):
-                var_name = match.group(1) or match.group(2)
-                return os.environ.get(var_name, match.group(0))
-            path = re.sub(r'\$(\w+)|\$\{(\w+)\}', replacer, path)
+        # 环境变量展开按终端类型分流（避免 bash 下误展开 %VAR%、cmd 下误展开 $VAR）
+        term_type = get_detected_terminal_type()
+        if term_type == 'cmd':
+            # CMD 风格 %VAR%
+            if '%' in path:
+                def cmd_var_replacer(match):
+                    var_name = match.group(1)
+                    return os.environ.get(var_name, match.group(0))
+                path = re.sub(r'%([^%]+)%', cmd_var_replacer, path)
+        else:
+            # bash/zsh/sh/fish/powershell 风格 $VAR / ${VAR}
+            if '$' in path:
+                def replacer(match):
+                    var_name = match.group(1) or match.group(2)
+                    return os.environ.get(var_name, match.group(0))
+                path = re.sub(r'\$(\w+)|\$\{(\w+)\}', replacer, path)
 
         return path
 
@@ -1340,11 +1345,20 @@ class ShellAstTokenizer:
     - 文件描述符数字（2> 中的 2）→ number
     """
     
-    __slots__ = ('valid_commands', 'virtual_root')
+    __slots__ = ('valid_commands', 'virtual_root', 'sys_type')
     
-    def __init__(self, valid_commands: set = None, virtual_root: str = ""):
+    def __init__(self, valid_commands: set = None, virtual_root: str = "", sys_type: str = 'bash'):
         self.valid_commands = valid_commands or set()
         self.virtual_root = virtual_root
+        self.sys_type = sys_type or 'bash'
+
+    def _escape_char(self, in_quotes: bool = False) -> str:
+        """各 shell 的转义符：bash/zsh/sh/fish → \\；cmd → ^（引号内无转义）；powershell → `"""
+        if self.sys_type == 'cmd':
+            return '' if in_quotes else '^'
+        if self.sys_type == 'powershell':
+            return '`'
+        return '\\'
 
     def tokenize(self, text: str) -> List[Tuple[str, str]]:
         """主入口：返回 [(style, text), ...] 列表"""
@@ -1432,8 +1446,8 @@ class ShellAstTokenizer:
                 i += consumed
                 continue
             
-            # 反引号命令替换
-            if text[i] == '`':
+            # 反引号命令替换（powershell 中 ` 是转义符，不作为命令替换）
+            if self.sys_type != 'powershell' and text[i] == '`':
                 end = text.find('`', i + 1)
                 if end == -1:
                     tokens.append((COLORS['variable'], text[i:]))
@@ -1584,6 +1598,9 @@ class ShellAstTokenizer:
         in_single = False
         in_double = False
         
+        esc_inner = self._escape_char(in_quotes=True)
+        esc_outer = self._escape_char(in_quotes=False)
+        
         while j < n:
             c = text[j]
             
@@ -1594,7 +1611,7 @@ class ShellAstTokenizer:
                 continue
             
             if in_double:
-                if c == '\\' and j + 1 < n:
+                if esc_inner and c == esc_inner and j + 1 < n:
                     j += 2  # skip escaped char in double quotes
                     continue
                 if c == '"':
@@ -1620,9 +1637,9 @@ class ShellAstTokenizer:
                 continue
             
             # Not in quotes
-            if c.isspace() or c in '|;&<>()[]{}#`':
+            if c.isspace() or c in '|;&<>()[]{}#' or (c == '`' and self.sys_type != 'powershell'):
                 break
-            if c == '\\' and j + 1 < n:
+            if esc_outer and c == esc_outer and j + 1 < n:
                 j += 2  # skip escaped char
                 continue
             if c in ('"', "'"):
@@ -1655,9 +1672,10 @@ class ShellAstTokenizer:
             tokens.append((COLORS['string'], text[i:end+1]))
             return tokens
         
-        # 双引号：可能含变量 $VAR / $(...) / `...`
+        # 双引号：可能含变量 $VAR / $(...) / `...`（powershell 中 ` 是转义符）
         tokens.append((COLORS['string'], '"'))
         k = j
+        esc = self._escape_char(in_quotes=True)
         
         while k < n:
             c = text[k]
@@ -1665,8 +1683,8 @@ class ShellAstTokenizer:
                 tokens.append((COLORS['string'], '"'))
                 k += 1
                 break
-            elif c == '\\' and k + 1 < n:
-                # 转义序列
+            elif esc and c == esc and k + 1 < n:
+                # 转义序列（按 shell 类型：bash → \\，powershell → `，cmd 引号内无转义）
                 tokens.append((COLORS['string'], text[k:k+2]))
                 k += 2
             elif c == '$':
@@ -1674,7 +1692,7 @@ class ShellAstTokenizer:
                 var_tokens = self._tokenize_variable(text, k, n)
                 tokens.extend(var_tokens)
                 k += sum(len(t[1]) for t in var_tokens)
-            elif c == '`':
+            elif self.sys_type != 'powershell' and c == '`':
                 end = text.find('`', k + 1)
                 if end == -1:
                     tokens.append((COLORS['variable'], text[k:]))
@@ -1845,10 +1863,11 @@ class CommandLexer(Lexer):
     - 历史导航高亮叠加（保留原有功能）
     """
     
-    def __init__(self, valid_commands: Optional[set] = None, virtual_root: str = ""):
+    def __init__(self, valid_commands: Optional[set] = None, virtual_root: str = "", sys_type: str = None):
         self.valid_commands = valid_commands if valid_commands is not None else set()
         self.virtual_root = virtual_root
-        self._tokenizer = ShellAstTokenizer(self.valid_commands, self.virtual_root)
+        self.sys_type = sys_type or get_detected_terminal_type()
+        self._tokenizer = ShellAstTokenizer(self.valid_commands, self.virtual_root, self.sys_type)
 
     def lex_document(self, document: Document) -> Callable[[int], List[Tuple[str, str]]]:
         text = document.text

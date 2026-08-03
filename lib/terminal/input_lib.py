@@ -1368,7 +1368,7 @@ def universal_input(
         comp_style = PromptStyle.from_dict(default_comp_style)
 
         # 应用 ptk 键位配置，获取自定义键绑定
-        kb = create_key_bindings(sys_type=sys_type, ptk_config=_ptk_config)
+        kb = create_key_bindings(sys_type=sys_type, terminal_type=get_terminal_type(), ptk_config=_ptk_config)
 
         # 补全自动触发过滤器：受 ESC+Space 全局开关控制
         from .kb import is_completion_locked

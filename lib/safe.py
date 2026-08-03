@@ -9,6 +9,7 @@ import json
 import sys
 import re
 import uuid
+import time
 from typing import List, Tuple, Dict, Any, Optional
 from lib.terminal.colors import Fore, Style
 
@@ -30,6 +31,13 @@ _CURRENT_LANG = "chinese"
 _ADV_DANGER_CMD_PROMPT_ENABLED = True  # 默认开启
 _ADV_DANGER_CMD_PROMPT_MEMORY = {}  # 内存缓存，key=cmd_type，value=是否询问
 _ADV_FORCE_CONFIRM_COMMANDS = {'rm', 'redirect', 'here_doc'}  # 强制二次确认的命令类型
+
+# === dan_cmd 高危命令模式缓存（模块级缓存 + mtime 失效，避免每条命令读盘）===
+_DAN_CMD_CACHE: Optional[List[str]] = None
+_DAN_CMD_CACHE_PATH: Optional[str] = None
+_DAN_CMD_CACHE_MTIME: float = 0.0
+_DAN_CMD_CACHE_TIME: float = 0.0
+_DAN_CMD_CACHE_TTL: float = 3.0  # TTL 内零磁盘访问；TTL 后仅当 mtime 变化才重新读取
 
 
 def _get_adv_danger_cmd_config_path(user_home: str = None) -> str:
@@ -1079,6 +1087,37 @@ def is_in_protected_dir(root_dir: str, get_virtual_path_func=None) -> Tuple[bool
     return in_protected, virtual_dir, protected_virtual_dirs
 
 
+def _load_dan_cmd_patterns() -> Optional[List[str]]:
+    """加载 dan_cmd 高危命令模式（模块级缓存；TTL 内零磁盘访问，TTL 后 mtime 变化才重新读取）"""
+    global _DAN_CMD_CACHE, _DAN_CMD_CACHE_PATH, _DAN_CMD_CACHE_MTIME, _DAN_CMD_CACHE_TIME
+    if not _ROOT_DIR:
+        return None
+    dan_cmd_path = os.path.join(_ROOT_DIR, "onyx", "etc", "dan_cmd")
+    
+    now = time.time()
+    if (_DAN_CMD_CACHE is not None and _DAN_CMD_CACHE_PATH == dan_cmd_path
+            and (now - _DAN_CMD_CACHE_TIME) < _DAN_CMD_CACHE_TTL):
+        return _DAN_CMD_CACHE
+    if not os.path.exists(dan_cmd_path):
+        return None
+    try:
+        mtime = os.path.getmtime(dan_cmd_path)
+        if (_DAN_CMD_CACHE is not None and _DAN_CMD_CACHE_PATH == dan_cmd_path
+                and _DAN_CMD_CACHE_MTIME == mtime):
+            _DAN_CMD_CACHE_TIME = now
+            return _DAN_CMD_CACHE
+        with open(dan_cmd_path, "r", encoding="utf-8") as f:
+            patterns = [line.strip().lower() for line in f
+                        if line.strip() and not line.startswith("#")]
+        _DAN_CMD_CACHE = patterns
+        _DAN_CMD_CACHE_PATH = dan_cmd_path
+        _DAN_CMD_CACHE_MTIME = mtime
+        _DAN_CMD_CACHE_TIME = now
+        return patterns
+    except Exception:
+        return None
+
+
 def check_dangerous_commands(cmd_str: str, user_mode, log_info_func=None, 
                             log_error_func=None, request_id: str = None,
                             user_home: str = None) -> bool:
@@ -1096,17 +1135,11 @@ def check_dangerous_commands(cmd_str: str, user_mode, log_info_func=None,
         "mv /", "chmod -R 777 /"
     ]
     
-    # 尝试读取 dan_cmd 配置文件
+    # 尝试读取 dan_cmd 配置文件（模块级缓存 + mtime 失效）
     blocked_patterns = default_patterns
-    if _ROOT_DIR:
-        dan_cmd_path = os.path.join(_ROOT_DIR, "onyx", "etc", "dan_cmd")
-        if os.path.exists(dan_cmd_path):
-            try:
-                with open(dan_cmd_path, "r", encoding="utf-8") as f:
-                    blocked_patterns = [line.strip().lower() for line in f 
-                                       if line.strip() and not line.startswith("#")]
-            except:
-                pass
+    cached_patterns = _load_dan_cmd_patterns()
+    if cached_patterns is not None:
+        blocked_patterns = cached_patterns
     
     cmd_lower = cmd_str.lower().strip()
     

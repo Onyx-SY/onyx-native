@@ -47,6 +47,7 @@ ADV_DANGER_CMD_PROMPT_PATH = os.path.join(CONFIG_DIR, "adv_danger_cmd_prompt")
 MCP_ENABLED_PATH = os.path.join(CONFIG_DIR, "mcp_enabled")
 
 SPRING_MODE_PATH = os.path.join(CONFIG_DIR, "spring_mode")
+BUILTIN_ADV_SYNTAX_PATH = os.path.join(CONFIG_DIR, "builtin-adv-syntax")
 
 # ========== 沙箱配置文件路径 ==========
 SANDBOX_CONFIG_PATH = os.path.join(ROOT_DIR, "etc", "onyx", "sandbox")
@@ -61,6 +62,7 @@ DEFAULT_CONFIGS = {
     MCP_ENABLED_PATH: "true",
 
     SPRING_MODE_PATH: "true",
+    BUILTIN_ADV_SYNTAX_PATH: "false",
 }
 
 # 默认 config.json 模板
@@ -310,8 +312,8 @@ def handle_sandbox_option(options: List[str], request_id: str) -> None:
 def handle_set_option(options: List[str], request_id: str) -> None:
     if len(options) < 1:
         print_silent(Fore.RED + _get_msg(
-            "用法：manage set <选项> <值>\n支持选项：debug-times/debug-parsecmd/language/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/spring-mode",
-            "Usage: manage set <option> <value>\nSupported options: debug-times/debug-parsecmd/language/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/spring-mode"
+            "用法：manage set <选项> <值>\n支持选项：debug-times/debug-parsecmd/language/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/spring-mode/builtin-adv-syntax",
+            "Usage: manage set <option> <value>\nSupported options: debug-times/debug-parsecmd/language/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/spring-mode/builtin-adv-syntax"
         ))
         return
 
@@ -384,6 +386,17 @@ def handle_set_option(options: List[str], request_id: str) -> None:
             print_silent(Fore.RED + _get_msg("值必须为 true/false", "Value must be true/false"))
             return
         success = write_config_file(SPRING_MODE_PATH, opt_value)
+
+    elif opt_name == "builtin-adv-syntax":
+        if opt_value not in ["true", "false"]:
+            print_silent(Fore.RED + _get_msg("值必须为 true/false", "Value must be true/false"))
+            return
+        success = write_config_file(BUILTIN_ADV_SYNTAX_PATH, opt_value)
+        if success and opt_value == "true":
+            print_silent(Fore.YELLOW + _get_msg(
+                "⚠️ 注意：允许内置命令使用高级语法（重定向/管道/逻辑操作符）后，执行结果可能与真实 Shell 存在兼容性差异，建议仅在必要时开启，用完后关闭",
+                "⚠️ Note: allowing advanced syntax (redirects/pipelines/logical operators) for builtin commands may produce results that differ from a real shell. Enable only when necessary, then disable afterwards"
+            ))
 
     else:
         print_silent(Fore.RED + _get_msg(f"未知选项：{opt_name}", f"Unknown option: {opt_name}"))

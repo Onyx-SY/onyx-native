@@ -73,6 +73,25 @@ def _detect_terminal_type() -> str:
     
     # Windows 系统判断
     if sys.platform == 'win32':
+        # 优先按父进程链/COMSPEC 判断真实 shell，避免 Git Bash 干扰
+        # （cmd/PowerShell 会话即使装了 Git Bash，也应识别为 cmd/powershell）
+        try:
+            import psutil
+            proc = psutil.Process()
+            for _ in range(10):
+                if proc is None or proc.pid == 1:
+                    break
+                pname = proc.name().lower().replace('.exe', '')
+                if pname in ('cmd', 'powershell', 'pwsh'):
+                    return 'cmd' if pname == 'cmd' else 'powershell'
+                proc = proc.parent()
+        except Exception:
+            pass
+        comspec = os.environ.get('COMSPEC', '').lower()
+        if 'powershell' in comspec or 'pwsh' in comspec:
+            return 'powershell'
+        if comspec.endswith('cmd.exe'):
+            return 'cmd'
         # 按优先级检查可用 shell
         if shutil.which("bash"):
             return 'bash'

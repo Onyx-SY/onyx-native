@@ -22,6 +22,7 @@ from .config import (
     _SUPPORTED_PLATFORMS, ROOT_DIR, USER,
 
 )
+from .i18n import _ as _i18n  # 双语文本（中英）
 from .parsers import parse_sse_structured_response
 from .storage import (
     load_chat_memory_for_context, get_previous_session_uuid,
@@ -158,12 +159,17 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
                     tools: Optional[List[Dict]] = None,
                     messages: Optional[List[Dict]] = None,
                     memory_block: str = "",
-                    session_id: str = "") -> Dict[str, Any]:
+                    session_id: str = "",
+                    model_override: str = "",
+                    platform_override: str = "") -> Dict[str, Any]:
     """
     memory_block: 缓存稳定前缀（build_stable_prefix 输出），
                   注入 system prompt 末尾。同值返回相同 → DeepSeek 前缀缓存命中。
 
     session_id: 当前会话 UUID，用于隔离缓存诊断状态和前缀比较文件。
+
+    model_override / platform_override: 覆盖当前 key.conf 的模型/平台
+                  （Explore 子代理用「X Pro」= 当前系列最便宜模型）。
     """
     # 惰性导入避免循环引用
     from .config import get_current_lang, get_prompt_text, load_key_conf
@@ -175,7 +181,7 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
     conf = load_key_conf()
     if not conf or not conf.get("api_key"):
         return {"error": prompts.get("license_invalid_or_quota", "未配置 API 密钥，请重新运行 ai 命令"), "answer": "no", "ask": "", "txt": "", "analysis": ""}
-    plat_key = conf.get("platform", "deepseek")
+    plat_key = platform_override or conf.get("platform", "deepseek")
     api_key = conf["api_key"]
     if plat_key == "custom":
         plat_info = {
@@ -188,7 +194,13 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
         }
     else:
         plat_info = _SUPPORTED_PLATFORMS.get(plat_key, _SUPPORTED_PLATFORMS["deepseek"])
-    model = conf.get("model", "") or plat_info.get("default_model", "")
+    model = model_override or conf.get("model", "") or plat_info.get("default_model", "")
+    # 模型别名解析（opus/sonnet/haiku → 平台具体模型）
+    try:
+        from .config import resolve_model_alias as _resolve_alias
+        model = _resolve_alias(plat_key, model)
+    except Exception:
+        pass
     user_params = conf.get("params", {})
 
     tool_list = []
@@ -235,15 +247,14 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
                     "- No available tools (import failed or not initialized)" if lang == "english" else "- 无可用工具（导入失败或未初始化）"]
     tool_count = len(tool_list) if tool_list and tool_list[0] not in prompt_items else 0
 
-    system_label = "System"
-    env_label = "Environment"
-    user_label = "User"
+    system_label = _i18n("env_system", "bilingual")
+    env_label = _i18n("env_env", "bilingual")
+    user_label = _i18n("env_user", "bilingual")
     permission_label = "Permission"
-    workdir_label = "Working directory"
-    language_label = "Language"
+    language_label = _i18n("env_language", "bilingual")
     time_label = "Current time"
-    tools_label = "Available tools"
-    task_label = "Task"
+    tools_label = _i18n("env_tools", "bilingual")
+    task_label = _i18n("env_task", "bilingual")
 
     permission_value = "root administrator" if USER == "root" else "regular user"
     current_shell = os.environ.get("SHELL", "unknown")
@@ -274,15 +285,14 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
 Shell: {current_shell}
 Onyx Mode: {onyx_mode}
 {language_label}: {get_current_lang()}
-#Available tools ({tool_count})
+{tools_label} ({tool_count})
 {chr(10).join(tool_list)}
 {ai_tools_prompt}
-#Persistent memory (rarely changes — cached prefix)
-{onyx_ai_prompt if onyx_ai_prompt else '(none)'}"""
+{_i18n('env_persistent_memory', 'bilingual')}
+{onyx_ai_prompt if onyx_ai_prompt else _i18n('env_none', 'bilingual')}"""
 
-    _dynamic_suffix = f"""#Working directory: {os.getcwd()}
-
-#{task_label}
+    _dynamic_suffix = f"""
+{task_label}
 {question}"""
 
     env_info = _stable_env + "\n" + _dynamic_suffix
@@ -453,12 +463,21 @@ Onyx Mode: {onyx_mode}
         if tools:
             payload["tools"] = _convert_tools_for_anthropic(tools)
     else:
-        payload = {
-            "model": model,
-            "messages": _messages,
-            "stream": True,
-            "max_tokens": p.get("max_tokens", 4096),
-        }
+        # ── OpenAI/DeepSeek 分支：tools 置于 messages 之前（前缀缓存优化）──
+        # DeepSeek 缓存按"完整前缀单元"匹配，且公共前缀检测基于请求 token 流：
+        # tools 定义（约 2 万余 token）若排在 messages 之后，公共前缀在第一条
+        # user 消息（env+问题）处就分叉，tools 永远进不了公共前缀单元 →
+        # 新会话首轮、快速连发轮次都只能命中 messages[0] 静态前缀。
+        # tools 提前后，公共前缀 = model + tools + messages[0]（三者跨会话
+        # 100% 静态），一旦被公共前缀检测持久化，所有轮次命中率回到 90%+。
+        # JSON 字段顺序不影响 API 语义。
+        payload = {}
+        payload["model"] = model
+        if tools:
+            payload["tools"] = tools
+        payload["messages"] = _messages
+        payload["stream"] = True
+        payload["max_tokens"] = p.get("max_tokens", 4096)
         if p.get("temperature") is not None:
             payload["temperature"] = p["temperature"]
         if p.get("top_p") is not None:
@@ -475,9 +494,9 @@ Onyx Mode: {onyx_mode}
 
     payload["stream_options"] = {"include_usage": True}
 
-    # ── 写入 AI 真实看到的完整内容到 ~/.ai_s/tmp/（每次覆盖）──
+    # ── 写入 AI 真实看到的完整内容到 <home>/.ai_s/tmp/（每次覆盖）──
     try:
-        _tmp_dir = os.path.join(os.path.expanduser("~"), ".ai_s", "tmp")
+        _tmp_dir = os.path.join(user_home_dir or os.path.expanduser("~"), ".ai_s", "tmp")
         os.makedirs(_tmp_dir, exist_ok=True)
 
         # ── ai_request.txt：人类可读的消息全文 ──
@@ -523,7 +542,7 @@ Onyx Mode: {onyx_mode}
     _deb_dir = ""
     if debug_mode:
         try:
-            _deb_dir = os.path.join(os.path.expanduser("~"), ".ai_s", "deb", session_id or "default")
+            _deb_dir = os.path.join(user_home_dir or os.path.expanduser("~"), ".ai_s", "deb", session_id or "default")
             os.makedirs(_deb_dir, exist_ok=True)
         except Exception:
             pass
@@ -543,7 +562,7 @@ Onyx Mode: {onyx_mode}
                 # ── 写入调试文件：完整请求 payload + 响应 body ──
                 _deb_path = ""
                 try:
-                    _deb_dir = os.path.join(os.path.expanduser("~"), ".ai_s", "deb")
+                    _deb_dir = os.path.join(user_home_dir or os.path.expanduser("~"), ".ai_s", "deb")
                     os.makedirs(_deb_dir, exist_ok=True)
                     _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     _deb_path = os.path.join(_deb_dir, f"http_{response.status_code}_{_ts}.json")
@@ -777,6 +796,12 @@ Onyx Mode: {onyx_mode}
                     native_tools.append({
                         "name": tc['function']['name'],
                         "params_str": json.dumps(args) if isinstance(args, dict) else str(args),
+                        # 缓存字节一致性：id 与 arguments 必须保留 API 原始字节。
+                        # DeepSeek 按完整前缀单元匹配缓存，下一轮请求回显的
+                        # assistant tool_calls 若与 API 输出不一致（重写 id、
+                        # 重排 arguments），"模型输出端单元"无法完整命中 → 缓存断裂。
+                        "id": tc.get("id", ""),
+                        "raw_arguments": tc.get("function", {}).get("arguments", ""),
                         "_native": True,
                     })
                 existing = result.get("tool_calls", [])
@@ -796,6 +821,9 @@ Onyx Mode: {onyx_mode}
                     native_tools.append({
                         "name": tc["name"],
                         "params_str": json.dumps(args) if isinstance(args, dict) else str(args),
+                        # 缓存字节一致性：同 OpenAI 分支，保留原始 id / input_json 字节
+                        "id": tc.get("id", ""),
+                        "raw_arguments": tc.get("input_json", ""),
                         "_native": True,
                     })
                 existing = result.get("tool_calls", [])
@@ -974,6 +1002,16 @@ def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
     parts = []
     _MAX_CURRENT_SESSION_CHARS = 2000  # 当前会话最多注入 2000 字符的尾部摘要
 
+    def _strip_oversized_fences(text: str, max_fence: int = 600) -> str:
+        """剥离超长 ``` 代码块原文（工具输出污染），保留短代码块（如小段配置）。"""
+        import re as _re
+        def _repl(m):
+            inner = m.group(2)
+            if len(inner) <= max_fence:
+                return m.group(0)
+            return m.group(1) + f"[elided {len(inner)} chars — MemoryRead for full]\n" + m.group(3)
+        return _re.sub(r"(```[^\n]*\n)(.*?)(```)", _repl, text, flags=_re.DOTALL)
+
     if mode == "normal":
         # ── UUID 链：仅索引（id/session_uuid/question 摘要），非全量内容 ──
         chat_memory = load_chat_memory_for_context(home_dir, chat_name)
@@ -999,7 +1037,8 @@ def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
         # ── 当前会话：仅注入尾部摘要（最近 2000 字符）──
         existing_memory, _ = get_latest_ai_session(home_dir, current_session_id)
         if existing_memory and existing_memory.strip():
-            _trimmed = existing_memory.strip()
+            # 先剥离超长代码块（原始工具输出），再截尾部 → 注入内容高信号化
+            _trimmed = _strip_oversized_fences(existing_memory.strip())
             if len(_trimmed) > _MAX_CURRENT_SESSION_CHARS:
                 _trimmed = "…(earlier content omitted — use MemoryRead for full)\n\n" + _trimmed[-_MAX_CURRENT_SESSION_CHARS:]
             header = (
@@ -1022,7 +1061,8 @@ def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
     elif mode in ["adv_code", "adv_terminal"]:
         existing_memory, _ = get_latest_ai_session(home_dir, current_session_id)
         if existing_memory and existing_memory.strip():
-            _trimmed = existing_memory.strip()
+            # 先剥离超长代码块（原始工具输出），再截尾部
+            _trimmed = _strip_oversized_fences(existing_memory.strip())
             if len(_trimmed) > _MAX_CURRENT_SESSION_CHARS:
                 _trimmed = "…(earlier omitted — MemoryRead for full)\n\n" + _trimmed[-_MAX_CURRENT_SESSION_CHARS:]
             header = (

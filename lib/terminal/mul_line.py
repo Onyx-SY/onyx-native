@@ -1010,6 +1010,20 @@ class MultiLineDetector:
         (r'\bfor\b\s+.*?\(\s*$', 'cmd_for', 'cmd'),
         (r'\(\s*$', 'cmd_block', 'cmd'),
     ]
+    
+    FISH_MULTILINE_PATTERNS = [
+        # fish 块以 end 结束：if/for/while/function/switch/begin（无 then/do）
+        # 负向断言排除单行完整命令（…; end 结尾）
+        (r'\bif\b\s+.*(?<!; end)$', 'fish_if', 'fish'),
+        (r'\bfor\b\s+\w+\s+in\b.*(?<!; end)$', 'fish_for', 'fish'),
+        (r'\bwhile\b\s+.*(?<!; end)$', 'fish_while', 'fish'),
+        (r'\bfunction\b\s+\w+(?<!; end)$', 'fish_function', 'fish'),
+        (r'\bswitch\b\s+.*(?<!; end)$', 'fish_switch', 'fish'),
+        (r'\bbegin\b\s*$', 'fish_begin', 'fish'),
+        (r'\\\s*$', 'continuation', 'fish'),
+        (r'\|\s*$', 'pipe_continue', 'fish'),
+        (r'(&&|\|\|)\s*$', 'logic_continue', 'fish'),
+    ]
 
     SYNTAX_SWITCH_MAP = {
         'python': 'python',
@@ -1087,6 +1101,12 @@ class MultiLineDetector:
         'cmd_if': lambda state, line: MultiLineDetector._is_cmd_parens_closed(state, line),
         'cmd_for': lambda state, line: MultiLineDetector._is_cmd_parens_closed(state, line),
         'cmd_block': lambda state, line: MultiLineDetector._is_cmd_parens_closed(state, line),
+        'fish_if': lambda state, line: re.match(r'\s*end\b', line),
+        'fish_for': lambda state, line: re.match(r'\s*end\b', line),
+        'fish_while': lambda state, line: re.match(r'\s*end\b', line),
+        'fish_function': lambda state, line: re.match(r'\s*end\b', line),
+        'fish_switch': lambda state, line: re.match(r'\s*end\b', line),
+        'fish_begin': lambda state, line: re.match(r'\s*end\b', line),
     }
     
     @classmethod
@@ -1122,7 +1142,9 @@ class MultiLineDetector:
                     return state
             return None
         
-        if expected_syntax == "python":
+        if expected_syntax == "fish":
+            patterns = cls.FISH_MULTILINE_PATTERNS
+        elif expected_syntax == "python":
             patterns = cls.PYTHON_MULTILINE_PATTERNS
         elif expected_syntax in ("c", "cpp", "c++"):
             patterns = cls.C_MULTILINE_PATTERNS
@@ -1953,8 +1975,12 @@ def _simple_multiline_input(
 
 # ===================== 语法检测函数 =====================
 def detect_syntax_from_command(command: str) -> str:
-    if _get_terminal_type() == 'cmd':
+    term_type = _get_terminal_type()
+    if term_type == 'cmd':
         return 'cmd'
+    if term_type == 'fish':
+        # fish 语法（if/for/while/function/switch ... end）与 bash 差异大，走专属模式
+        return 'fish'
     detected = SmartSyntaxDetector.detect_from_command(command)
     return detected.value if detected != SyntaxType.UNKNOWN else 'bash'
 

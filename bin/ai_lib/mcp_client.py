@@ -164,8 +164,11 @@ def connect_mcp_server(name: str = "filesystem",
         home = user_home_dir or os.path.expanduser("~")
         config_path = _get_mcp_config_path(user_home_dir)
         try:
+            # AI 虚拟沙盒：filesystem server 挂载点 = cwd（AI 视角虚拟根 /）
+            from . import sandbox
+            mount = sandbox.get_root() or os.getcwd()
             proc = subprocess.Popen(
-                [npx, "-y", "@modelcontextprotocol/server-filesystem", home],
+                [npx, "-y", "@modelcontextprotocol/server-filesystem", mount],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env={**os.environ, "NODE_OPTIONS": "--max-old-space-size=256"},

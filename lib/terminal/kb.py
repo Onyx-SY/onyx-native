@@ -200,7 +200,8 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
     # 清屏
     @kb.add(default_keys["clear_screen"])
     def _(event):
-        if terminal_type == "cmd" or sys_type == "Windows":
+        # cls / clear：cmd/powershell 用 cls；bash 会话即使运行在 Windows 上也用 clear
+        if terminal_type in ("cmd", "powershell") or (sys_type == "Windows" and terminal_type in ("", "cmd")):
             os.system('cls')
         else:
             os.system('clear')

@@ -129,6 +129,7 @@ class I18n:
         参数:
           key:  文本键名
           lang: 语言代码（'chinese' / 'english' 或 'zh' / 'en'）
+                'bilingual' / 'both' 返回中英双语 "中文 / English"
           **fmt: 用于 {placeholder} 格式化的值
 
         返回:
@@ -136,6 +137,19 @@ class I18n:
         """
         self.load()
         lang = _normalize(lang)
+        if lang in ("bilingual", "both", "zh_en", "cn_en"):
+            zh = self._data.get("chinese", {}).get(key)
+            en = self._data.get("english", {}).get(key)
+            if zh and en:
+                text = f"{zh} / {en}"
+            else:
+                text = zh or en or key
+            if fmt:
+                try:
+                    text = text.format(**fmt)
+                except (KeyError, IndexError):
+                    pass
+            return text
         lang_data = self._data.get(lang) or self._data.get(_DEFAULT_LANG, {})
         text = lang_data.get(key, key)
         if fmt:

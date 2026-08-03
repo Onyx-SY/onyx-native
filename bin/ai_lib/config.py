@@ -10,7 +10,6 @@ import sys
 import json
 import time
 import base64
-import requests
 from typing import Dict, List, Optional, Any, Callable, Tuple
 
 from rich.console import Console
@@ -55,31 +54,76 @@ def _load_ai_models() -> dict:
             "name": "深度求索DeepSeek",
             "api_url": "https://api.deepseek.com/v1/chat/completions",
             "stream_format": "openai",
+            "supports_prompt_cache": True,
             "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
-            "default_model": "deepseek-v4-flash",
+            "default_model": "deepseek-v4-pro",
             "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
             "thinking": {"type": "enabled"},
             "reasoning_effort": "high",
+            "price_per_million_tokens": {
+                "deepseek-v4-pro": {"input": 0.435, "output": 0.87},
+                "deepseek-v4-flash": {"input": 0.14, "output": 0.28},
+            },
         },
         "openai": {
             "name": "OpenAI",
             "api_url": "https://api.openai.com/v1/chat/completions",
             "stream_format": "openai",
-            "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro"],
-            "default_model": "gpt-5.5-instant",
-            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096},
+            "supports_prompt_cache": True,
+            "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro",
+                       "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            "default_model": "gpt-5.6-terra",
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 131072},
+            "price_per_million_tokens": {
+                "gpt-5.5-instant": {"input": 3.0, "output": 12.0},
+                "gpt-5.5": {"input": 5.0, "output": 18.0},
+                "gpt-5.5-pro": {"input": 12.5, "output": 75.0},
+                "gpt-5.6-sol": {"input": 5.0, "output": 30.0},
+                "gpt-5.6-terra": {"input": 2.0, "output": 12.0},
+                "gpt-5.6-luna": {"input": 0.2, "output": 1.2},
+            },
         },
         "anthropic": {
             "name": "Anthropic",
             "api_url": "https://api.anthropic.com/v1/messages",
             "stream_format": "anthropic",
-            "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
-            "default_model": "claude-sonnet-4-6",
-            "params": {"max_tokens": 4096},
+            "supports_prompt_cache": True,
+            "models": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-fable-5",
+                       "claude-mythos-5", "claude-sonnet-5"],
+            "default_model": "claude-fable-5",
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 65536},
+            "price_per_million_tokens": {
+                "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+                "claude-opus-4-8": {"input": 5.0, "output": 25.0},
+                "claude-fable-5": {"input": 10.0, "output": 50.0},
+                "claude-mythos-5": {"input": 12.0, "output": 60.0},
+                "claude-sonnet-5": {"input": 2.0, "output": 10.0},
+            },
         },
     }
 
 _SUPPORTED_PLATFORMS = _load_ai_models()
+
+# ── 模型别名（opus / sonnet / haiku → 平台具体模型）──
+_MODEL_ALIASES: Dict[str, Dict[str, str]] = {
+    "anthropic": {
+        "opus": "claude-opus-4-8",
+        "sonnet": "claude-sonnet-4-6",
+        "haiku": "claude-haiku-4-5",
+    },
+}
+
+
+def resolve_model_alias(platform: str, model: str) -> str:
+    """解析模型别名；非别名或未知平台返回原值"""
+    if not model:
+        return model
+    alias_map = _MODEL_ALIASES.get(platform or "", {})
+    key = model.strip().lower()
+    if key in alias_map:
+        return alias_map[key]
+    return model
+
 
 # ── API Key 简单混淆（防意外明文泄露，非加密）──
 _KEY_OBFUSCATE_PREFIX = "~"
@@ -362,6 +406,7 @@ def load_ai_key() -> Optional[str]:
         sys.exit(1)
 
 def verify_ai_key(key: str) -> bool:
+    import requests  # 延迟导入（仅此函数使用）——启动提速，行为不变
     server_url = get_server_url()
     lang = get_current_lang()
     prompts = get_prompt_text(lang)

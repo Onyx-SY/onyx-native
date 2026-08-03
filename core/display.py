@@ -107,7 +107,7 @@ def _build_comp_window_prompt(ctx, template, virtual_path, venv_git, exit_mark_h
     current_color = ""
     segments = re.split(r'\[COLOR=(BLUE|RED|GREEN|YELLOW|RESET|ACCENT_GREEN|ACCENT_RED)\]', pt)
     for seg in segments:
-        if not seg.strip():
+        if not seg:
             continue
         if seg in ctx._COLOR_STYLES:
             current_color = ctx._COLOR_STYLES[seg]

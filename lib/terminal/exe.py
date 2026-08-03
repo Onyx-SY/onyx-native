@@ -563,6 +563,18 @@ class PersistentShell:
         用 shell 的 PS1（__DONE__:$?）检测命令完成，不追加 marker。
         PS1 是 shell 提示词机制的一部分，SIGINT 无法阻止它被打印。
         """
+        # ── 提前初始化 finally/函数尾部要访问的变量 ──
+        # 必须在 try 之前：try 中途任意异常（如 PTY 探测失败）都会跳过后续赋值，
+        # 否则 finally 与尾部检查会触发 UnboundLocalError 并掩盖真实错误。
+        is_windows = platform.system() == "Windows"
+        _passthrough_entered_raw = False
+        old_sigint = None
+        old_sigwinch = None
+        _interrupted_flag = {'value': False}
+        full_raw_output = ""
+        interrupted = False
+        return_code = -1
+
         # 首次执行时探测 shell 实际 PS1，加入 fallback 模式列表
         try:
             if not self._prompt_probed:
@@ -574,13 +586,11 @@ class PersistentShell:
             debug_log(f"Passthrough full_cmd: {repr(full_cmd[:200])}")
             shell_log(full_cmd, 'WRITE_CMD')
 
-            is_windows = platform.system() == "Windows"
             fd_stdin = sys.stdin.fileno()
 
             # 命令执行期间进入 raw 模式，确保 TUI 程序的逐键输入能正确转发到 PTY。
             # 命令结束后恢复到 cooked 模式，与 bash/zsh 行为一致。
-            _passthrough_entered_raw = False
-            if not is_windows:
+            if not is_windows and threading.current_thread() is threading.main_thread():
                 try:
                     import termios as _pt
                     if os.isatty(fd_stdin):
@@ -595,9 +605,6 @@ class PersistentShell:
                 except (ImportError, OSError):
                     pass
 
-            old_sigint = None
-            old_sigwinch = None
-            _interrupted_flag = {'value': False}
             if not is_windows:
                 def _sigint_handler(signum, frame):
                     """将 SIGINT 转发到 PTY 子进程组，使 Ctrl+C 能真正杀死前台程序"""
@@ -609,21 +616,23 @@ class PersistentShell:
                             os.killpg(pgid, signal.SIGINT)
                         except (ProcessLookupError, PermissionError, OSError) as e:
                             debug_log(f"Failed to forward SIGINT to process group: {e}", 'error')
-                old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
-                if hasattr(signal, 'SIGWINCH'):
-                    def sigwinch_handler(signum, frame):
-                        update_pty_size(self.master_fd)
-                    old_sigwinch = signal.signal(signal.SIGWINCH, sigwinch_handler)
+                try:
+                    old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
+                    if hasattr(signal, 'SIGWINCH'):
+                        def sigwinch_handler(signum, frame):
+                            update_pty_size(self.master_fd)
+                        old_sigwinch = signal.signal(signal.SIGWINCH, sigwinch_handler)
+                except ValueError:
+                    # 非主线程无法设置信号处理器（如后台 alias-sender 线程），静默跳过
+                    pass
 
-            full_raw_output = ""
-            interrupted = False
-            return_code = -1
             fd_stdin = sys.stdin.fileno()
 
             # 排空 PTY 残留输出（单次 drain，无 sleep — PTY 已就绪时 drain 为 O(1)）
             self._drain_output()
             _echo_pending = True  # 需要跳过 shell 回显的命令文本
             _echo_buf = ""        # 累积回显字节
+            _echo_start_time = time.time()  # echo 跳过超时计时（TUI 程序无 \n 时避免吞输出）
 
             try:
                 self._write_to_master(full_cmd.encode('utf-8'))
@@ -677,25 +686,31 @@ class PersistentShell:
 
                     # 跳过 shell 回显的命令文本（仅匹配首部，不吞 TUI 输出）
                     if _echo_pending:
-                        _echo_buf += text
-                        _max_echo_len = len(cmd) + 64  # 命令回显不可能超过 cmd 太多
-                        cmd_echo_end = _echo_buf.find('\n')
-                        if cmd_echo_end != -1 and cmd_echo_end < _max_echo_len:
-                            echo_line = _echo_buf[:cmd_echo_end].strip()
-                            if echo_line == cmd.strip() or cmd.strip().startswith(echo_line):
-                                text = _echo_buf[cmd_echo_end + 1:]
-                                _echo_pending = False
-                                if not text:
-                                    continue
-                            else:
-                                text = _echo_buf
-                                _echo_pending = False
-                        elif len(_echo_buf) > _max_echo_len:
-                            # 超过命令长度还没 \n → 不是命令回显（TUI 程序），全部放过
+                        # TUI 程序可能长时间输出无 \n 字节（如全屏控制码），
+                        # 超时 200ms 则视为已过 echo 阶段，直接转发全部累积数据
+                        if _echo_buf and time.time() - _echo_start_time > 0.2:
                             text = _echo_buf
                             _echo_pending = False
                         else:
-                            continue
+                            _echo_buf += text
+                            _max_echo_len = len(cmd) + 64  # 命令回显不可能超过 cmd 太多
+                            cmd_echo_end = _echo_buf.find('\n')
+                            if cmd_echo_end != -1 and cmd_echo_end < _max_echo_len:
+                                echo_line = _echo_buf[:cmd_echo_end].strip()
+                                if echo_line == cmd.strip() or cmd.strip().startswith(echo_line):
+                                    text = _echo_buf[cmd_echo_end + 1:]
+                                    _echo_pending = False
+                                    if not text:
+                                        continue
+                                else:
+                                    text = _echo_buf
+                                    _echo_pending = False
+                            elif len(_echo_buf) > _max_echo_len:
+                                # 超过命令长度还没 \n → 不是命令回显（TUI 程序），全部放过
+                                text = _echo_buf
+                                _echo_pending = False
+                            else:
+                                continue
 
                     # 检测 shell 提示词中的完成 marker（PS1 的一部分，SIGINT 后仍会打印）
                     if _done_marker:
@@ -738,11 +753,14 @@ class PersistentShell:
             debug_log(f"Passthrough exception: {e}", 'error')
         finally:
             if not is_windows:
-                # 恢复信号 handlers
-                if old_sigint:
-                    signal.signal(signal.SIGINT, old_sigint)
-                if old_sigwinch and hasattr(signal, 'SIGWINCH'):
-                    signal.signal(signal.SIGWINCH, old_sigwinch)
+                # 恢复信号 handlers（非主线程或信号已被改动时静默跳过）
+                try:
+                    if old_sigint:
+                        signal.signal(signal.SIGINT, old_sigint)
+                    if old_sigwinch and hasattr(signal, 'SIGWINCH'):
+                        signal.signal(signal.SIGWINCH, old_sigwinch)
+                except ValueError:
+                    pass
                 # 恢复终端到 cooked 模式（与 bash/zsh 一致）
                 if _passthrough_entered_raw:
                     try:

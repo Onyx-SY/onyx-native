@@ -20,7 +20,7 @@ import os
 import sys
 import json
 import functools
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 
 # 延迟导入 rich，避免循环依赖
 _rich_available = None
@@ -453,6 +453,94 @@ def show_info_card(info_dict: Dict[str, Any], title: str = "信息", language: s
     _console.print()
     _console.print(table)
     _console.print()
+
+
+def show_tool_aliases_banner(
+    alias_data: List[List[str]],
+    language: str = "chinese"
+) -> None:
+    """
+    显示工具别名面板（紧凑美化版），按类别分组展示。
+    
+    Args:
+        alias_data: [(tool_name, category, script_path), ...]
+        language: 语言
+    """
+    if not alias_data:
+        return
+    
+    lang_strings = {
+        "chinese": {"title": "工具别名", "total": "共 {} 个"},
+        "english": {"title": "Tool Aliases", "total": "{} total"},
+    }
+    ls = lang_strings.get(language, lang_strings["chinese"])
+    
+    # 按类别分组
+    groups: Dict[str, List[str]] = {}
+    for item in alias_data:
+        tool_name, category, _ = item[0], item[1], item[2]
+        if category not in groups:
+            groups[category] = []
+        groups[category].append(tool_name)
+    
+    total_count = len(alias_data)
+    title_str = f"{ls['title']} ({ls['total'].format(total_count)})"
+    
+    if not _init_rich():
+        from lib.terminal.colors import Fore, Style
+        terminal_width = _get_terminal_width()
+        print()
+        print(Fore.CYAN + f"┌─ {title_str} " + "─" * max(2, terminal_width - len(title_str) - 6) + Style.RESET_ALL)
+        for cat, names in sorted(groups.items()):
+            names_str = "  ".join(names)
+            line = f"│ {Fore.GREEN}{cat}{Style.RESET_ALL} ({len(names)}):  {names_str}"
+            if len(line) > terminal_width - 2:
+                line = line[:terminal_width - 5] + "…"
+            print(line)
+        print(Fore.CYAN + "└" + "─" * max(2, terminal_width - 5) + Style.RESET_ALL)
+        print()
+        return
+    
+    terminal_width = _get_terminal_width()
+    panel_width = max(min(terminal_width - 4, 100), 40)
+    
+    # 构建 Rich 表格：每行一个类别
+    content = _Text()
+    
+    for cat, names in sorted(groups.items()):
+        # 类别标签 + 数量
+        content.append(f"{cat} ", style="bold green")
+        content.append(f"({len(names)})", style="dim")
+        content.append("  ", style="")
+        
+        # 工具名列表（按终端宽度截断）
+        max_names_width = panel_width - 20  # 预留类别标签空间
+        names_str = ""
+        for n in names:
+            candidate = f"{names_str}  {n}" if names_str else n
+            if len(candidate) > max_names_width:
+                names_str += " …"
+                break
+            names_str = candidate
+        content.append(names_str, style="bright_white")
+        content.append("\n")
+    
+    # 移除末尾换行
+    final_text = _Text()
+    final_text.append(title_str, style="bold cyan")
+    final_text.append("\n")
+    final_text.append(content)
+    
+    alias_panel = _Panel(
+        _Align.left(final_text),
+        border_style="cyan",
+        box=_box.ROUNDED,
+        padding=(0, 2),
+        width=panel_width
+    )
+    
+    _console.print()
+    _console.print(_Align.center(alias_panel))
 
 
 def show_success_banner(message: str, title: Optional[str] = None, language: str = "chinese") -> None:

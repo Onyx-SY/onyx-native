@@ -45,7 +45,7 @@ def build_builtin_registry(ctx: "AppContext") -> Dict[str, Callable]:
     from core.handlers.builtins import (
         handle_clear, handle_exit, handle_export,
         handle_ai, handle_import, handle_switch_prompt,
-        handle_set_adv_pwd, handle_autocmd, handle_unalias,
+        handle_set_adv_pwd, handle_autocmd,
         handle_mktool, handle_sado, handle_nanosado, handle_activite,
     )
 
@@ -60,7 +60,6 @@ def build_builtin_registry(ctx: "AppContext") -> Dict[str, Callable]:
         "set-adv-pwd": handle_set_adv_pwd,
         "autocmd": handle_autocmd,
         "mktool": handle_mktool,
-        "unalias": handle_unalias,
         "sado": handle_sado,
         "nanosado": handle_nanosado,
     }

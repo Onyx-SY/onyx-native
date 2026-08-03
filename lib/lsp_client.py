@@ -313,11 +313,16 @@ class LspClient:
             start = r.get("start", {})
             sev = d.get("severity", 0)
             sev_map = {1: "error", 2: "warning", 3: "info", 4: "hint"}
+            severity = sev_map.get(sev, "unknown")
+            # 纯辅助原则：只保留真实编译错误（error 级别），
+            # 丢弃 warning/info/hint 等主观性诊断，避免误报
+            if severity != "error":
+                continue
             parsed.append(LspDiagnostic(
                 path=path,
                 line=start.get("line", 0) + 1,
                 character=start.get("character", 0),
-                severity=sev_map.get(sev, "unknown"),
+                severity=severity,
                 message=d.get("message", ""),
                 source=d.get("source"),
             ))
@@ -358,16 +363,16 @@ class LspClient:
     # ── LSP 操作 ──
 
     def diagnostics(self, file_path: str) -> list[LspDiagnostic]:
-        """获取文件诊断（通过 didOpen 触发服务器推送诊断）。"""
+        """获取文件诊断（仅 error 级别编译错误，通过 didOpen 触发服务器推送）。"""
         uri = self.did_open(file_path)
         from urllib.parse import unquote
         abs_path = os.path.abspath(file_path)
-        # 发送 semanticTokens/full 请求以触发推送（服务器不支持则静默失败）
-        self._request("textDocument/semanticTokens/full", {
-            "textDocument": {"uri": uri},
-        })
-        time.sleep(0.5)  # 给服务器一点时间推送诊断
+        # 等待服务器推送诊断（最多轮询 2.5s，推送到达即提前返回）
         cache = getattr(self, '_diagnostics_cache', {})
+        for _ in range(5):
+            if cache.get(unquote(abs_path)):
+                break
+            time.sleep(0.5)
         return cache.get(unquote(abs_path), [])
 
     def hover(self, file_path: str, line: int, character: int) -> Optional[LspHoverResult]:

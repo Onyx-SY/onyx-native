@@ -4507,7 +4507,9 @@ def handle_ai(
                         if _exe_mod:
                             _exe_mod.AI_EXECUTION_MODE = False
                     _captured = (_out_catcher.get_output() + "\n" + _err_catcher.get_output()).strip()
-            return _captured if _captured else "(无输出)"
+            if _captured:
+                return f"$ {_cmd}\n{_captured}"
+            return f"$ {_cmd}\n(无输出)"
         except Exception as _e:
             return f"命令执行失败: {_e}"
     try:
@@ -4552,7 +4554,9 @@ def handle_ai(
                         if _exe_mod:
                             _exe_mod.AI_EXECUTION_MODE = False
                     _captured = (_out_catcher.get_output() + "\n" + _err_catcher.get_output()).strip()
-            return _captured if _captured else "(无输出)"
+            if _captured:
+                return f"$ {_cmd}\n{_captured}"
+            return f"$ {_cmd}\n(无输出)"
         except Exception as _e:
             return f"命令执行失败: {_e}"
     try:

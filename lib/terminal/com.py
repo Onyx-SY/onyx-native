@@ -1871,13 +1871,18 @@ class CommandLexer(Lexer):
 
     def lex_document(self, document: Document) -> Callable[[int], List[Tuple[str, str]]]:
         text = document.text
+        # 按行分词：缓冲区可能含多行命令（历史导航回填的原始多行），
+        # 逐行渲染避免整块 token 中的 \n 被 ptk 渲染为 ^J。
+        text_lines = text.split("\n")
 
         def get_line_tokens(lineno: int) -> List[Tuple[str, str]]:
-            if lineno != 0:
+            if lineno >= len(text_lines):
                 return []
 
-            # 使用 AST 分词器一次扫描
-            tokens = self._tokenizer.tokenize(text)
+            line_text = text_lines[lineno]
+
+            # 使用 AST 分词器扫描当前行
+            tokens = self._tokenizer.tokenize(line_text)
 
             # ── 首词更正：将第一个非空白、非分隔符的 token 标记为命令 ──
             tokens = self._apply_first_word_as_command(tokens)
@@ -1886,8 +1891,10 @@ class CommandLexer(Lexer):
             global _HIGHLIGHT_TOKEN
             if _HIGHLIGHT_TOKEN:
                 if _HIGHLIGHT_TOKEN in text:
-                    hl_style = COLORS.get("history_match", "bg:#ffffff #000000")
-                    tokens = _overlay_highlight(tokens, text, _HIGHLIGHT_TOKEN, hl_style)
+                    # 高亮位置按当前行计算（tokens 是当前行的）
+                    if _HIGHLIGHT_TOKEN in line_text:
+                        hl_style = COLORS.get("history_match", "bg:#ffffff #000000")
+                        tokens = _overlay_highlight(tokens, line_text, _HIGHLIGHT_TOKEN, hl_style)
                 else:
                     # token 已不在当前文本中（用户清空或编辑了）→ 清除高亮+导航状态
                     _HIGHLIGHT_TOKEN = ""
@@ -2334,7 +2341,8 @@ class SmartCompleter(Completer):
         if not self.history_buffer:
             return None
         
-        matching = [cmd for cmd in self.history_buffer if cmd.startswith(prefix)]
+        # 多行命令不作为虚影建议：单行缓冲区无法正确展示（^J/压平），按 → 补全会破坏结构
+        matching = [cmd for cmd in self.history_buffer if '\n' not in cmd and cmd.startswith(prefix)]
         if matching:
             return matching[0]
         return None
@@ -2344,7 +2352,7 @@ class SmartCompleter(Completer):
             return None
         
         for cmd in self.history_buffer:
-            if cmd.startswith(prefix):
+            if '\n' not in cmd and cmd.startswith(prefix):
                 cmd_name = cmd.split()[0] if cmd.split() else cmd
                 return cmd_name
         return None
@@ -2355,7 +2363,7 @@ class SmartCompleter(Completer):
         
         full_cmd_prefix = f"{cmd} "
         for history_cmd in self.history_buffer:
-            if history_cmd.startswith(full_cmd_prefix):
+            if '\n' not in history_cmd and history_cmd.startswith(full_cmd_prefix):
                 parts = history_cmd.split()
                 if len(parts) >= 2:
                     sub = parts[1]

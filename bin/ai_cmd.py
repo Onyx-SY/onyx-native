@@ -744,9 +744,8 @@ def connect_mcp_server(name: str = "filesystem", user_home_dir: str = None) -> O
     # （npx 在首次下载时 stderr 输出大量进度条，很容易超过 64KB 管道缓冲）
     _start_stderr_reader(proc, name)
 
-    # 快速诊断：等 2s 看进程是否立即崩溃
-    _mcp_debug(f"Waiting 2s, checking liveness... pid={proc.pid}")
-    time.sleep(2)
+    # 快速诊断：非阻塞检查进程是否已立即崩溃（不再固定等待 2s）
+    _mcp_debug(f"Checking liveness... pid={proc.pid}")
     exit_code = proc.poll()
     _mcp_debug(f"Process status: exit_code={exit_code}, pid={proc.pid}")
     # 读取启动 stderr（从收集器获取，不再直接读管道）
@@ -1129,7 +1128,7 @@ def build_native_tools_prompt() -> str:
     lines.append("3. **Large file chunking — MUST**: Files >20KB: create a skeleton with `write_file`, then fill with multiple `edit_file` chunks (<200 lines each). NEVER write the full content of a >20KB file in one `write_file` — it truncates and corrupts. Read back to verify.")
     lines.append("4. **Validate before edit**: Always call `validate_edit` before `edit_file`")
     lines.append("5. **Unique anchor**: `edit_file` old_string must be byte-exact and unique")
-    lines.append("6. **Shell first**: use `@@SHELL` for ls/cat/grep/find when possible")
+    lines.append("6. **Shell**: use `RunCommand(command)` tool for shell commands — output is captured and returned")
     lines.append("")
     lines.append("### Planning Tools")
     lines.append("- `submit_plan(plan, steps?)` — Submit plan for user approval; steps can be structured")
@@ -1140,7 +1139,7 @@ def build_native_tools_prompt() -> str:
     lines.append("- `choose_ask(question, options)` — Present options to user when uncertain")
     lines.append("- `Skill(name, args?)` — Load a reusable skill playbook (e.g. debug, task-workflow, refactor)")
     lines.append("")
-    lines.append("> TXT/ANALYSIS/PLAN/ASK/@@SHELL still use native markup language")
+    lines.append("> Reply in plain Markdown; shell commands go through the RunCommand tool. No [TXT]/[ANALYSIS]/[PLAN]/[ASK] markers.")
     return "\n".join(lines)
 
 
@@ -1220,10 +1219,12 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ),
         _make_tool(
             "read_file",
-            "读取文件内容。支持行号范围。改文件前务必先读文件确认当前内容。",
+            "读取文件内容。支持行号范围 range、head、tail。超过 64 KiB 的大文件自动返回大纲模式（文件大小、前 80 行、符号大纲与钻取提示）。改文件前务必先读文件确认当前内容。",
             {
                 "path": {"type": "string", "description": "文件路径"},
                 "range": {"type": "string", "description": "可选行号范围，如 '10-30' 或 '42'（单行）"},
+                "head": {"type": "integer", "description": "可选：只读前 N 行"},
+                "tail": {"type": "integer", "description": "可选：只读末尾 N 行"},
             },
             ["path"],
             PERM_READONLY,
@@ -1756,6 +1757,17 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         PERM_READONLY,
     ))
 
+    # ── Shell 命令执行（function calling）──
+    # 命令经 Onyx 安全管线执行：危险命令弹用户确认、输出捕获后以 tool 结果
+    # 回传。ReadOnly 权限仅用于跳过工具门控——真正的安全确认在 handler 内部
+    # （is_dangerous_command → confirm_dangerous_command），与旧 @@SHELL 路径一致。
+    native.append(_make_tool(
+        "RunCommand",
+        "Execute a shell command through Onyx's security pipeline. Output is captured and returned to you; dangerous commands require user confirmation. Use this instead of @@SHELL blocks.",
+        {"command": {"type": "string", "description": "Shell command to execute (single line)"}},
+        ["command"], PERM_READONLY,
+    ))
+
     native.sort(key=lambda t: t.get("function", {}).get("name", ""))
     _mcp_debug_exit("build_native_tools", ok=len(native) > 0,
                     detail=f"{len(native)} native tools")
@@ -1842,7 +1854,7 @@ def compact_consumed_tool_results(conversation_history: List[Dict]) -> bool:
         m = conversation_history[i]
         content = m.get("content", "") or ""
         m["content"] = (
-            f"[工具结果已压缩，原 {len(content)} 字符，AI 已消费，摘要如下]\n"
+            f"工具结果已压缩（原 {len(content)} 字符，AI 已消费），摘要如下：\n"
             f"{content[:_COMPACT_TOOL_RESULTS_HEAD]}…"
         )
         m["compacted"] = True
@@ -1910,9 +1922,67 @@ def _exec_get_file_info(file_path: str) -> str:
         return _i18n("finfo_failed", "bilingual", err=e)
 
 
-def _exec_read_file(file_path: str, range_str: str = None) -> str:
+# ── read_file 大纲模式（大文件自动折叠）──
+READ_OUTLINE_THRESHOLD = 64 * 1024          # 超过 64 KiB 自动切大纲模式
+READ_OUTLINE_HEAD = 80                      # 大纲模式返回前 N 行（方向感）
+
+# 通用语言顶层定义扫描（Python 走 ast，其他语言用此正则兜底）
+_SYMBOL_DEF_RE = re.compile(
+    r"^\s*(?:(?:export|default|public|private|protected|static|abstract|"
+    r"final|async|internal|extern|pub|global)\s+)*"
+    r"(?:def\s+|class\s+|func\s+|function\s+|fn\s+|interface\s+|"
+    r"struct\s+|enum\s+|trait\s+|type\s+)"
+    r"[A-Za-z_][A-Za-z0-9_]*"
+)
+
+
+def _fmt_read_size(num_bytes: int) -> str:
+    """人类可读文件大小，如 311.8 KiB"""
+    b = float(num_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if b < 1024 or unit == "TiB":
+            return f"{b:.0f} {unit}" if unit == "B" else f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{num_bytes} B"
+
+
+def _build_symbol_outline(file_path: str, lines: List[str], total_lines: int) -> str:
+    """提取顶层函数/类符号大纲（带行号，无数量上限）。Python 用 ast，其余语言正则兜底。"""
+    width = len(str(total_lines))
+    out: List[str] = []
+
+    if os.path.splitext(file_path)[1].lower() == ".py":
+        try:
+            import ast as _ast
+            tree = _ast.parse("\n".join(lines))
+            for node in tree.body:
+                if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                    if isinstance(node, _ast.ClassDef):
+                        head = f"class {node.name}"
+                    else:
+                        args = [a.arg for a in node.args.args[:6]]
+                        if node.args.vararg:
+                            args.append("*" + node.args.vararg.arg)
+                        if node.args.kwarg:
+                            args.append("**" + node.args.kwarg.arg)
+                        prefix = "async def" if isinstance(node, _ast.AsyncFunctionDef) else "def"
+                        head = f"{prefix} {node.name}({', '.join(args)})"
+                    out.append(f"{node.lineno:>{width}}  │ {head}")
+        except Exception:
+            out = []  # 语法错误等 → 回退正则
+
+    if not out:
+        for i, line in enumerate(lines, 1):
+            if _SYMBOL_DEF_RE.match(line):
+                out.append(f"{i:>{width}}  │ {line.strip()[:120]}")
+    return "\n".join(out)
+
+
+def _exec_read_file(file_path: str, range_str: str = None, head: int = None, tail: int = None) -> str:
     """
-    读取文件内容，支持行号范围。
+    读取文件内容，支持行号范围 range / head / tail。
+    超过 64 KiB 的大文件默认返回大纲模式（文件大小 + 前 80 行 + 符号大纲 + 钻取提示），
+    避免整文件灌入上下文；需要细节时用 range / head / tail / grep_search 钻取。
     
     返回带行号前缀的内容（每行格式 "LINE │ 内容"），
     AI 可以精确引用行号而无需重读文件。
@@ -1964,6 +2034,33 @@ def _exec_read_file(file_path: str, range_str: str = None) -> str:
                     view_mode = f"line {start_line}"
             except (ValueError, IndexError):
                 selected = lines
+        elif head:
+            n = max(1, min(int(head), total_lines))
+            start_line, end_line = 1, n
+            selected = lines[:n]
+            view_mode = f"head {n}"
+        elif tail:
+            n = max(1, min(int(tail), total_lines))
+            start_line = max(1, total_lines - n + 1)
+            end_line = total_lines
+            selected = lines[start_line - 1:]
+            view_mode = f"tail {n}"
+        elif file_size > READ_OUTLINE_THRESHOLD:
+            # ── 大纲模式：大小 + 前 N 行 + 符号大纲 + 钻取提示 ──
+            from lib.native_fs.panels import number_lines as _num_lines
+            preview = _num_lines("\n".join(lines[:READ_OUTLINE_HEAD]), start=1)
+            symbols = _build_symbol_outline(abs_path, lines, total_lines)
+            count = symbols.count("\n") + 1 if symbols else 0
+            return (
+                f"📖 `{abs_path}` "
+                + _i18n("read_outline_header", "bilingual",
+                        total=total_lines, size=_fmt_read_size(file_size))
+                + "\n\n" + _i18n("read_outline_preview", "bilingual", n=READ_OUTLINE_HEAD)
+                + "\n" + preview
+                + "\n\n" + _i18n("read_outline_symbols", "bilingual", count=count)
+                + "\n" + (symbols or _i18n("read_outline_none", "bilingual"))
+                + "\n\n" + _i18n("read_outline_hint", "bilingual")
+            )
         else:
             selected = lines
         
@@ -2381,11 +2478,11 @@ def _exec_skill(skill: str, args: str = "") -> str:
 
 
 def _exec_sleep(seconds: int) -> str:
-    """等待指定秒数。"""
+    """等待指定秒数（可被 Ctrl+C 中断）。"""
     try:
-        import time as _time
+        import threading as _threading
         seconds = max(1, min(seconds, 300))  # 限制 1-300 秒
-        _time.sleep(seconds)
+        _threading.Event().wait(seconds)  # 事件驱动可中断等待，替代 time.sleep
         return f"✅ 等待 {seconds} 秒完成"
     except Exception as e:
         return f"❌ Sleep failed: {e}"
@@ -2702,8 +2799,9 @@ def _resolve_memory_path(path: str) -> str:
       library/<uuid>.txt   → ~/.ai_s/library/<uuid>.txt  (兼容旧格式)
       chat/<name>          → ~/.ai_s/chat/<name>.json
       onyx_ai              → ~/.ai_s/onyx_ai.md
+    记忆根跟随 get_memory_home()（project 模式 → ~/.ai_s/projects/<id>/）
     """
-    home = os.path.expanduser("~")
+    home = get_memory_home()
     base = os.path.join(home, ".ai_s")
     if path.startswith("chat/"):
         name = path[5:]
@@ -3273,6 +3371,70 @@ _SUBAGENT_COMMAND_EXECUTOR = None
 _SUBAGENT_CMD_LOCK = threading.Lock()  # 全端子代理命令串行化（共享 PTY 防输出交错）
 _SUBAGENT_STATUS = None                # 当前 Agent 工具的 Status spinner 引用（同步模式实时刷新）
 
+# ── 主 AI 命令执行器（由 handle_ai 注入：RunCommand 工具经完整安全管线执行，
+#    危险命令弹用户确认。模块级 handler 通过 get_main_command_executor 获取）──
+_MAIN_RUN_COMMAND_EXECUTOR = None
+
+
+def set_main_command_executor(fn: Callable) -> None:
+    """注入主 AI 的 RunCommand 执行器（handle_ai 内的闭包：危险确认 + capture + parse_and_execute）。"""
+    global _MAIN_RUN_COMMAND_EXECUTOR
+    _MAIN_RUN_COMMAND_EXECUTOR = fn
+
+
+def get_main_command_executor() -> Optional[Callable]:
+    return _MAIN_RUN_COMMAND_EXECUTOR
+
+
+# ── 模块级记忆根（由 handle_ai 注入 _mem_home：MemoryRead/MemorySearch 等
+#    路径解析跟随记忆模式 global/project，未注入时回落用户主目录）──
+_MEM_HOME = None
+
+
+def set_memory_home(home_dir: str) -> None:
+    """注入当前会话记忆根目录（handle_ai 内 _mem_home）。"""
+    global _MEM_HOME
+    _MEM_HOME = home_dir
+
+
+def get_memory_home() -> str:
+    """返回当前记忆根目录；未注入时回落用户主目录（兼容旧调用）。"""
+    return _MEM_HOME or os.path.expanduser("~")
+
+
+# ── library 工具结果采集白名单：文件/代码/Git/命令类工具执行后记录到 library ──
+# 读工具记录内容；写工具记录 path + 状态（content 等大字段在格式化时排除）
+LIB_CAPTURE_TOOLS = frozenset({
+    # 读类
+    "read_file", "grep_search", "glob_search", "get_file_info",
+    "search_files", "search_content", "ListDirectory", "DirectoryTree",
+    "MemoryRead", "MemorySearch",
+    "py_diagnostics", "py_symbols", "LspDiagnostics", "LspSymbols",
+    "GitStatus", "GitDiff", "GitLog", "GitBranch",
+    # 写类
+    "write_file", "edit_file", "validate_edit", "preview_edit",
+    "delete_file", "delete_directory", "create_directory",
+    "move_file", "copy_file", "UndoLastEdit",
+    # 命令
+    "RunCommand",
+})
+
+
+def _exec_run_command(command: str) -> str:
+    """RunCommand 工具执行器（模块级分发，注册于 _BUILTIN_HANDLERS）。
+
+    实际执行由 handle_ai 注入的闭包完成：危险命令确认、adv_code 语法检查、
+    capture_command_output 捕获 + parse_and_execute 执行。
+    未注入时（异常路径/测试环境）拒绝执行——绝不绕过安全管线。
+    """
+    executor = get_main_command_executor()
+    if executor is None:
+        return "⛔ RunCommand 不可用：主会话未初始化命令执行器（安全管线未注入）"
+    try:
+        return executor(command)
+    except Exception as e:
+        return f"命令执行失败: {e}"
+
 
 def set_subagent_command_executor(fn: Callable) -> None:
     """注入命令执行器（handle_ai 内的闭包：capture + parse_and_execute + 危险命令拒绝）。"""
@@ -3340,7 +3502,7 @@ def _exec_agent(description: str, prompt: str, name: str = "",
                 if time.time() > _deadline:
                     break
                 _refresh_subagent_status(_subagent_mod)
-                time.sleep(0.3)
+                _subagent_mod.get_manager().wait_any(timeout=0.3)  # 事件驱动等待（完成即醒）
             _refresh_subagent_status(_subagent_mod, final=True)
         if mode == "async":
             ids = ", ".join(t.id for t in _tasks)
@@ -3481,7 +3643,7 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "validate_edit": lambda p: _exec_validate_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
         "preview_edit": lambda p: _exec_preview_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
         "get_file_info": lambda p: _exec_get_file_info(p.get("path", "")),
-        "read_file":    lambda p: _exec_read_file(p.get("path", ""), p.get("range", None)),
+        "read_file":    lambda p: _exec_read_file(p.get("path", ""), p.get("range", None), p.get("head", None), p.get("tail", None)),
         "write_file":   lambda p: _exec_write_file(p.get("path", ""), p.get("content", "")),
         "edit_file":    lambda p: _exec_edit_file(p.get("path", ""), p.get("old_string", ""), p.get("new_string", "")),
         "glob_search":  lambda p: _exec_glob_search(p.get("pattern", ""), p.get("path", None)),
@@ -3570,6 +3732,8 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "GitDiff":    lambda p: _exec_git_diff(p.get("path", ""), p.get("staged", False)),
         "GitLog":     lambda p: _exec_git_log(p.get("path", ""), int(p.get("count", 10))),
         "GitBranch":  lambda p: _exec_git_branch(p.get("path", "")),
+        # ── Shell 命令执行（function calling）──
+        "RunCommand": lambda p: _exec_run_command(p.get("command", "")),
     }
     if raw_tool in _BUILTIN_HANDLERS:
         try:
@@ -4088,6 +4252,11 @@ def handle_ai(
     # ── 记忆根目录：记忆模式（global=user_home_dir / project=<项目专属文件夹>）──
     # memory_base_dir 由 ai_interactive 传入；为空则跟随 user_home_dir（兼容旧调用）
     _mem_home = memory_base_dir or user_home_dir
+    # ── 注入模块级记忆根：MemoryRead/MemorySearch 路径解析与最高指示读写跟随记忆模式 ──
+    try:
+        set_memory_home(_mem_home)
+    except Exception:
+        pass
     # ── Explore 子代理记忆根跟随主会话（cost.json 记录位置一致）──
     try:
         from .ai_lib import subagent as _subagent_hook
@@ -4148,6 +4317,51 @@ def handle_ai(
             return f"命令执行失败: {_e}"
     try:
         set_subagent_command_executor(_subagent_run_command)
+    except Exception:
+        pass
+
+    # ── 主 AI RunCommand 执行器：与旧 @@SHELL 路径相同的安全管线 ──
+    # 危险命令弹用户确认（confirm_dangerous_command）、adv_code 模式语法拦截、
+    # capture_command_output 捕获 + parse_and_execute 执行。
+    # 供 RunCommand 内置工具（function calling）使用：结果以 tool role 消息回传，
+    # 模型明确感知"已调用工具并拿到结果"。
+    def _main_run_command(_cmd: str) -> str:
+        """主 AI RunCommand 执行：危险确认 + adv_code 语法检查 + 串行化 + 输出捕获。"""
+        try:
+            _cmd = (_cmd or "").strip()
+            if not _cmd:
+                return "⛔ 命令为空"
+            _is_danger, _cmd_name = is_dangerous_command(_cmd, dangerous_commands)
+            if _is_danger:
+                _confirmed, _u_resp, _refuse_reason = confirm_dangerous_command(
+                    _cmd, _cmd_name, lang_text, current_session_id,
+                    initial_question, interaction_count, log_info
+                )
+                if not _confirmed:
+                    return (f"⛔ 用户拒绝了危险命令 [{_cmd_name}]：{_cmd}\n"
+                            f"拒绝原因: {_refuse_reason or '未提供'}")
+            # adv_code 模式：禁止语法拦截
+            if _current_user_mode == "adv_code" and has_forbidden_syntax(_cmd):
+                return f"⛔ 命令包含被禁止的语法，已被拦截：{_cmd[:200]}"
+            with _SUBAGENT_CMD_LOCK:
+                _captured = ""
+                with capture_command_output() as (_out_catcher, _err_catcher):
+                    _out_catcher._ai_triggered = True
+                    _exe_mod = sys.modules.get('lib.terminal.exe')
+                    if _exe_mod:
+                        _exe_mod.AI_EXECUTION_MODE = True
+                    try:
+                        if parse_and_execute:
+                            parse_and_execute(_cmd)
+                    finally:
+                        if _exe_mod:
+                            _exe_mod.AI_EXECUTION_MODE = False
+                    _captured = (_out_catcher.get_output() + "\n" + _err_catcher.get_output()).strip()
+            return _captured if _captured else "(无输出)"
+        except Exception as _e:
+            return f"命令执行失败: {_e}"
+    try:
+        set_main_command_executor(_main_run_command)
     except Exception:
         pass
     
@@ -4557,6 +4771,7 @@ def handle_ai(
     initial_question = content
     last_user_question = content  # 追踪最近一次用户输入，ESC 追问时更新
     continue_asking = True
+    _user_input_round = False  # 本轮是否有真正的用户输入（library 记录去重用）
     interaction_count = 0
     _pending_plan = ""  # 来自 submit_plan 工具调用的计划文本（跨循环持久化）
     plan_confirmed = False  # Plan 模式：计划是否已获用户确认
@@ -4598,7 +4813,7 @@ def handle_ai(
     import platform as _pf
 
     # ── 提前加载海马体索引 + agreement（供 _env_info 和 .prompt 使用）──
-    _hippocampus_index = build_stable_prefix(user_home_dir)
+    _hippocampus_index = build_stable_prefix(_mem_home)
     _agreement_text = ""
     try:
         _agreement_paths = [
@@ -4722,12 +4937,14 @@ def handle_ai(
         conversation_history.append(_system_msg)
         _time_tag = f"\n\n[⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}]"
         conversation_history.append({"role": "user", "content": initial_question + _time_tag})
+        _user_input_round = True  # 首轮：首次提问已入历史
     else:
         # ── 已有上下文：直接追加新用户问题，不重建系统消息 ──
         # 动态环境已在首轮注入（REPL 场景复用会话历史，不重复采集）
         _dynamic_env = ""
         _time_tag = f"\n\n[⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}]"
         conversation_history.append({"role": "user", "content": initial_question + _time_tag})
+        _user_input_round = True  # REPL 新输入：本次提问已入历史
 
     current_question = initial_question  # 用于日志/估算，API 实际走 conversation_history
 
@@ -4769,10 +4986,10 @@ def handle_ai(
             _explore_done = _subagent_mod.get_manager().collect_done()
             for _et in _explore_done:
                 if _et.status == "done" and _et.summary:
-                    _inject = f"[SUBAGENT_RESULT] {_et.label}任务「{_et.name}」完成：\n{_et.summary}"
+                    _inject = f"子代理结果：{_et.label}任务「{_et.name}」完成：\n{_et.summary}"
                     console.print(f"  [bold cyan]🧩 {_et.label}子代理「{_et.name}」完成，结果已注入上下文[/]")
                 else:
-                    _inject = f"[SUBAGENT_RESULT] {_et.label}任务「{_et.name}」失败：{_et.error or _et.status}"
+                    _inject = f"子代理任务失败：{_et.label}任务「{_et.name}」失败：{_et.error or _et.status}"
                     console.print(f"  [bold red]🧩 {_et.label}子代理「{_et.name}」失败[/]")
                 conversation_history.append({"role": "system", "content": _inject})
             # 运行中的子代理：灰色显示最近活动尾行（告诉用户没卡住）
@@ -4820,7 +5037,7 @@ def handle_ai(
         if (mode == "plan" or _PLAN_MODE_ACTIVE) and not _plan_warned:
             plan_warning = lang_text.get("plan_mode_warning",
                 "⚠️ 当前处于 PLAN 模式。你只能生成计划，不能执行任何命令或修改文件。"
-                "请使用 [plan]...[plan:done] 格式输出你的计划。"
+                "请通过 submit_plan 工具提交你的计划。"
                 "等用户确认后，才能进入执行阶段。"
                 "如果要退出 plan 模式，请调用 ExitPlanMode 工具。")
             # REPL 跨会话复用 history 时防重复：内容已存在则跳过
@@ -4920,12 +5137,12 @@ def handle_ai(
 
             parts = []
 
-            # 流式文本：只在 TXT 块闭合后显示绿色面板，流式中显示灰色预览
+            # 流式文本：TXT 块闭合或纯文本模式（pre）→ 绿色正式面板；in_txt 流式中 → 灰色预览
             if txt_content.strip():
                 cleaned = _strip_markers(txt_content)
                 if cleaned.strip():
-                    if _txt_phase == "post_txt":
-                        # TXT 块已闭合 → 绿色正式面板
+                    if _txt_phase != "in_txt":
+                        # 正式面板：TXT 块已闭合（post_txt）或纯文本模式（pre，无标记语言）
                         parts.append(Panel(Markdown(cleaned.strip()),
                                            title="💬 回复", border_style="green", box=ROUNDED))
                     else:
@@ -5037,7 +5254,7 @@ def handle_ai(
             ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
                                           path_validator=_mcp_path_validator)
             # ── 采集工具结果（供 library 记录）──
-            if ok and tool_name in ("read_file", "grep_search", "glob_search", "get_file_info"):
+            if ok and tool_name in LIB_CAPTURE_TOOLS:
                 try:
                     from .ai_lib.storage import capture_tool_result
                     capture_tool_result(tool_name, params, output)
@@ -5228,23 +5445,28 @@ def handle_ai(
                     stream_buffer = buf[match_offset + m.end():]
                     continue
 
-                # ── 裸文本行（无 [ 前缀）→ pre/in_txt 阶段收集到 txt ──
+                # ── 裸文本行（无标记前缀）→ pre/in_txt 阶段收集到 txt ──
+                # 仅排除真正的标记起始（已知标记名）。其余一律视为正文 —— 否则
+                # markdown 链接（[文本](url)）或表格等以 [ 开头的行会永远匹配不上
+                # 裸文本模式而卡死流式渲染。
                 if _txt_phase in ("pre", "in_txt"):
-                    m = _re.match(r'^([^\[]+)', buf_match)
-                    if m:
-                        raw = m.group(1)
-                        # 只移除控制字符（回车/换行/空字节），保留空格和制表符以保持缩进
-                        clean = raw.lstrip('\r\n\0')
-                        if clean:
-                            # 只保留安全部分：如果文本末尾可能是不完整的标记开始符，保守截断
-                            to_take = clean
-                            stream_buffer = buf[match_offset + len(raw):]
-                            txt_content += to_take
-                            continue
-                        elif raw and raw != clean:
-                            # 只有控制字符 → 丢弃它们
-                            stream_buffer = buf[match_offset + len(raw):]
-                            continue
+                    m = _re.match(r'^\[(?:TXT|ANALYSIS|PLAN|ANSWER|ASK|MEMORY|TAG|PROMPT|CLASS|SLEEP|DEBUG)\]|^\[plan\]|^\[tool:\S+', buf_match)
+                    if not m:
+                        # 非标记开头 → 整行作为正文收集（含 [ 开头的 markdown）
+                        m = _re.match(r'^[^\n]+', buf_match)
+                        if m:
+                            raw = m.group(0)
+                            # 只移除控制字符（回车/换行/空字节），保留空格和制表符以保持缩进
+                            clean = raw.lstrip('\r\n\0')
+                            if clean:
+                                to_take = clean
+                                stream_buffer = buf[match_offset + len(raw):]
+                                txt_content += to_take + "\n"
+                                continue
+                            elif raw and raw != clean:
+                                # 只有控制字符 → 丢弃它们
+                                stream_buffer = buf[match_offset + len(raw):]
+                                continue
 
                 break  # 无法再提取任何完整块
 
@@ -5521,7 +5743,7 @@ def handle_ai(
         # 处理 [PROMPT]: 字段 — 写入 .ai_s/onyx_ai.md 最高指示
         _prompt_from_result = ai_result.get("prompt", "") or prompt_val
         if _prompt_from_result.strip():
-            _write_onyx_ai_prompt(_prompt_from_result, user_home_dir)
+            _write_onyx_ai_prompt(_prompt_from_result, _mem_home)
 
         was_interrupted = ai_result.get("_interrupted", False)
         if was_interrupted:
@@ -5659,11 +5881,13 @@ def handle_ai(
                 }
                 conversation_history.append(_ask_msg)
                 conversation_history.append({"role": "user", "content": user_answer})
+                _user_input_round = True  # 用户回答了 AI 追问
                 current_question = f"{current_question}\n\nUser answer: {user_answer}" if current_lang == "english" else f"{current_question}\n\n用户回答：{user_answer}"
                 continue_asking = True
                 
                 if interaction_count == 1:
                     record_ai_session(_mem_home, current_session_id, initial_question, ai_result, user_answer, {}, referenced_memory_uuid or "", markup_results=ai_result.get("_markup_results"))
+                    _user_input_round = False  # 首轮提问+回答已由 record_ai_session 记录，消费标记
                 else:
                     existing_content, record_path = get_latest_ai_session(_mem_home, current_session_id)
                     if existing_content and record_path:
@@ -5677,6 +5901,7 @@ def handle_ai(
                                 f.write(new_content)
                         except Exception:
                             pass
+                    _user_input_round = False  # AI追问+用户回答已写入 library，消费标记
                 
                 continue
             except KeyboardInterrupt:
@@ -5701,7 +5926,7 @@ def handle_ai(
             ai_commands = ai_commands[:10]
             _warn = lang_text.get("cmd_limit", "⚠️ 命令超过 10 条限制，已截断前 10 条执行") if False else "⚠️ 命令超过 10 条限制，已截断前 10 条执行"
             console.print(f"  [bold yellow]{_warn}[/]")
-            conversation_history.append({"role": "system", "content": f"[SYSTEM] {_warn}。多余的 {len(_discarded)} 条命令被丢弃，请下一轮继续。"})
+            conversation_history.append({"role": "system", "content": f"{_warn}。多余的 {len(_discarded)} 条命令被丢弃，请下一轮继续。"})
         analysis_content = (ai_result.get("analysis", "") or "").strip()
         
         if ai_commands and not analysis_content:
@@ -5794,7 +6019,8 @@ def handle_ai(
 
             if plan_choice == "discard":
                 console.print(lang_text.get("plan_discarded", "🗑️ 计划已摒弃，将通知 AI 重新规划"), style="bold yellow")
-                conversation_history.append({"role": "user", "content": "[用户摒弃了你的计划，请重新制定]"})
+                conversation_history.append({"role": "user", "content": "用户摒弃了你的计划，请重新制定"})
+                _user_input_round = True  # 用户操作了计划
                 _pending_plan = ""
                 continue_asking = True
                 continue
@@ -5807,16 +6033,18 @@ def handle_ai(
                     guide_text = ""
                     console.print()
                 if guide_text:
-                    conversation_history.append({"role": "user", "content": f"[用户对计划的指导意见]:\n{guide_text}\n\n请根据指导意见修改计划。"})
+                    conversation_history.append({"role": "user", "content": f"用户对计划的指导意见：\n{guide_text}\n\n请根据指导意见修改计划。"})
                 else:
-                    conversation_history.append({"role": "user", "content": "[用户未提供具体意见，请简化或重新生成计划]"})
+                    conversation_history.append({"role": "user", "content": "用户未提供具体意见，请简化或重新生成计划"})
+                _user_input_round = True  # 用户输入了计划意见
                 _pending_plan = ""
                 continue_asking = True
                 continue
 
             elif plan_choice == "confirm":
                 console.print(lang_text.get("plan_confirmed", "✅ 计划已确认，即将进入执行阶段"), style="bold green")
-                conversation_history.append({"role": "user", "content": "[用户已确认计划，请按步骤开始执行]"})
+                conversation_history.append({"role": "user", "content": "用户已确认计划，请按步骤开始执行"})
+                _user_input_round = True  # 用户确认了计划
                 # ── 不再截断 submit_plan 工具结果 ──
                 # 原逻辑确认后把历史中部的计划正文改写为短标记以省 token，
                 # 但中间消息内容变化会让 DeepSeek 前缀缓存从该处起整体 miss，
@@ -5873,15 +6101,17 @@ def handle_ai(
                             "🔄 Switched to free mode, plan mode restrictions lifted."),
                             style="bold green")
                         conversation_history.append({"role": "user", "content": _mcp_t(
-                            "[用户已手动切换至自由模式，请继续执行任务。]",
-                            "[User manually switched to free mode. Please continue the task.]")})
+                            "用户已手动切换至自由模式，请继续执行任务。",
+                            "User manually switched to free mode. Please continue the task.")})
+                        _user_input_round = True  # 用户切换了模式
                         _plan_block_count = 0
                         continue  # 下一轮 mode==normal，不再拦截
                     # 留在 Plan 模式：重置计数并再次明确要求 AI 只提交计划
                     _plan_block_count = 0
                     conversation_history.append({"role": "user", "content": _mcp_t(
-                        "[用户选择留在 Plan 模式。请不要调用任何工具，立即用 submit_plan 提交计划。]",
-                        "[User chose to stay in Plan mode. Do not call any tools; submit your plan with submit_plan now.]")})
+                        "用户选择留在 Plan 模式。请不要调用任何工具，立即用 submit_plan 提交计划。",
+                        "User chose to stay in Plan mode. Do not call any tools; submit your plan with submit_plan now.")})
+                    _user_input_round = True  # 用户选择了留在 plan 模式
                 # 告诉 AI 为什么被拦 + 应该怎么做，然后自动继续让 AI 响应
                 # 引导 AI 先调用 choose_ask 询问用户是否手动切换到自由模式
                 conversation_history.append({
@@ -5891,13 +6121,13 @@ def handle_ai(
                         "请立即调用 choose_ask 询问用户：是否手动切换到自由模式（正常执行模式）？"
                         "选项必须是 [\"继续 Plan 模式并提交计划\", \"切换到自由模式\"]。"
                         "如果用户选择切换到自由模式，系统会自动解除 plan 模式；"
-                        "否则请使用 submit_plan 工具或 [PLAN]...[PLAN:DONE] 格式提交你的计划。"
+                        "否则请使用 submit_plan 工具提交你的计划。"
                         "用户会审核并确认后，才能进入执行阶段。不要再次调用被拦截的命令/工具。",
                         "[Plan mode] Your commands/tools were blocked because you haven't submitted a plan yet. "
                         "Immediately call choose_ask to ask the user: do you want to manually switch to free mode (normal execution mode)? "
                         "Options must be [\"Stay in Plan mode and submit a plan\", \"Switch to free mode\"]. "
                         "If the user chooses to switch to free mode, the system will lift plan mode automatically; "
-                        "otherwise submit your plan with submit_plan tool or [PLAN]...[PLAN:DONE] format. "
+                        "otherwise submit your plan with the submit_plan tool. "
                         "The user will review and confirm before execution is allowed. "
                         "Do NOT retry blocked commands/tools."
                     )
@@ -5912,7 +6142,7 @@ def handle_ai(
         if tool_results and not tool_calls:
             _native_feedback = "\n".join(tool_results)
             if _native_feedback.strip():
-                conversation_history.append({"role": "system", "content": f"[NATIVE_RESULT]\n{_native_feedback.strip()}"})
+                conversation_history.append({"role": "system", "content": f"工具执行结果：\n{_native_feedback.strip()}"})
 
         # 处理 AI 工具调用 ([tool:...] 格式)
         if tool_calls:
@@ -5966,9 +6196,9 @@ def handle_ai(
                     else:
                         params = _parse_tool_params(tool_params_str, tool_body)
 
-                    # 显示工具调用 + 关键参数（path、pattern 等）
+                    # 显示工具调用 + 关键参数（path、pattern、command 等）
                     _param_preview = ""
-                    for _key in ("path", "pattern", "uuid", "task_id", "cron_id", "team_id", "query", "url", "name", "prompt"):
+                    for _key in ("path", "pattern", "uuid", "task_id", "cron_id", "team_id", "query", "url", "name", "prompt", "command"):
                         _val = params.get(_key, "")
                         if _val:
                             # 路径/参数完整显示，绝不截断 —— 用户需要看到具体改的是哪个文件
@@ -5977,6 +6207,10 @@ def handle_ai(
                     _is_builtin = tool_name in (
                         "read_file","write_file","edit_file","get_file_info",
                         "glob_search","grep_search","search_file","validate_edit","preview_edit",
+                        "delete_file","delete_directory","create_directory","move_file","copy_file",
+                        "ListDirectory","DirectoryTree",
+                        "GitStatus","GitDiff","GitLog","GitBranch",
+                        "RunCommand",
                         "ToolSearch","Skill","TodoWrite","Sleep","StructuredOutput",
                         "submit_plan","mark_step_complete","EnterPlanMode","ExitPlanMode",
                         "choose_ask","Config","Agent","WebFetch","WebSearch",
@@ -5995,8 +6229,9 @@ def handle_ai(
                     # Status 持续重绘会与 InquirerPy 的终端输入界面冲突，输入框被
                     # 转圈覆盖，用户只能看到"⏳ 运行中…"而看不到真正的输入框。
                     # 交互工具直接执行，让菜单和输入框独立渲染。
+                    # RunCommand 同样不包：危险命令需弹确认框，spinner 会遮挡 y/N 提示。
                     _status_started = False
-                    if tool_name != "choose_ask":
+                    if tool_name not in ("choose_ask", "RunCommand"):
                         from rich.status import Status as _RichStatus
                         _status = _RichStatus(f"  [dim]⏳ {_tool_display_name} 运行中…[/]", spinner="dots", console=console)
                         _status.start()
@@ -6010,7 +6245,7 @@ def handle_ai(
                         ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
                                                       path_validator=_mcp_path_validator)
                         # ── 采集工具结果 ──
-                        if ok and tool_name in ("read_file", "grep_search", "glob_search", "get_file_info"):
+                        if ok and tool_name in LIB_CAPTURE_TOOLS:
                             try:
                                 from .ai_lib.storage import capture_tool_result
                                 capture_tool_result(tool_name, params, output)
@@ -6050,7 +6285,7 @@ def handle_ai(
                                 f"⚠️ Storm detected: {tool_name} failed {_fail_count}x, AI should switch strategy"
                             )
                             console.print(f"  [bold red]{_storm_warn}[/]")
-                            conversation_history.append({"role": "system", "content": f"[STORM_WARNING] {_storm_warn}"})
+                            conversation_history.append({"role": "system", "content": _storm_warn})
                     else:
                         _storm_counter.pop(_tc_key, None)
 
@@ -6161,8 +6396,8 @@ def handle_ai(
                     "🔄 用户已选择切换到自由模式，Plan 模式已解除。",
                     "🔄 User chose free mode; Plan mode lifted."), style="bold green")
                 conversation_history.append({"role": "system", "content": _mcp_t(
-                    "[系统] 用户已选择切换到自由模式，plan 模式已解除。现在可以正常执行命令和工具。",
-                    "[System] User chose to switch to free mode; plan mode lifted. "
+                    "用户已选择切换到自由模式，plan 模式已解除。现在可以正常执行命令和工具。",
+                    "User chose to switch to free mode; plan mode lifted. "
                     "You may execute commands and tools normally.")})
             # 原生标记语言结果由 library 记忆系统持久化（record_ai_session），
             # 下一轮 build_memory_context 从磁盘加载注入提示词。
@@ -6251,8 +6486,8 @@ def handle_ai(
                         conversation_history.append({
                             "role": "system",
                             "content": _mcp_t(
-                                f"[用户拒绝了你的命令: {cmd[:200]}] 原因: {refuse_reason}。请换一种方式。",
-                                f"[User rejected your command: {cmd[:200]}] Reason: {refuse_reason}. Please try a different approach."
+                                f"用户拒绝了你的命令：{cmd[:200]} 原因：{refuse_reason}。请换一种方式。",
+                                f"User rejected your command: {cmd[:200]} Reason: {refuse_reason}. Please try a different approach."
                             )
                         })
                 
@@ -6272,8 +6507,8 @@ def handle_ai(
                         conversation_history.append({
                             "role": "system",
                             "content": _mcp_t(
-                                f"[你的命令包含被禁止的语法，已被拦截: {cmd[:200]}]",
-                                f"[Your command contains forbidden syntax and was blocked: {cmd[:200]}]"
+                                f"你的命令包含被禁止的语法，已被拦截：{cmd[:200]}",
+                                f"Your command contains forbidden syntax and was blocked: {cmd[:200]}"
                             )
                         })
                     else:
@@ -6412,7 +6647,7 @@ def handle_ai(
                             f"⚠️ Storm detected: cmd「{cmd}」failed {_storm_counter[_cmd_key]}x, AI should switch strategy"
                         )
                         console.print(f"  [bold red]{_storm_warn}[/]")
-                        conversation_history.append({"role": "system", "content": f"[STORM_WARNING] {_storm_warn}"})
+                        conversation_history.append({"role": "system", "content": _storm_warn})
                 else:
                     _storm_counter.pop(_cmd_key, None)
                     _repeat_success[_cmd_key] = _repeat_success.get(_cmd_key, 0) + 1
@@ -6426,7 +6661,7 @@ def handle_ai(
                 for _cmd, _result in cmd_results.items():
                     _cmd_feedback_lines.append(f"$ {_cmd}\n{_result}")
                 _cmd_feedback = "\n\n".join(_cmd_feedback_lines)
-                conversation_history.append({"role": "system", "content": f"[CMD_RESULT]\n{_cmd_feedback}"})
+                conversation_history.append({"role": "system", "content": f"命令执行结果：\n{_cmd_feedback}"})
             
             if not ai_ask.strip():
                 final_ai_result = ai_result.copy()
@@ -6439,20 +6674,28 @@ def handle_ai(
                 
                 if interaction_count == 1:
                     record_ai_session(_mem_home, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "", markup_results=final_ai_result.get("_markup_results"))
+                    _user_input_round = False  # 首轮提问已由 record_ai_session 记录，消费标记
                 else:
                     existing_content, record_path = get_latest_ai_session(_mem_home, current_session_id)
                     if existing_content and record_path:
                         _ts = time.strftime('%Y-%m-%d %H:%M:%S')
                         _md = current_lang == "english"
                         new_content = f"\n\n### {'Interaction' if _md else '交互'} #{interaction_count} ({_ts})\n\n"
-                        # 记录本轮的用户提问（对话历史中最后一个 user 消息）
-                        _last_user_q = ""
-                        for _m in reversed(conversation_history):
-                            if _m.get("role") == "user":
-                                _last_user_q = _m.get("content", "")
-                                break
-                        if _last_user_q:
-                            new_content += f"- **{'User' if _md else '用户'}**: {_last_user_q[:200]}{'...' if len(_last_user_q) > 200 else ''}\n"
+                        # 记录本轮的用户提问（对话历史中最后一个 user 消息）——
+                        # 仅真正的用户输入轮记录；AI 自动循环轮不重复记录同一问题
+                        if _user_input_round:
+                            _last_user_q = ""
+                            for _m in reversed(conversation_history):
+                                if _m.get("role") == "user":
+                                    _last_user_q = _m.get("content", "")
+                                    break
+                            if _last_user_q:
+                                new_content += f"- **{'User' if _md else '用户'}**: {_last_user_q[:200]}{'...' if len(_last_user_q) > 200 else ''}\n"
+                        else:
+                            new_content += f"- **{'User' if _md else '用户'}**: _（AI 自动执行中，无新用户输入）_\n"
+                        # ── 已消费本轮用户输入标记：立即重置 ──
+                        # 防止后续 AI 自动循环轮把同一个问题/同一句"用户已确认计划"重复写入 library
+                        _user_input_round = False
                         _resp = (final_ai_result.get('txt', '') or '').strip()
                         if _resp:
                             new_content += f"- **{'AI Response' if _md else 'AI回答'}**:\n  {_resp}\n"
@@ -6479,20 +6722,28 @@ def handle_ai(
                 
                 if interaction_count == 1:
                     record_ai_session(_mem_home, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "", markup_results=final_ai_result.get("_markup_results"))
+                    _user_input_round = False  # 首轮提问已由 record_ai_session 记录，消费标记
                 else:
                     existing_content, record_path = get_latest_ai_session(_mem_home, current_session_id)
                     if existing_content and record_path:
                         _ts = time.strftime('%Y-%m-%d %H:%M:%S')
                         _md = current_lang == "english"
                         new_content = f"\n\n### {'Interaction' if _md else '交互'} #{interaction_count} ({_ts})\n\n"
-                        # 记录本轮的用户提问（对话历史中最后一个 user 消息）
-                        _last_user_q = ""
-                        for _m in reversed(conversation_history):
-                            if _m.get("role") == "user":
-                                _last_user_q = _m.get("content", "")
-                                break
-                        if _last_user_q:
-                            new_content += f"- **{'User' if _md else '用户'}**: {_last_user_q[:200]}{'...' if len(_last_user_q) > 200 else ''}\n"
+                        # 记录本轮的用户提问（对话历史中最后一个 user 消息）——
+                        # 仅真正的用户输入轮记录；AI 自动循环轮不重复记录同一问题
+                        if _user_input_round:
+                            _last_user_q = ""
+                            for _m in reversed(conversation_history):
+                                if _m.get("role") == "user":
+                                    _last_user_q = _m.get("content", "")
+                                    break
+                            if _last_user_q:
+                                new_content += f"- **{'User' if _md else '用户'}**: {_last_user_q[:200]}{'...' if len(_last_user_q) > 200 else ''}\n"
+                        else:
+                            new_content += f"- **{'User' if _md else '用户'}**: _（AI 自动执行中，无新用户输入）_\n"
+                        # ── 已消费本轮用户输入标记：立即重置 ──
+                        # 防止后续 AI 自动循环轮把同一个问题/同一句"用户已确认计划"重复写入 library
+                        _user_input_round = False
                         _resp = (final_ai_result.get('txt', '') or '').strip()
                         if _resp:
                             new_content += f"- **{'AI Response' if _md else 'AI回答'}**:\n  {_resp}\n"
@@ -6567,14 +6818,14 @@ def handle_ai(
                             _act_tail = _subagent_wait.get_manager().format_activity(4)
                             if _act_tail:
                                 _st.update("  [dim]🧩 子代理运行中…\n" + _act_tail + "[/]")
-                            time.sleep(0.4)
+                            _subagent_wait.get_manager().wait_any(timeout=0.4)  # 事件驱动等待（完成即醒）
                     _waited = _subagent_wait.get_manager().collect_done()
                     for _et in _waited:
                         if _et.status == "done" and _et.summary:
-                            _inject = f"[EXPLORE_RESULT] 任务「{_et.name}」完成：\n{_et.summary}"
+                            _inject = f"探索子代理结果：任务「{_et.name}」完成：\n{_et.summary}"
                             console.print(f"  [bold cyan]🧩 Explore 子代理「{_et.name}」完成，结果已注入上下文[/]")
                         else:
-                            _inject = f"[EXPLORE_RESULT] 任务「{_et.name}」失败：{_et.error or _et.status}"
+                            _inject = f"探索子代理任务失败：任务「{_et.name}」失败：{_et.error or _et.status}"
                             console.print(f"  [bold red]🧩 Explore 子代理「{_et.name}」失败[/]")
                         conversation_history.append({"role": "system", "content": _inject})
                     if _waited:
@@ -6628,6 +6879,7 @@ def handle_ai(
                     current_question = follow_up
                     _time_tag = f"\n\n[⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}]"
                     conversation_history.append({"role": "user", "content": follow_up + _time_tag})
+                    _user_input_round = True  # 用户 ESC 追问
                     continue_asking = True
 
     # 恢复原始 SIGINT 处理器

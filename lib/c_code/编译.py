@@ -2308,7 +2308,6 @@ C/C++源文件编译工具 v2.0 - 帮助信息
                 
                 else:
                     print("无效选择")
-                    time.sleep(1)
                     
             except KeyboardInterrupt:
                 print("\n\n程序被中断，退出...")

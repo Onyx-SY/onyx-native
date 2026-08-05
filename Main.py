@@ -13,7 +13,6 @@ import signal
 import argparse
 import re
 from typing import List, Dict, Optional, Tuple, Any
-from time import sleep
 import time
 import datetime
 import platform

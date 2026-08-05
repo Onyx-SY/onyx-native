@@ -55,15 +55,18 @@ from typing import Dict, List, Tuple, Optional, Any, Callable, Union
 
 from pathlib import Path
 
-from bin.activite_cmd import handle_activite_core
 
 # === 热路径模块级导入（从函数内提升，避免每条命令重复 import 查找）===
 # parse_and_execute 惰性加载：lib.parse_and_execute 导入耗时 ~0.24s，
 # 只在首次执行命令时加载——Main.py 启动不再等待（行为不变）
-from lib.terminal.exe import run_cmd_sync as _run_cmd_sync
-from lib.parse import resolve_paths_in_multiline_text
+# run_cmd_sync / resolve_paths_in_multiline_text 同样惰性加载：
+# lib.terminal.exe 是 1800+ 行大文件，在慢速设备（手机）上模块级执行耗时
+# ~150ms，且 main_loop 已有后台线程 _prewarm_shell 预热它——启动不再等待
+# （行为不变）。
 
 _parse_and_execute = None  # 惰性占位
+_run_cmd_sync = None  # 惰性占位
+_resolve_paths_in_multiline_text = None  # 惰性占位
 
 
 def _get_parse_and_execute():
@@ -72,6 +75,22 @@ def _get_parse_and_execute():
     if _parse_and_execute is None:
         from lib.parse_and_execute import parse_and_execute as _parse_and_execute
     return _parse_and_execute
+
+
+def _get_run_cmd_sync():
+    """惰性加载 lib.terminal.exe.run_cmd_sync（启动提速，行为不变）。"""
+    global _run_cmd_sync
+    if _run_cmd_sync is None:
+        from lib.terminal.exe import run_cmd_sync as _run_cmd_sync
+    return _run_cmd_sync
+
+
+def _get_resolve_paths_in_multiline_text():
+    """惰性加载 lib.parse.resolve_paths_in_multiline_text（启动提速，行为不变）。"""
+    global _resolve_paths_in_multiline_text
+    if _resolve_paths_in_multiline_text is None:
+        from lib.parse import resolve_paths_in_multiline_text as _resolve_paths_in_multiline_text
+    return _resolve_paths_in_multiline_text
 
 # 真正的argon2id加密（底层实现，无版本兼容问题）
 def argon2id_hash(password: str, salt: str) -> str:
@@ -1647,7 +1666,7 @@ def verify_admin_password() -> bool:
 def run_cmd_sync(cmd: str, request_id: str, is_tool: bool = False, tool_perm: int = 3,
                   passthrough: bool = False) -> int:
     global _LAST_EXIT_CODE
-    rc = _run_cmd_sync(
+    rc = _get_run_cmd_sync()(
         cmd=cmd,
         request_id=request_id,
         is_tool=is_tool,
@@ -1932,7 +1951,7 @@ def get_process_risk_level(pid: int, cmd: str) -> Tuple[int, str]:
 
 def replace_virtual_path_in_cmd(cmd: str, request_id: str) -> str:
     """使用 parse 模块的安全路径解析"""
-    return resolve_paths_in_multiline_text(cmd, resolve_path)
+    return _get_resolve_paths_in_multiline_text()(cmd, resolve_path)
 
 # Onyx.py - 修改 parse_and_execute 函数
 
@@ -2094,6 +2113,13 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
     - 带子命令标志 (-mcp, -c, -tui, -key) → 一次性调用 bin.ai_cmd.handle_ai
     - 纯对话 → 进入 bin.ai_interactive.ai_interactive_session 持久 REPL
     """
+    # ── 沙盒会话边界：每次 ai 命令启动重置沙盒，下次 handle_ai init 时
+    #    重新固定到启动时的 cwd（会话内不随 cd 漂移）──
+    try:
+        from bin.ai_lib import sandbox as _sandbox
+        _sandbox.deactivate()
+    except Exception:
+        pass
 
 
     # ── 首次使用：检查并引导配置 key.conf ──
@@ -2323,7 +2349,8 @@ def handle_nanosado(cmd_parts: List[str], request_id: str) -> None:
 # 在 Onyx.py 中，找到 handle_activite 函数（大约第 1786 行），修改为：
 
 def handle_activite(cmd_parts: List[str], request_id: str) -> None:
-    """activite 命令入口：调用独立模块核心逻辑"""
+    """activite 命令入口：调用独立模块核心逻辑（惰性导入，启动提速）"""
+    from bin.activite_cmd import handle_activite_core
     handle_activite_core(
         cmd_parts=cmd_parts,
         request_id=request_id,

@@ -275,7 +275,7 @@ def health_check_mcp(user_home_dir: str = None) -> None:
 def _schedule_mcp_health_check(user_home_dir: str = None) -> None:
     """调度一次延迟健康检查（后台线程）"""
     def _do_check():
-        time.sleep(30)
+        threading.Event().wait(30)  # 可中断定时等待（后台线程），替代 time.sleep
         health_check_mcp(user_home_dir)
     threading.Thread(target=_do_check, daemon=True).start()
 

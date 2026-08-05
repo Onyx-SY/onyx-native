@@ -261,6 +261,13 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
     """AI 命令（委托 bin/ai_cmd 或 bin/ai_interactive）"""
     from core.context import get_ctx
     ctx = get_ctx()
+    # ── 沙盒会话边界：每次 ai 命令启动重置沙盒，下次 handle_ai init 时
+    #    重新固定到启动时的 cwd（会话内不随 cd 漂移）──
+    try:
+        from bin.ai_lib import sandbox as _sandbox
+        _sandbox.deactivate()
+    except Exception:
+        pass
     from bin.ai_cmd import load_key_conf, _setup_key_conf_interactive
     conf = load_key_conf()
     if not conf or not conf.get("api_key"):

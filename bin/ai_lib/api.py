@@ -8,6 +8,7 @@ Onyx AI API 调用模块 — SSE 流式调用、结果处理、记忆上下文
 import os
 import json
 import time
+import threading
 import hashlib
 import platform
 from datetime import datetime
@@ -602,7 +603,7 @@ Onyx Mode: {onyx_mode}
                 if retry < max_retries - 1:
                     _wait = base_delay * (retry + 1) * 2
                     console.print(f"[yellow]⚠️ API 限流 (429)，{_wait}秒后重试 (第 {retry+1}/{max_retries} 次)...[/]")
-                    time.sleep(_wait)
+                    threading.Event().wait(_wait)  # 可中断重试退避
                     continue
                 return {"error": "请求过于频繁 (429)，请稍后再试 | Rate limit reached, please retry later", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code in (500, 502, 503):
@@ -610,7 +611,7 @@ Onyx Mode: {onyx_mode}
                 if retry < max_retries - 1:
                     _wait = base_delay * (retry + 1) * 3
                     console.print(f"[yellow]⚠️ AI 服务暂时不可用 ({response.status_code})，{_wait}秒后重试 (第 {retry+1}/{max_retries} 次)...[/]")
-                    time.sleep(_wait)
+                    threading.Event().wait(_wait)  # 可中断重试退避
                     continue
                 return {"error": f"AI 服务暂时不可用 ({response.status_code})，请稍后再试", "answer": "no", "ask": "", "txt": "", "analysis": ""}
             response.raise_for_status()
@@ -928,7 +929,7 @@ Onyx Mode: {onyx_mode}
             delay = base_delay * (2 ** retry)
             retry_msg = prompts.get("retrying", "Retrying ({}/{}) in {}s...").format(retry + 1, max_retries, delay)
             console.print(retry_msg, style="dim")
-            time.sleep(delay)
+            threading.Event().wait(delay)  # 可中断重试退避
 
     return {"error": last_error or "Max retries exceeded", "analysis": "", "txt": "", "answer": "no", "ask": ""}
 

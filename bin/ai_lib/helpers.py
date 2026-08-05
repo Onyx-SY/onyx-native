@@ -27,7 +27,7 @@ def handle_sleep_wait(sleep_seconds: int, session_id: str, lang_text: Dict[str, 
 
     try:
         for i in range(1, sleep_seconds + 1):
-            time.sleep(1)
+            threading.Event().wait(1)  # 可被 Ctrl+C 中断，替代 time.sleep
             waited_seconds = i
             console.print(f"\r{lang_text['sleep_countdown'].format(sleep_seconds, i, sleep_seconds)}", end="", style="bold blue")
         console.print(f"\n{lang_text['sleep_completed'].format(sleep_seconds)}", style="bold green")
@@ -283,7 +283,7 @@ def show_loading(loading_flag: List[bool], lang_text: Dict[str, str]) -> None:
         sys.stdout.write(f"\r{symbols[idx%4]} {lang_text['loading']}")
         sys.stdout.flush()
         idx += 1
-        time.sleep(0.25)
+        threading.Event().wait(0.1)  # 动画节流（功能性），可中断
     sys.stdout.write("\r" + " " * 30 + "\r")
     sys.stdout.flush()
 

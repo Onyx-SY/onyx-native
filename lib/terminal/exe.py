@@ -519,9 +519,7 @@ class PersistentShell:
                 buf += chunk
                 # probe 标记已出现 → 之后的内容就是 PS1
                 if "__PSL_PROBE__" in buf:
-                    # 等一小段时间收完 prompt 的剩余字节
-                    time.sleep(0.1)
-                    # 再读一次收尾
+                    # 再读一次收尾（_read_from_master 内部用 select 超时，无需额外 sleep）
                     try:
                         buf += self._read_from_master(timeout=0.2) or ""
                     except Exception:

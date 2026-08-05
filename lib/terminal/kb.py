@@ -246,8 +246,16 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
     def _(event):
         buffer = event.app.current_buffer
         if buffer.suggestion:
-            buffer.insert_text(buffer.suggestion.text)
+            sug_text = buffer.suggestion.text
             buffer.suggestion = None
+            if '\n' in sug_text:
+                # 多行命令虚影：不能塞进单行缓冲区（会显示成 ^J 或被压成一行），
+                # 记录待重放，清空缓冲区；回车后以多行形式补全并执行
+                input_lib_module._PENDING_MULTILINE_RECALL = buffer.text + sug_text
+                buffer.text = ""
+                buffer.cursor_position = 0
+            else:
+                buffer.insert_text(sug_text)
         else:
             pos = buffer.cursor_position
             if pos < len(buffer.text):

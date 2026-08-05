@@ -111,10 +111,17 @@ _PREFIX_VALUE: str = ""                   # 固定的前缀值（导航过程中
 _PREFIX_FILTERED_INDICES: List[int] = []  # 匹配前缀的历史记录在 _HISTORY_BUFFER 中的索引
 _PREFIX_CURRENT_POS: int = -1             # 当前在 _PREFIX_FILTERED_INDICES 中的位置
 
+# 当前导航到的原始历史条目（多行命令恢复用；None=未在导航中或用户已编辑）
+_NAVIGATION_RAW_COMMAND: Optional[str] = None
+
+# 虚影补全接受的多行命令（含 \n）：回车后以多行形式重放，不塞进单行缓冲区
+_PENDING_MULTILINE_RECALL: Optional[str] = None
+
 # 多行输入状态
 _MULTILINE_STATE: Optional[MultiLineState] = None  # 当前多行输入状态
 _MULTILINE_BUFFER: List[str] = []                  # 多行输入缓冲
 _MULTILINE_ACTIVE: bool = False                    # 多行输入是否激活
+_MULTILINE_ABORTED: bool = False                   # 多行输入被取消/中断（防止把首行残片写入历史）
 
 # 虚拟根目录（从主程序注入）
 _VIRTUAL_ROOT: str = ""
@@ -254,40 +261,61 @@ def _start_history_writer():
 
 def _encode_multiline_for_storage(cmd: str) -> str:
     """
-    将多行命令编码为单行存储格式。
-    使用 \x00 (null字符) 作为换行符的替代，因为：
-    1. null 字符在终端输入中几乎不可能出现
-    2. 不会被误认为是文件换行
+    将多行命令编码为单行 JSON 块存储：
+      {"multiline": true, "cmd": "..."}
+    JSON 字符串天然转义换行（\\n），文件仍是纯文本单行，
+    不再使用 \x00 空字符替代（传统 txt 行文件无法表示真实换行）。
+    单行命令保持原样存储（文件可读、兼容旧工具）。
     """
     if '\n' in cmd:
-        return cmd.replace('\n', _HISTORY_MULTILINE_SEPARATOR)
+        return json.dumps({"multiline": True, "cmd": cmd}, ensure_ascii=False)
     return cmd
 
 def _decode_multiline_from_storage(line: str) -> str:
     """
     将从文件读取的单行解码，恢复多行命令。
     支持多种格式：
-    1. 旧的 ^J 转义格式（字面字符串 ^J）
-    2. 旧的 \n 转义格式（反斜杠+n）
-    3. 新的 null 字符格式
+    1. 新版 JSON 块：{"multiline": true, "cmd": "..."}（带标记，避免误伤 { 开头命令）
+    2. 旧版 \x00 空字符格式
+    3. 旧版 ^J 转义格式（字面字符串 ^J）
+    4. 旧版 \n 转义格式（反斜杠+n）
     """
     if not line:
         return line
-    
+
+    # 新版：JSON 块存储（必须带 multiline 标记才解码）
+    if line.startswith('{'):
+        try:
+            data = json.loads(line)
+            if isinstance(data, dict) and data.get("multiline") is True and isinstance(data.get("cmd"), str):
+                return data["cmd"]
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     if '^J' in line:
         line = line.replace('^J', '\n')
-    
+
     if '\\n' in line:
         line = line.replace('\\n', '\n')
-    
+
     if _HISTORY_MULTILINE_SEPARATOR in line:
         line = line.replace(_HISTORY_MULTILINE_SEPARATOR, '\n')
-    
+
     return line
 
-def _clean_display_text(cmd: str) -> str:
+# ANSI 转义序列正则：CSI（\x1b[...m 等）、OSC（\x1b]...\x07）、单字符 ESC 序列
+_ANSI_ESCAPE_RE = re.compile(
+    r'\x1b\[[0-9;?]*[ -/]*[@-~]'
+    r'|\x1b\][^\x07\x1b]*(\x07|\x1b\\)'
+    r'|\x1b[@-Z\\-_]'
+)
+
+def _clean_display_text(cmd: str, decode_escapes: bool = True) -> str:
     """
-    清理显示文本，确保所有转义字符都被正确处理为实际的控制字符。
+    清理显示文本，确保转义字符被正确处理。
+    decode_escapes=True（历史条目）：将 ^J、\\n 等字面转义解码为真实控制字符。
+    decode_escapes=False（用户输入）：不解析字面 \\n/\\r/\\t（避免破坏 printf 等命令），
+    仅清理 ANSI 转义序列与 ^[ 残留。
     同时调用 MultiLineFormatter 进行格式化解码。
     """
     if not cmd:
@@ -296,18 +324,22 @@ def _clean_display_text(cmd: str) -> str:
     # 先通过 MultiLineFormatter 解码（处理历史文件中的 null 分隔符等）
     result = MultiLineFormatter.decode_history_command(cmd)
     
-    replacements = [
-        ('^J', '\n'),
-        ('^M', '\r'),
-        ('^I', '\t'),
-        ('\\n', '\n'),
-        ('\\r', '\r'),
-        ('\\t', '\t'),
-    ]
+    if decode_escapes:
+        replacements = [
+            ('^J', '\n'),
+            ('^M', '\r'),
+            ('^I', '\t'),
+            ('\\n', '\n'),
+            ('\\r', '\r'),
+            ('\\t', '\t'),
+        ]
+        for old, new in replacements:
+            if old in result:
+                result = result.replace(old, new)
     
-    for old, new in replacements:
-        if old in result:
-            result = result.replace(old, new)
+    # 清理 ANSI 转义序列（真实 ESC 字符）与 ^[ 字面残留
+    result = _ANSI_ESCAPE_RE.sub('', result)
+    result = result.replace('^[', '')
     
     return result
 
@@ -454,10 +486,9 @@ def add_to_history(cmd: str) -> bool:
     if not cmd_stripped:
         return False
     
+    # 仅兼容旧格式的 ^J 显示转义；不把字面 \n（如 printf "a\nb"）误转为换行
     if '^J' in cmd_stripped:
         cmd_stripped = cmd_stripped.replace('^J', '\n')
-    if '\\n' in cmd_stripped:
-        cmd_stripped = cmd_stripped.replace('\\n', '\n')
     
     if _HISTORY_BUFFER and _HISTORY_BUFFER[0] == cmd_stripped:
         return False
@@ -525,31 +556,20 @@ def _set_nav_match_info(token: str, current: int, total: int) -> None:
         _NAV_MATCH_INFO = ""
 
 def _format_history_for_display(cmd: str) -> str:
-    """格式化历史命令用于显示（纯文本，高亮由 ptk CommandLexer 的 set_history_highlight_token 负责）
-    
-    单行 prompt 模式下 \\n 会被 ptk 渲染为 ^J，因此统一替换为空格。
+    """返回历史条目在缓冲区中的回填文本（导航显示与继续导航比较统一使用）。
+
+    多行命令直接保留真实换行：ptk 会把含 \\n 的缓冲区按多行渲染，
+    不再压成一行 —— 用户能直观看到多行结构；同时缓冲区内容与历史原始
+    命令完全一致，回车后原样提交执行，不会出现“只识别第一行”的内容丢失。
+    这里只负责解码历史遗留转义（^J / ANSI / 字面 \\n 等）。
     """
     if not cmd:
         return cmd
-    
-    cleaned = _clean_display_text(cmd)
-    
-    if '\n' in cleaned:
-        return cleaned.replace('\n', ' ')
-    
-    if '^J' in cmd:
-        cleaned = cmd.replace('^J', '\n')
-        return cleaned.replace('\n', ' ')
-    
-    if MultiLineFormatter.is_multiline_command(cmd):
-        formatted = MultiLineFormatter.format_multiline_command(cmd)
-        return formatted.replace('\n', ' ') if '\n' in formatted else formatted
-    
-    return cmd
+    return _clean_display_text(cmd)
 
 def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
     """处理普通 Up 键：空输入→线性遍历全部历史；有文字→子串匹配筛选 + ANSI 反色高亮"""
-    global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT, _HISTORY_BUFFER
+    global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT, _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
     
     if not _HISTORY_BUFFER:
@@ -559,7 +579,7 @@ def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
     
     # ── 已在导航中 + 用户未手动编辑 → 继续当前模式 ──
     if _CURRENT_HISTORY_INDEX != -1:
-        if _CURRENT_HISTORY_INDEX < len(_HISTORY_BUFFER) and current_input == _HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]:
+        if _CURRENT_HISTORY_INDEX < len(_HISTORY_BUFFER) and current_input == _format_history_for_display(_HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]):
             if _PREFIX_NAVIGATION_ACTIVE and _PREFIX_FILTERED_INDICES:
                 # 继续子串筛选（高亮用原始 token）
                 set_history_highlight_token(_PREFIX_VALUE)
@@ -567,7 +587,8 @@ def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
                     _PREFIX_CURRENT_POS += 1
                 else:
                     return current_input, len(current_input)
-                formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+                _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+                formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
                 return formatted, len(formatted)
             else:
                 # 继续线性遍历
@@ -575,12 +596,14 @@ def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
                     _CURRENT_HISTORY_INDEX += 1
                 else:
                     return current_input, len(current_input)
-                formatted = _format_history_for_display(_HISTORY_BUFFER[_CURRENT_HISTORY_INDEX])
+                _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]
+                formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
                 return formatted, len(formatted)
         else:
             # 用户手动编辑了 → 重置所有状态
             _CURRENT_HISTORY_INDEX = -1
             _NAVIGATION_START_INPUT = ""
+            _NAVIGATION_RAW_COMMAND = None
             _PREFIX_NAVIGATION_ACTIVE = False
             _PREFIX_VALUE = ""
             _PREFIX_FILTERED_INDICES = []
@@ -603,7 +626,8 @@ def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
                 _CURRENT_HISTORY_INDEX += 1
             else:
                 return current_input, len(current_input)
-        formatted = _format_history_for_display(_HISTORY_BUFFER[_CURRENT_HISTORY_INDEX])
+        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]
+        formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
     
     # 有文字 → filtered-list 子串匹配
@@ -614,28 +638,32 @@ def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
         set_history_highlight_token(_PREFIX_VALUE)
         
         if not _PREFIX_FILTERED_INDICES:
+            _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
         
         _PREFIX_CURRENT_POS = 0
-        # 如果当前输入恰好是第一个匹配，且还有更多匹配 → 跳到第二个
-        if _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[0]] == current_input and len(_PREFIX_FILTERED_INDICES) > 1:
+        # 如果当前输入恰好是第一个匹配，且还有更多匹配 → 跳到第二个（用格式化文本比较）
+        if _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[0]]) == current_input and len(_PREFIX_FILTERED_INDICES) > 1:
             _PREFIX_CURRENT_POS = 1
         
-        formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+        formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
     
     # 继续筛选列表（高亮始终用原始搜索 token _PREFIX_VALUE，而非当前缓冲区文字）
     set_history_highlight_token(_PREFIX_VALUE)
     if _PREFIX_CURRENT_POS < len(_PREFIX_FILTERED_INDICES) - 1:
         _PREFIX_CURRENT_POS += 1
-        formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+        formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
+    _NAVIGATION_RAW_COMMAND = None
     return current_input, len(current_input)
 
 
 def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
     """处理普通 Down 键：空输入→线性遍历全部历史（反向）；有文字→子串匹配筛选 + ANSI 反色高亮（反向）"""
-    global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT, _HISTORY_BUFFER
+    global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT, _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
     
     if not _HISTORY_BUFFER:
@@ -645,7 +673,7 @@ def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
     
     # ── 已在导航中 + 用户未手动编辑 → 继续当前模式 ──
     if _CURRENT_HISTORY_INDEX != -1:
-        if _CURRENT_HISTORY_INDEX < len(_HISTORY_BUFFER) and current_input == _HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]:
+        if _CURRENT_HISTORY_INDEX < len(_HISTORY_BUFFER) and current_input == _format_history_for_display(_HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]):
             if _PREFIX_NAVIGATION_ACTIVE and _PREFIX_FILTERED_INDICES:
                 set_history_highlight_token(_PREFIX_VALUE)
                 if _PREFIX_CURRENT_POS > 0:
@@ -655,11 +683,13 @@ def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
                     _PREFIX_VALUE = ""
                     _PREFIX_FILTERED_INDICES = []
                     _PREFIX_CURRENT_POS = -1
+                    _NAVIGATION_RAW_COMMAND = None
                     clear_history_highlight_token()
                     return current_input, len(current_input)
                 else:
                     return current_input, len(current_input)
-                formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+                _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+                formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
                 return formatted, len(formatted)
             else:
                 if _CURRENT_HISTORY_INDEX > 0:
@@ -668,14 +698,17 @@ def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
                     _CURRENT_HISTORY_INDEX = -1
                     original = _NAVIGATION_START_INPUT
                     _NAVIGATION_START_INPUT = ""
+                    _NAVIGATION_RAW_COMMAND = None
                     return original, len(original)
                 else:
                     return current_input, len(current_input)
-                formatted = _format_history_for_display(_HISTORY_BUFFER[_CURRENT_HISTORY_INDEX])
+                _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]
+                formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
                 return formatted, len(formatted)
         else:
             _CURRENT_HISTORY_INDEX = -1
             _NAVIGATION_START_INPUT = ""
+            _NAVIGATION_RAW_COMMAND = None
             _PREFIX_NAVIGATION_ACTIVE = False
             _PREFIX_VALUE = ""
             _PREFIX_FILTERED_INDICES = []
@@ -685,20 +718,24 @@ def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
     if not _token:
         clear_history_highlight_token()
         if _CURRENT_HISTORY_INDEX == -1:
+            _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
         if _CURRENT_HISTORY_INDEX < len(_HISTORY_BUFFER):
-            if current_input != _HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]:
+            if current_input != _format_history_for_display(_HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]):
                 _CURRENT_HISTORY_INDEX = -1
                 _NAVIGATION_START_INPUT = ""
+                _NAVIGATION_RAW_COMMAND = None
                 return current_input, len(current_input)
         if _CURRENT_HISTORY_INDEX > 0:
             _CURRENT_HISTORY_INDEX -= 1
-            formatted = _format_history_for_display(_HISTORY_BUFFER[_CURRENT_HISTORY_INDEX])
+            _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]
+            formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
             return formatted, len(formatted)
         elif _CURRENT_HISTORY_INDEX == 0:
             _CURRENT_HISTORY_INDEX = -1
             original = _NAVIGATION_START_INPUT
             _NAVIGATION_START_INPUT = ""
+            _NAVIGATION_RAW_COMMAND = None
             return original, len(original)
         return current_input, len(current_input)
     
@@ -710,30 +747,34 @@ def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
         set_history_highlight_token(_PREFIX_VALUE)
         
         if not _PREFIX_FILTERED_INDICES:
+            _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
         
         _PREFIX_CURRENT_POS = len(_PREFIX_FILTERED_INDICES) - 1
-        formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+        formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
     
     # 继续筛选列表（高亮始终用原始 token）
     set_history_highlight_token(_PREFIX_VALUE)
     if _PREFIX_CURRENT_POS > 0:
         _PREFIX_CURRENT_POS -= 1
-        formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+        formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
     elif _PREFIX_CURRENT_POS == 0:
         _PREFIX_NAVIGATION_ACTIVE = False
         _PREFIX_VALUE = ""
         _PREFIX_FILTERED_INDICES = []
         _PREFIX_CURRENT_POS = -1
+        _NAVIGATION_RAW_COMMAND = None
         clear_history_highlight_token()
         return current_input, len(current_input)
     return current_input, len(current_input)
 
 def handle_up_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
     """处理 Alt+Up：基于前缀的历史导航"""
-    global _HISTORY_BUFFER
+    global _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND
     global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
     
@@ -746,6 +787,7 @@ def handle_up_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
         _PREFIX_VALUE = ""
         _PREFIX_FILTERED_INDICES = []
         _PREFIX_CURRENT_POS = -1
+        _NAVIGATION_RAW_COMMAND = None
     
     if not _PREFIX_NAVIGATION_ACTIVE:
         prefix = current_input.strip()
@@ -757,49 +799,56 @@ def handle_up_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
         _PREFIX_FILTERED_INDICES = _build_strict_prefix_filtered_indices(prefix)
         
         if not _PREFIX_FILTERED_INDICES:
+            _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
         
         for pos, idx in enumerate(_PREFIX_FILTERED_INDICES):
-            if _HISTORY_BUFFER[idx] == current_input:
+            if _format_history_for_display(_HISTORY_BUFFER[idx]) == current_input:
                 if pos < len(_PREFIX_FILTERED_INDICES) - 1:
                     _PREFIX_CURRENT_POS = pos + 1
-                    formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+                    _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+                    formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
                     return formatted, len(formatted)
                 else:
                     _PREFIX_CURRENT_POS = pos
+                    _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[idx]
                     return current_input, len(current_input)
         
         _PREFIX_CURRENT_POS = 0
-        formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[0]])
+        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[0]]
+        formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
     
     if _PREFIX_CURRENT_POS >= 0 and _PREFIX_CURRENT_POS < len(_PREFIX_FILTERED_INDICES):
         expected_idx = _PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]
         expected_cmd = _HISTORY_BUFFER[expected_idx]
-        if current_input != expected_cmd:
+        if current_input != _format_history_for_display(expected_cmd):
             if current_input.startswith(_PREFIX_VALUE):
                 for pos, idx in enumerate(_PREFIX_FILTERED_INDICES):
-                    if _HISTORY_BUFFER[idx] == current_input:
+                    if _format_history_for_display(_HISTORY_BUFFER[idx]) == current_input:
                         _PREFIX_CURRENT_POS = pos
+                        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[idx]
                         break
             else:
                 _PREFIX_NAVIGATION_ACTIVE = False
                 _PREFIX_VALUE = ""
                 _PREFIX_FILTERED_INDICES = []
                 _PREFIX_CURRENT_POS = -1
+                _NAVIGATION_RAW_COMMAND = None
                 clear_history_highlight_token()
                 return current_input, len(current_input)
     
     if _PREFIX_CURRENT_POS < len(_PREFIX_FILTERED_INDICES) - 1:
         _PREFIX_CURRENT_POS += 1
-        formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+        formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
     else:
         return current_input, len(current_input)
 
 def handle_down_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
     """处理 Alt+Down：基于前缀的历史导航（反向）"""
-    global _HISTORY_BUFFER
+    global _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND
     global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
     
@@ -811,10 +860,12 @@ def handle_down_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
         _PREFIX_VALUE = ""
         _PREFIX_FILTERED_INDICES = []
         _PREFIX_CURRENT_POS = -1
+        _NAVIGATION_RAW_COMMAND = None
     
     if not _PREFIX_NAVIGATION_ACTIVE:
         prefix = current_input.strip()
         if not prefix:
+            _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
         
         _PREFIX_NAVIGATION_ACTIVE = True
@@ -822,50 +873,57 @@ def handle_down_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
         _PREFIX_FILTERED_INDICES = _build_strict_prefix_filtered_indices(prefix)
         
         if not _PREFIX_FILTERED_INDICES:
+            _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
         
         _PREFIX_CURRENT_POS = len(_PREFIX_FILTERED_INDICES) - 1
-        formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+        formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
     
     if _PREFIX_CURRENT_POS >= 0 and _PREFIX_CURRENT_POS < len(_PREFIX_FILTERED_INDICES):
         expected_idx = _PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]
         expected_cmd = _HISTORY_BUFFER[expected_idx]
-        if current_input != expected_cmd:
+        if current_input != _format_history_for_display(expected_cmd):
             if current_input.startswith(_PREFIX_VALUE):
                 for pos, idx in enumerate(_PREFIX_FILTERED_INDICES):
-                    if _HISTORY_BUFFER[idx] == current_input:
+                    if _format_history_for_display(_HISTORY_BUFFER[idx]) == current_input:
                         _PREFIX_CURRENT_POS = pos
+                        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[idx]
                         break
             else:
                 _PREFIX_NAVIGATION_ACTIVE = False
                 _PREFIX_VALUE = ""
                 _PREFIX_FILTERED_INDICES = []
                 _PREFIX_CURRENT_POS = -1
+                _NAVIGATION_RAW_COMMAND = None
                 clear_history_highlight_token()
                 return current_input, len(current_input)
     
     if _PREFIX_CURRENT_POS > 0:
         _PREFIX_CURRENT_POS -= 1
-        formatted = _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]])
+        _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
+        formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
     elif _PREFIX_CURRENT_POS == 0:
         _PREFIX_NAVIGATION_ACTIVE = False
         _PREFIX_VALUE = ""
         _PREFIX_FILTERED_INDICES = []
         _PREFIX_CURRENT_POS = -1
+        _NAVIGATION_RAW_COMMAND = None
         return current_input, len(current_input)
     else:
         return current_input, len(current_input)
 
 def reset_history_index() -> None:
     """重置所有历史导航状态"""
-    global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT
+    global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT, _NAVIGATION_RAW_COMMAND
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
-    global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE
+    global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE, _MULTILINE_ABORTED
     
     _CURRENT_HISTORY_INDEX = -1
     _NAVIGATION_START_INPUT = ""
+    _NAVIGATION_RAW_COMMAND = None
     _PREFIX_NAVIGATION_ACTIVE = False
     _PREFIX_VALUE = ""
     _PREFIX_FILTERED_INDICES = []
@@ -873,6 +931,7 @@ def reset_history_index() -> None:
     _MULTILINE_STATE = None
     _MULTILINE_BUFFER = []
     _MULTILINE_ACTIVE = False
+    _MULTILINE_ABORTED = False
     clear_history_highlight_token()
 
 # ===================== 新增：CMD 多行命令检测 =====================
@@ -927,6 +986,93 @@ def _is_cmd_block_terminated(lines: List[str], line: str) -> bool:
                 return True  # 多余闭合，视为终止（错误状态）
     return balance == 0
 
+# 单行自闭合结构的终止符（行内即可闭合，如 'if x; then y; fi'）
+_SAME_LINE_TERMINATORS = {
+    'if_fi': re.compile(r'\bfi\b'),
+    'for_do': re.compile(r'\bdone\b'),
+    'while_do': re.compile(r'\bdone\b'),
+    'until_do': re.compile(r'\bdone\b'),
+    'case_esac': re.compile(r'\besac\b'),
+    'function': re.compile(r'\}'),
+    'brace_block': re.compile(r'\}'),
+    'subshell': re.compile(r'\)'),
+}
+
+
+def _multiline_text_complete(text: str, expected_syntax: str) -> bool:
+    """
+    判断输入文本是否已是自闭合的完整结构（无需继续输入）：
+    - 粘贴的整块多行命令（已含终止行，如 'if …; then\n…\nfi'、heredoc 已含 EOF）
+    - 单行自闭合命令（如 'if x; then y; fi'、'for i in x; do echo; done'）
+
+    返回 True 时不应进入续行模式，命令原样交给执行器；
+    否则仍按原逻辑逐行收集（如 'if x; then' 换行等待 'fi'）。
+    """
+    # python 块以缩进闭合（无显式终止符），用严格 AST 判定：
+    # 原始代码必须能直接解析（不能借助 _fix_incomplete_code 式的自动补全）。
+    if expected_syntax == "python":
+        try:
+            import ast as _ml_ast
+            _ml_ast.parse(text)
+            return True
+        except SyntaxError:
+            pass
+        except Exception:
+            pass
+
+    state = None
+    for raw_line in text.split("\n"):
+        line = raw_line.rstrip()
+        # 1) 当前存在未闭合结构：先尝试闭合（多行场景）
+        if state is not None:
+            result = MultiLineDetector.update_depth(state, line)
+            if result == "TERMINATED":
+                state = None
+                continue
+            if result is not None:
+                state = result
+                continue
+        # 2) 尝试开启新结构
+        new_state = MultiLineDetector.detect(line, expected_syntax)
+        if new_state is None:
+            continue
+        # 3) 单行自闭合：开启行自身已含终止符（如 'if x; then y; fi'）
+        closer = _SAME_LINE_TERMINATORS.get(new_state.type)
+        if closer is not None and closer.search(line):
+            continue
+        state = new_state
+    return state is None
+
+
+def _replay_multiline_command(raw_command: str, virtual_root: str = "") -> Optional[str]:
+    """
+    多行命令整块回显（简简单单，无续行提示符、无逐行状态机），原样返回执行。
+    只做一件事：让用户在终端上看到完整的多行命令（补成多行的样子）。
+    """
+    if raw_command and "\n" in raw_command:
+        try:
+            print(raw_command)
+        except Exception:
+            pass
+    return raw_command
+
+
+def _auto_close_heredoc_on_eof(state: Optional[MultiLineState]) -> Optional[str]:
+    """
+    Ctrl+D（EOF）结束 heredoc 输入：自动补上结束符，返回完整命令。
+    避免把不完整的 heredoc 交给执行器，触发二次「📥 等待Here Document输入」提示。
+    非 heredoc 状态返回 None。
+    """
+    global _MULTILINE_BUFFER
+    if state is None or state.type != 'heredoc' or not _MULTILINE_BUFFER:
+        return None
+    if _MULTILINE_BUFFER[-1].strip() != state.delimiter:
+        _MULTILINE_BUFFER.append(state.delimiter)
+    result = '\n'.join(_MULTILINE_BUFFER)
+    _MULTILINE_BUFFER = []
+    return result
+
+
 def _process_multiline_input(
     user_input: str,
     virtual_root: str = "",
@@ -947,7 +1093,9 @@ def _process_multiline_input(
     修复：终止符优先级高于语法切换，防止 EOF 被 continue 跳过。
     修复：使用 SmartSyntaxDetector 重新评估语法，提升准确性。
     """
-    global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE
+    global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE, _MULTILINE_ABORTED
+    
+    _MULTILINE_ABORTED = False
     
     # 新增：CMD 多行处理
     cmd_type = _detect_cmd_multiline(user_input)
@@ -973,6 +1121,11 @@ def _process_multiline_input(
     state = MultiLineDetector.detect(user_input, detected_syntax or "bash")
     
     if state is None:
+        return None
+    
+    # 修复：输入可能已是完整块（整块粘贴，或单行自闭合如 'if x; then y; fi'）。
+    # 此时不应进入续行模式——否则会要求用户重复输入终止符，破坏命令。
+    if _multiline_text_complete(user_input, detected_syntax or "bash"):
         return None
     
     # 如果检测到非 bash 语法，更新 state.syntax
@@ -1011,6 +1164,13 @@ def _process_multiline_input(
             if line is None or line.strip() == '__CANCEL__':
                 _MULTILINE_ACTIVE = False
                 _MULTILINE_STATE = None
+                if line is None:
+                    # Ctrl+D（EOF）结束 heredoc：自动补结束符，避免二次 📥 提示
+                    closed = _auto_close_heredoc_on_eof(state)
+                    if closed is not None:
+                        return closed
+                # 取消/中断：首行残片（如 heredoc 起始行）不得写入历史
+                _MULTILINE_ABORTED = True
                 _MULTILINE_BUFFER = []
                 return None
             
@@ -1101,11 +1261,16 @@ def _process_multiline_input(
         except KeyboardInterrupt:
             _MULTILINE_ACTIVE = False
             _MULTILINE_STATE = None
+            # 取消/中断：首行残片不得写入历史
+            _MULTILINE_ABORTED = True
             _MULTILINE_BUFFER = []
             return None
         except EOFError:
             _MULTILINE_ACTIVE = False
             _MULTILINE_STATE = None
+            closed = _auto_close_heredoc_on_eof(state)
+            if closed is not None:
+                return closed
             result = '\n'.join(_MULTILINE_BUFFER)
             _MULTILINE_BUFFER = []
             return result if result else None
@@ -1141,8 +1306,9 @@ def _process_cmd_multiline_input(
     终止条件：括号完全闭合。
     修复：使用 ml_input 的补全器和 lexer（如果有）。
     """
-    global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE
+    global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE, _MULTILINE_ABORTED
     
+    _MULTILINE_ABORTED = False
     _MULTILINE_ACTIVE = True
     _MULTILINE_BUFFER = [user_input]
     _MULTILINE_STATE = MultiLineState(
@@ -1177,6 +1343,8 @@ def _process_cmd_multiline_input(
             if line is None or line.strip() == '__CANCEL__':
                 _MULTILINE_ACTIVE = False
                 _MULTILINE_STATE = None
+                # 取消/中断：首行残片不得写入历史
+                _MULTILINE_ABORTED = True
                 _MULTILINE_BUFFER = []
                 return None
             
@@ -1197,6 +1365,8 @@ def _process_cmd_multiline_input(
         except KeyboardInterrupt:
             _MULTILINE_ACTIVE = False
             _MULTILINE_STATE = None
+            # 取消/中断：首行残片不得写入历史
+            _MULTILINE_ABORTED = True
             _MULTILINE_BUFFER = []
             return None
         except EOFError:
@@ -1209,6 +1379,24 @@ def _process_cmd_multiline_input(
     return None
 
 # ===================== 主输入函数 =====================
+def _consume_pending_multiline_recall(user_input: str, virtual_root: str = "") -> str:
+    """
+    消费虚影补全接受的待重放多行命令（含 \n）。
+    缓冲区为空 → 重放为多行形式并返回完整命令；
+    用户已输入其他内容 → 放弃重放，原样返回输入。
+    """
+    global _PENDING_MULTILINE_RECALL, _NAVIGATION_RAW_COMMAND
+    if _PENDING_MULTILINE_RECALL is None:
+        return user_input
+    pending_raw = _PENDING_MULTILINE_RECALL
+    _PENDING_MULTILINE_RECALL = None
+    if not user_input.strip():
+        _NAVIGATION_RAW_COMMAND = None
+        replayed = _replay_multiline_command(pending_raw, virtual_root=virtual_root)
+        return replayed if replayed is not None else pending_raw
+    return user_input
+
+
 def universal_input(
     prompt_func: Callable[[], Union[FormattedText, str]],
     builtin_commands: Dict = None,
@@ -1234,7 +1422,7 @@ def universal_input(
 ) -> str:
     """主输入函数"""
     global _HISTORY_INITIALIZED, _CURRENT_LANG, _VIRTUAL_ROOT, META_TEXTS, _VALID_COMMANDS, _USER_HOME_DIR, _TERMINAL_TYPE
-    global _HISTORY_BUFFER
+    global _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND, _PENDING_MULTILINE_RECALL, _MULTILINE_ABORTED
 
     _CURRENT_LANG = language
     set_language(language)
@@ -1391,10 +1579,22 @@ def universal_input(
             auto_suggest=auto_suggest,
         )
 
+        # ── 虚影补全接受的多行命令：以多行形式重放，不进入单行缓冲区 ──
+        user_input = _consume_pending_multiline_recall(user_input, virtual_root)
+
+        # 历史导航：缓冲区直接回填原始命令（多行命令含真实换行，ptk 按多行渲染），
+        # 未编辑时原样提交；仅在显示形式与原始命令不一致（历史兼容）时恢复原始命令。
+        if _NAVIGATION_RAW_COMMAND is not None:
+            display_form = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
+            if user_input == display_form:
+                user_input = _NAVIGATION_RAW_COMMAND
+            _NAVIGATION_RAW_COMMAND = None
+
         user_input_stripped = user_input.strip()
 
         if user_input_stripped:
-            user_input_stripped = _clean_display_text(user_input_stripped)
+            # decode_escapes=False：不把字面 \n/\r/\t 拆成控制字符（避免破坏 printf 等命令）
+            user_input_stripped = _clean_display_text(user_input_stripped, decode_escapes=False)
 
         if user_input_stripped:
             multiline_result = _process_multiline_input(
@@ -1410,7 +1610,7 @@ def universal_input(
             if multiline_result is not None:
                 user_input_stripped = multiline_result.strip()
                 
-                user_input_stripped = _clean_display_text(user_input_stripped)
+                user_input_stripped = _clean_display_text(user_input_stripped, decode_escapes=False)
                 
                 if user_input_stripped:
                     add_to_history(user_input_stripped)
@@ -1420,7 +1620,8 @@ def universal_input(
                 reset_history_index()
                 return ""
 
-        if user_input_stripped:
+        # 多行输入被取消/中断时，首行残片（如 heredoc 起始行）不得污染历史记录
+        if user_input_stripped and not _MULTILINE_ABORTED:
             add_to_history(user_input_stripped)
 
         reset_history_index()

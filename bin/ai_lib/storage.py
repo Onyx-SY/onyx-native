@@ -280,9 +280,14 @@ def load_chat_memory_for_context(home_dir: str, chat_name: str) -> str:
 # ── 工具结果采集（供 library 记录用）──
 
 _TOOL_RESULTS_BUFFER: List[Dict] = []  # 每轮工具执行结果暂存
+_TOOL_RESULT_MAX_CHARS = 4096          # 单条工具结果入库上限（超出截断，头保留）
+
 
 def capture_tool_result(tool_name: str, params: Dict, result: str) -> None:
     """采集工具执行结果，下一轮 record_ai_session 消费并清空"""
+    if len(result or "") > _TOOL_RESULT_MAX_CHARS:
+        result = result[:_TOOL_RESULT_MAX_CHARS] + (
+            f"\n... (truncated, {len(result)} chars total)")
     _TOOL_RESULTS_BUFFER.append({
         "name": tool_name,
         "params": params,
@@ -714,6 +719,31 @@ def _format_tool_results(tool_results: List[Dict]) -> str:
             lines.append(f"#### ℹ️ {name} — `{path}`")
             if result:
                 lines.append(_cap_text(result, _LIB_INFO_MAX_CHARS))
+        
+        elif name in ("write_file", "edit_file", "validate_edit", "preview_edit",
+                      "delete_file", "delete_directory", "create_directory",
+                      "move_file", "copy_file", "UndoLastEdit"):
+            # 写类工具：记录 path + 状态 + 截断结果；排除 content 等大字段
+            path = (params.get("path") or params.get("file_path")
+                    or params.get("source") or "?")
+            extra = ""
+            if name == "move_file" and params.get("destination"):
+                extra = f" → `{params.get('destination')}`"
+            elif name == "edit_file" and params.get("old_string"):
+                extra = f" (search={params.get('old_string')[:60]!r})"
+            elif name in ("delete_file", "delete_directory") and params.get("recursive") is not None:
+                extra = f" (recursive={params.get('recursive')})"
+            _ok = "❌" if ("error" in (result or "").lower()
+                           or "失败" in (result or "")) else "✅"
+            lines.append(f"#### {_ok} {name} — `{path}`{extra}")
+            if result:
+                lines.append(_cap_text(result, _LIB_INFO_MAX_CHARS))
+        
+        elif name == "RunCommand":
+            cmd = params.get("command", "?")
+            lines.append(f"#### ⚡ {name} — `{cmd}`")
+            if result:
+                lines.append(_cap_text(result, _LIB_CMD_OUTPUT_MAX_CHARS))
         
         lines.append("")
     

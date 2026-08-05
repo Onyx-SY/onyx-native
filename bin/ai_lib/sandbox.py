@@ -42,10 +42,16 @@ class SandboxBlockError(Exception):
 
 # ────────────────── 生命周期 ──────────────────
 
-def init(cwd: str = None, user_home: str = None) -> None:
-    """初始化 AI 沙盒。cwd 默认取当前工作目录。"""
+def init(cwd: str = None, user_home: str = None, force: bool = False) -> None:
+    """初始化 AI 沙盒。cwd 默认取当前工作目录。
+
+    幂等：已激活时保持原根（AI 会话启动即固定，不随会话内 cd 漂移）；
+    传 force=True 可强制重新固定（新 ai 命令入口在 deactivate 后自然重固定）。
+    """
     global _root, _user_home
     with _lock:
+        if _root is not None and not force:
+            return
         _root = os.path.realpath(cwd or os.getcwd())
         _user_home = os.path.realpath(user_home) if user_home else os.path.expanduser("~")
 

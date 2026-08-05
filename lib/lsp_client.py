@@ -242,7 +242,7 @@ class LspClient:
                 result = self._responses.pop(req_id, None)
             # 检查是否 ContentModified（服务器索引未就绪）
             if result is None and attempt < retries - 1:
-                time.sleep(0.5 * (attempt + 1))
+                threading.Event().wait(0.5 * (attempt + 1))  # 可中断重试退避
                 continue
             return result
 
@@ -331,6 +331,9 @@ class LspClient:
             if not hasattr(self, '_diagnostics_cache'):
                 self._diagnostics_cache = {}
             self._diagnostics_cache[path] = parsed
+            if not hasattr(self, '_diag_event'):
+                self._diag_event = threading.Event()
+            self._diag_event.set()  # 推送到达 → 唤醒 diagnostics() 等待
 
     def did_open(self, file_path: str, text: str = None):
         """textDocument/didOpen 通知。"""
@@ -369,10 +372,16 @@ class LspClient:
         abs_path = os.path.abspath(file_path)
         # 等待服务器推送诊断（最多轮询 2.5s，推送到达即提前返回）
         cache = getattr(self, '_diagnostics_cache', {})
+        diag_ev = getattr(self, '_diag_event', None)
         for _ in range(5):
             if cache.get(unquote(abs_path)):
                 break
-            time.sleep(0.5)
+            # 事件驱动等待：诊断推送到达立即醒（替代固定间隔 sleep）
+            if diag_ev is not None:
+                diag_ev.wait(timeout=0.5)
+                diag_ev.clear()
+            else:
+                threading.Event().wait(0.5)
         return cache.get(unquote(abs_path), [])
 
     def hover(self, file_path: str, line: int, character: int) -> Optional[LspHoverResult]:

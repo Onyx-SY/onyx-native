@@ -325,6 +325,7 @@ class ExploreManager:
         self._lock = threading.Lock()
         self._tasks: Dict[str, ExploreTask] = {}
         self._done_queue: "queue.Queue[str]" = queue.Queue()
+        self._completion_event = threading.Event()  # 任一任务完成即触发（事件驱动等待）
         self._mem_home: Optional[str] = None
 
     # ── 记忆根目录（cost.json 跟随主会话记忆根）──
@@ -389,6 +390,7 @@ class ExploreManager:
             with self._lock:
                 self._done_queue.put(task.id)
             task.done.set()
+            self._completion_event.set()  # 通知等待方：有任务完成
 
     # ── 结果收集（非阻塞 drain，主线程调用）──
     def collect_done(self) -> List[ExploreTask]:
@@ -420,11 +422,21 @@ class ExploreManager:
         return "\n".join(lines[-n:])
 
     def wait_pending(self, timeout: float = 600.0) -> List[ExploreTask]:
-        """阻塞等待所有 pending 任务完成（带超时），返回已完成任务。"""
+        """阻塞等待所有 pending 任务完成（带超时），返回已完成任务。
+        事件驱动：任一任务完成立即唤醒，无需固定间隔轮询。"""
         deadline = time.time() + timeout
         while self.has_pending() and time.time() < deadline:
-            time.sleep(0.5)
+            self._completion_event.wait(timeout=min(deadline - time.time(), 5.0))
+            self._completion_event.clear()
         return self.collect_done()
+
+    def wait_any(self, timeout: float = 1.0) -> bool:
+        """等待任一任务完成（事件驱动，可被 Ctrl+C 中断）。
+        返回是否在超时前有任务完成；调用方随后用 collect_done() 取结果。"""
+        self._completion_event.wait(timeout=timeout)
+        has = self._completion_event.is_set()
+        self._completion_event.clear()
+        return has
 
     # ── 执行循环 ──
     def _execute(self, task: ExploreTask) -> None:

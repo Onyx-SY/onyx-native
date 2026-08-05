@@ -377,10 +377,19 @@ def parse_sse_structured_response(sse_text: str) -> Dict[str, Any]:
         if raw_text:
             result['txt'] = raw_text
     if not result['txt'] and not txt_raw_lines:
+        # 纯文本兜底：仅过滤已知标记行（[TXT]/[ANSWER]/@@SHELL 等），
+        # 保留 markdown 链接行（[text](url)）、表格等以 [ 开头的正常内容。
+        _KNOWN_MARK = (
+            '[TXT]', '[TXT:', '[TXT:DONE]', '[ANALYSIS]', '[ANALYSIS:', '[ANALYSIS:DONE]',
+            '[ANSWER]', '[ANSWER:', '[ASK]', '[ASK:', '[MEMORY]', '[MEMORY:',
+            '[TAG]', '[TAG:', '[TAG:DONE]', '[PROMPT]', '[PROMPT:', '[PROMPT:DONE]',
+            '[CLASS]', '[CLASS:', '[SLEEP]', '[SLEEP:', '[PLAN]', '[PLAN:', '[PLAN:DONE]',
+            '[plan]', '[plan:', '[plan:done]', '[DEBUG]', '[DEBUG:', '[tool:',
+            '@@SHELL', '>>>>>>>>>>', 'event:',
+        )
         bare = '\n'.join(
             l for l in sse_text.split('\n')
-            if l.strip() and not l.strip().startswith('[') and not l.strip().startswith('@@')
-            and not l.strip().startswith('event:') and l.strip() != '>>>>>>>>>>'
+            if l.strip() and not l.strip().startswith(_KNOWN_MARK)
         ).strip()
         if bare:
             result['txt'] = bare

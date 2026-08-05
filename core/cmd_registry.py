@@ -68,7 +68,7 @@ def build_builtin_registry(ctx: "AppContext") -> Dict[str, Callable]:
     registry["manage"] = _lazy("manage")
     registry["help"] = _lazy("help")
     registry["source"] = _lazy("source")
-    registry["which"] = _lazy("which")
+    registry["history"] = _lazy("history")
     registry["refresh"] = _make_refresh(ctx)
 
     ctx.BUILTIN_COMMANDS = registry
@@ -87,9 +87,9 @@ def _lazy(name: str) -> Callable:
         elif name == "source":
             from bin.source_cmd import handle_source
             handle_source(cmd_parts, request_id)
-        elif name == "which":
-            from bin.which_cmd import handle_which
-            handle_which(cmd_parts, request_id)
+        elif name == "history":
+            from bin.history_cmd import handle_history
+            handle_history(cmd_parts, request_id)
     return wrapper
 
 

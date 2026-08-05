@@ -45,7 +45,6 @@ python3 man.py           # Rebuild man index / 重建 man 命令索引
 | `mktool` | Create new tool template / 创建新工具模板 |
 | `unalias <name>` | Remove alias / 删除别名 |
 | `source <file>` | Load config file / 加载配置文件 |
-| `which <cmd>` | Find command location / 查找命令位置 |
 | `sado <cmd>` | Run command with elevated permissions (sudo-like, via Onyx permission system) / 以高级权限运行命令 |
 | `nanosado` | Lightweight privilege escalation / 轻量权限提升 |
 | `alias <name>=<cmd>` | Create command alias (persists across restarts) / 创建命令别名（重启后依然有效） |

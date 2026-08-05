@@ -303,7 +303,7 @@ def _consume_tool_results() -> List[Dict]:
     return data
 
 
-# ── 自动压缩（移植 claw-code：library 超预算自动折叠，不再仅手动 /compact）──
+# ── 自动压缩（library 超预算自动折叠，不再仅手动 /compact）──
 
 _ENTRY_SEPARATOR = "\n\n---\n\n"
 _AUTO_COMPACT_MAX_ENTRIES = 20          # 条目数阈值（与 CompactConfig.max_entries 一致）
@@ -368,7 +368,7 @@ def elide_oversized_blocks(content: str,
 def maybe_compact_library(home_dir: str) -> bool:
     """
     自动压缩 library：文件超阈值时执行「条目内大块 elide + Trident 条目级压缩」。
-    保留最近 preserve_recent 条原样（与 claw-code compact.rs 一致）。
+    保留最近 preserve_recent 条原样。
     带冷却与最小收益保护，压缩失败不影响主流程。
 
     Returns:
@@ -649,14 +649,14 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
         f.flush()
         os.fsync(f.fileno())
     
-    # ── 自动压缩：library 超预算自动折叠（移植 claw-code 自动压缩，冷却+最小收益保护）──
+    # ── 自动压缩：library 超预算自动折叠（冷却+最小收益保护）──
     try:
         maybe_compact_library(home_dir)
     except Exception:
         pass  # 压缩失败不影响主流程
 
 
-# ── 写入降噪常量（移植 claw-code：工具原文只活会话，library 只存高信号）──
+# ── 写入降噪常量（工具原文只活会话，library 只存高信号）──
 # 单块原文上限（字符）。EDIT 的 search/replace 属高信号内容，接近完整保留。
 _LIB_VIEW_MAX_CHARS = 800      # VIEW 文件内容
 _LIB_GREP_MAX_CHARS = 600      # grep 结果

@@ -90,6 +90,20 @@ def resolve_cheapest_model(platform: str) -> str:
         return ""
 
 
+def resolve_default_model(platform: str) -> str:
+    """
+    当前平台配置的默认模型（与主 AI 同款）——子代理默认档。
+
+    无 default_model 时返回空串，调用方回退到 resolve_cheapest_model。
+    """
+    try:
+        from .config import _SUPPORTED_PLATFORMS
+        info = _SUPPORTED_PLATFORMS.get(platform or "", {})
+        return info.get("default_model", "") or ""
+    except Exception:
+        return ""
+
+
 def estimate_cost(platform: str, model: str,
                   prompt_tokens: int, completion_tokens: int) -> float:
     """按解析单价估算 USD 费用。"""

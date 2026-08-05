@@ -11,7 +11,7 @@ cache_diagnostics.py — Prefix-Stable Cache Diagnostics
 设计目标：
   - 让 Onyx 用户知道每次 API 调用的缓存命中情况
   - 归因缓存失效的根因（system/tools/messages/rewrite）
-  - 辅助调试 [PROMPT]: 导致的 prefix 污染问题
+  - 辅助调试动态注入导致的 prefix 污染问题
 """
 
 import hashlib

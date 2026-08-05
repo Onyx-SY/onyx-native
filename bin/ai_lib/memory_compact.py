@@ -206,52 +206,46 @@ def stage2_collapse(entries: List[Dict], threshold: int = 4) -> Tuple[List[Dict]
 
 
 def _is_chatty_entry(entry: Dict) -> bool:
-    """判断是否为闲聊条目（短消息，无工具调用，无文件操作）"""
+    """判断是否为闲聊条目（对齐三段式预缩减的闲聊判定）：
+    无工具调用 / 文件操作 / 命令，且内容 < 200 字符。"""
     content = entry.get("content", "")
-    
-    # 太短 → 不是闲聊，是正常短交互
-    if len(content) < 50:
+
+    # 对话条目格式的工具 / 推理标记 → 不是闲聊
+    if '[tool_calls:' in content or '[reasoning]' in content:
         return False
-    
+
     # 包含工具调用或文件操作 → 不是闲聊
     if re.search(r'### (Tool Calls|工具调用|File Operations|文件操作记录)', content):
         return False
-    
+
     # 包含命令执行 → 不是闲聊
     if re.search(r'#### (Command|命令) #', content):
         return False
-    
+
     # < 200 字符的纯文本交互 → 闲聊
     return len(content) < 200
 
 
 def _generate_collapse_summary(entries: List[Dict]) -> str:
-    """为折叠的闲聊生成摘要"""
-    user_msgs = []
-    ai_msgs = []
-    
+    """为折叠的闲聊生成摘要（对齐三段式预缩减的折叠摘要生成）。"""
+    user_count = sum(1 for e in entries
+                     if re.search(r'### (?:USER|Question|用户提问)', e.get("content", "")))
+    assistant_count = sum(1 for e in entries
+                          if re.search(r'### (?:ASSISTANT|AI Response|AI回答)', e.get("content", "")))
+    topics = []
     for entry in entries:
-        content = entry.get("content", "")
-        # 提取用户提问
-        q_match = re.search(r'### (?:Question|用户提问)\n(.*?)(?:\n\n|\n###|\n####)', content, re.DOTALL)
-        if q_match:
-            user_msgs.append(q_match.group(1).strip()[:80])
-        # 提取 AI 回答
-        a_match = re.search(r'### (?:AI Response|AI回答)\n(.*?)(?:\n\n|\n###|\n####)', content, re.DOTALL)
-        if a_match:
-            ai_msgs.append(a_match.group(1).strip()[:80])
-    
-    lines = [
-        f"Collapsed {len(entries)} short exchanges.",
-    ]
-    
-    if user_msgs:
-        # 去重后显示
-        unique_msgs = list(dict.fromkeys(user_msgs))[:5]
+        body = re.sub(r'^### [A-Z]+\n', '', entry.get("content", ""))
+        for line in body.split("\n"):
+            line = line.strip()
+            if line and not line.startswith("[tool_calls:") and not line.startswith("[reasoning]"):
+                topics.append(line[:80])
+                break
+    topics = list(dict.fromkeys(topics))[:5]
+    lines = [f"Collapsed {len(entries)} messages ({user_count} user, {assistant_count} assistant)."]
+    if topics:
         lines.append("Topics:")
-        for msg in unique_msgs:
-            lines.append(f"  - {msg}")
-    
+        for topic in topics:
+            lines.append(f"  - {topic}")
     return "\n".join(lines)
 
 
@@ -344,6 +338,17 @@ def _fingerprint_entry(index: int, entry: Dict) -> Optional[Dict]:
     # 提取工具调用
     for match in re.finditer(r'^- `(\w+)', content, re.MULTILINE):
         tool_names.add(match.group(1))
+    
+    # 对话条目格式：[tool_calls: read_file, grep_search]
+    for match in re.finditer(r'\[tool_calls:\s*([^\]]+)\]', content):
+        for name in match.group(1).split(','):
+            name = name.strip()
+            if name:
+                tool_names.add(name)
+    
+    # 工具参数中的路径 {"path": "a.py"}
+    for match in re.finditer(r'"path"\s*:\s*"([^"]+)"', content):
+        file_paths.add(match.group(1))
     
     # 提取文件路径
     for match in re.finditer(r'`([^`]+\.(?:py|js|ts|go|rs|java|cpp|c|h|sh|json|yaml|yml|toml|md|html|css))`', content):
@@ -857,8 +862,8 @@ def _is_core_detail(line: str) -> bool:
 
 
 def _is_section_header(line: str) -> bool:
-    """判断是否为节标题（以 : 结尾）"""
-    return line.endswith(":")
+    """判断是否为节标题（Markdown 标题或以 : 结尾）"""
+    return line.startswith("#") or line.endswith(":")
 
 
 # ── 汇总压缩 ──
@@ -1025,7 +1030,7 @@ def should_compact(entries: List[Dict], config: CompactConfig = None) -> bool:
 
 # ── Live Conversation Compaction ──
 # 直接压缩 current_question 字符串（而非 library 文件）。
-# 参考 Claw-Code compact.rs 的 structured summary + resume-directly 设计。
+# 参考分层压缩的 structured summary + resume-directly 设计。
 
 _COMPACT_LIVE_PREAMBLE = (
     "## Earlier conversation (compacted to save context)\n"
@@ -1080,7 +1085,7 @@ def compact_live_conversation(
     将 current_question 中过旧的工具调用轮次替换为结构化摘要，
     保留最近 N 轮完整内容。
 
-    设计目标（参考 Claw-Code）：
+    设计目标：
       - 旧轮次 → 紧凑结构化摘要（Goal / Decisions / Files / Errors / Next）
       - 新轮次 → 保留原文（保证即时上下文不丢失）
       - 注入 resume-directly 指令（防止 AI 浪费 token 确认摘要）
@@ -1425,3 +1430,309 @@ def partition_keep_fold(
         fold.append(msg)
     
     return kept, fold
+
+
+# ── 新一代压缩：轮级分区 + LLM 保真摘要（对话压缩主路径）──
+
+_LLM_SUMMARY_SYSTEM_PROMPT = """You are compressing the earlier part of a coding agent's conversation to save context.
+The agent keeps your summary alongside the user's own turns (kept verbatim) and the recent tail; your job is to fold the assistant/tool work into a briefing it can resume from.
+Write under these exact headings, omitting a heading only if it has no content:
+
+## Standing facts & constraints
+Everything the user stated that still governs the work — names, paths, IDs, versions, tokens, preferences, and hard "never do X" rules — in their own words. Be exhaustive; this is the durable contract, so prefer over- to under-including.
+
+## Goal
+The user's request and intent.
+
+## Decisions & rationale
+Key choices made so far and why — so they are not re-litigated or reversed.
+
+## Files & code
+Files read or modified, with the specific facts that matter: signatures, line locations, data shapes, and exact edits applied. Be concrete; this is what lets the agent act without re-reading everything.
+
+## Commands & outcomes
+Commands run (builds, tests, git) and their relevant results — what passed, what failed, and the error text that matters.
+
+## Errors & fixes
+Problems hit and how they were resolved (or not), so the same dead ends are not repeated.
+
+## Pending & next step
+What is still in progress or unstarted, and the single most concrete next action to take.
+
+Rules:
+- Be terse: bullet points and fragments, not prose.
+- Preserve identifiers, paths, error messages, and numbers exactly.
+- Do NOT invent anything not present in the messages; if something is unknown, leave it out rather than guessing.
+- Write in the same language as the conversation (Chinese if the conversation is mostly Chinese).
+- Plain Markdown only.
+- Keep the whole briefing under 1500 tokens: drop trivia, keep the durable contract."""
+
+
+def _round_messages(messages: List[Dict]) -> List[List[Dict]]:
+    """把消息流切成"轮"：工具轮 = assistant(tool_calls) + 其全部 tool 结果。
+
+    轮内绝不拆分，保证 tool_calls → tool_result 配对完整。
+    """
+    rounds: List[List[Dict]] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        if rounds and role == "tool":
+            # 粘到前一个轮（tool 结果必须紧跟其 assistant 轮）
+            rounds[-1].append(msg)
+            continue
+        if role == "assistant" and msg.get("tool_calls"):
+            rounds.append([msg])
+            continue
+        rounds.append([msg])
+    return rounds
+
+
+def partition_rounds_keep_fold(
+    messages: List[Dict],
+    keep_user_max_chars: int = 4000,
+    keep_errors: bool = True,
+    keep_user_marked: bool = True,
+) -> Tuple[List[Dict], List[Dict]]:
+    """轮级分区：keep（原样保留）与 fold（进摘要）两部分。
+
+    Keep 策略（按轮，不拆配对）：
+      - system 轮 → keep（环境信息、旧压缩摘要、警告等）
+      - 用户轮（≤ keep_user_max_chars 或带 [[keep]] 标记）→ keep（用户原话保真）
+      - 工具轮：任一结果是 error/blocked → 整轮 keep（错误诊断价值高）
+    Fold：
+      - assistant 纯文本轮（体积大头之一）
+      - 无错误的大工具轮（体积大头）
+      - 超长用户轮（粘贴的大段内容，正文进摘要）
+    """
+    kept: List[Dict] = []
+    fold: List[Dict] = []
+    for rnd in _round_messages(messages):
+        first = rnd[0]
+        role = first.get("role", "")
+        if role == "system":
+            kept.extend(rnd)
+            continue
+        if role == "user":
+            content = first.get("content", "") or ""
+            if not isinstance(content, str):
+                content = str(content)
+            if keep_user_marked and has_keep_marker(first):
+                kept.extend(rnd)
+                continue
+            if len(content) <= keep_user_max_chars:
+                kept.extend(rnd)
+                continue
+            fold.extend(rnd)
+            continue
+        if role == "assistant":
+            if first.get("tool_calls"):
+                # 工具轮：任一结果错误 → 整轮保留
+                if keep_errors and any(is_error_message(m) for m in rnd[1:]):
+                    kept.extend(rnd)
+                    continue
+                fold.extend(rnd)
+                continue
+            # 纯文本 assistant 轮 → 折叠
+            fold.extend(rnd)
+            continue
+        # 其他（孤立 tool 等）→ 保守保留
+        kept.extend(rnd)
+    return kept, fold
+
+
+def _entries_to_text(entries: List[Dict]) -> str:
+    """条目 → LLM 输入文本（条目 content 已含角色头）"""
+    return "\n\n---\n\n".join((e.get("content") or "") for e in entries)
+
+
+def _chunk_entries(entries: List[Dict], max_chars: int) -> List[List[Dict]]:
+    """按条目边界分块；单条超长 → 头尾截断（中间可重读/重取）。"""
+    chunks: List[List[Dict]] = []
+    cur: List[Dict] = []
+    cur_chars = 0
+    for e in entries:
+        text = e.get("content") or ""
+        if not text:
+            continue
+        if len(text) > max_chars:
+            text = (text[: max_chars // 2]
+                    + f"\n…[truncated {len(text) - max_chars} chars]…\n"
+                    + text[-max_chars // 2:])
+        if cur and cur_chars + len(text) > max_chars:
+            chunks.append(cur)
+            cur, cur_chars = [], 0
+        cur.append({**e, "content": text})
+        cur_chars += len(text)
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _llm_summarize_chunk(chunk_entries: List[Dict], user_home_dir: Optional[str],
+                         session_id: str, chunk_idx: int, total_chunks: int) -> Optional[str]:
+    """单块 LLM 摘要。失败返回 None（由调用方逐块回退）。"""
+    try:
+        from .api import call_ai_api_sse
+        header = (f"以下是会话较早部分（第 {chunk_idx + 1}/{total_chunks} 块）。"
+                  f"请按格式要求输出这一部分的压缩简报。\n\n")
+        result = call_ai_api_sse(
+            question="",
+            messages=[
+                {"role": "system", "content": _LLM_SUMMARY_SYSTEM_PROMPT},
+                {"role": "user", "content": header + _entries_to_text(chunk_entries)},
+            ],
+            tools=[],
+            ai_tools_prompt="",
+            user_home_dir=user_home_dir,
+            memory_block="",
+            session_id=f"compact_{session_id}_{chunk_idx}",
+        )
+        if result.get("_interrupted") or result.get("error"):
+            return None
+        txt = (result.get("txt") or "").strip()
+        if not txt:
+            return None
+        txt = re.sub(r"\[(?:TXT|ANALYSIS|ANSWER|TAG|CLASS|MEMORY|PROMPT|PLAN)[^\]]*\]", "", txt)
+        return txt.strip()
+    except Exception:
+        return None
+
+
+def _llm_merge_summaries(joined: str, user_home_dir: Optional[str], session_id: str) -> Optional[str]:
+    """把多块简报合并成一份连贯简报（消除重复，保留全部关键事实）。"""
+    try:
+        from .api import call_ai_api_sse
+        result = call_ai_api_sse(
+            question="",
+            messages=[
+                {"role": "system", "content": (
+                    "You are merging multiple partial conversation briefings into one coherent briefing. "
+                    "Remove duplication, keep every durable fact (identifiers, paths, numbers, error text, "
+                    "decisions, pending work). Keep the same section headings. Be terse. "
+                    "Write in the same language as the content. Plain Markdown only, no square-bracket markers."
+                )},
+                {"role": "user", "content": joined},
+            ],
+            tools=[],
+            ai_tools_prompt="",
+            user_home_dir=user_home_dir,
+            memory_block="",
+            session_id=f"compact_{session_id}_merge",
+        )
+        if result.get("_interrupted") or result.get("error"):
+            return None
+        txt = (result.get("txt") or "").strip()
+        return txt or None
+    except Exception:
+        return None
+
+
+def llm_summarize_messages(
+    entries: List[Dict],
+    user_home_dir: Optional[str] = None,
+    session_id: str = "",
+    max_input_chars: int = 96_000,
+    max_output_chars: int = 6_000,
+) -> Tuple[str, bool, int]:
+    """LLM 保真摘要（分块并行，失败逐块回退），全部失败才回退正则 summarize_messages。
+
+    Returns:
+        (summary_text, used_llm, chunk_count)
+    """
+    if not entries:
+        return "", False, 0
+    chunks = _chunk_entries(entries, max_input_chars)
+    if not chunks:
+        return summarize_messages(entries), False, 0
+
+    results: List[Tuple[int, Optional[str]]] = []
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=min(3, len(chunks))) as _ex:
+        futures = {
+            _ex.submit(_llm_summarize_chunk, c, user_home_dir, session_id, i, len(chunks)): i
+            for i, c in enumerate(chunks)
+        }
+        for f in _cf.as_completed(futures):
+            results.append((futures[f], f.result()))
+    results.sort()
+
+    parts = [r for _, r in results if r]
+    if parts:
+        joined = "\n\n---\n\n".join(parts)
+        if len(joined) > max_output_chars:
+            merged = _llm_merge_summaries(joined, user_home_dir, session_id)
+            if merged:
+                joined = merged
+        # 二次压缩预算：超限后按优先级行选择
+        if len(joined) > max_output_chars * 2:
+            joined = compress_summary(
+                joined,
+                SummaryCompressionBudget(max_chars=max_output_chars * 2,
+                                         max_lines=120, max_line_chars=200),
+            )
+        if len(joined) > max_output_chars * 2:
+            joined = (joined[:max_output_chars]
+                      + f"\n…[summary truncated {len(joined) - max_output_chars} chars]…")
+        return joined, True, len(chunks)
+
+    # 全部失败 → 正则兜底（默认预算 1200 字符 / 24 行）
+    return compress_summary(summarize_messages(entries)), False, len(chunks)
+
+
+def run_trident_stages(entries: List[Dict]) -> Tuple[List[Dict], Dict[str, int]]:
+    """三段式预缩减（supersede → collapse → cluster）。
+
+    顺序：Stage1 Supersede（过时 VIEW 去重）→ Stage2 Collapse（闲聊折叠）
+        → Stage3 Cluster（相似消息聚类）。供 LLM 摘要前削减输入体积。
+
+    Returns:
+        (reduced_entries, stats)  stats: superseded / collapsed_chains /
+        collapsed_msgs / clusters / clustered_msgs / original / final
+    """
+    stats = {"superseded": 0, "collapsed_chains": 0, "collapsed_msgs": 0,
+             "clusters": 0, "clustered_msgs": 0, "original": len(entries)}
+    working = entries
+    if working:
+        working, superseded = stage1_supersede(working)
+        stats["superseded"] = superseded
+    if working:
+        working, chains, collapsed = stage2_collapse(working)
+        stats["collapsed_chains"] = chains
+        stats["collapsed_msgs"] = collapsed
+    if working:
+        working, clusters, clustered = stage3_cluster(working)
+        stats["clusters"] = clusters
+        stats["clustered_msgs"] = clustered
+    stats["final"] = len(working)
+    return working, stats
+
+
+# ── 旧压缩摘要提取（对话版）──
+
+_COMPACT_PREAMBLE_MARKER = "This session is being continued from a previous conversation"
+_COMPACT_RECENT_NOTE_MARKER = "Recent messages are preserved verbatim"
+
+
+def extract_summary_from_compact_message(content: str) -> Optional[str]:
+    """从压缩 system 消息里提取摘要正文（支持 <summary> 标签与续接指令两种格式）。
+
+    用于重压缩时合并旧摘要（merge_compact_summaries），
+    返回 None 表示该消息不是压缩摘要消息。
+    """
+    if not content:
+        return None
+    inner = _extract_tag_block(content, "session_compact_summary")
+    if inner:
+        return inner
+    inner = _extract_tag_block(content, "summary")
+    if inner:
+        return f"<summary>{inner}</summary>"
+    # 续接指令格式：preamble … \n\n{摘要正文}\n\nRecent messages are preserved verbatim. …
+    if _COMPACT_PREAMBLE_MARKER in content and _COMPACT_RECENT_NOTE_MARKER in content:
+        _preamble_end = content.find("\n\n", content.find(_COMPACT_PREAMBLE_MARKER))
+        _recent_start = content.find(_COMPACT_RECENT_NOTE_MARKER)
+        if _preamble_end != -1 and _recent_start > _preamble_end:
+            _body = content[_preamble_end + 2:_recent_start].strip()
+            if _body:
+                return _body
+    return None

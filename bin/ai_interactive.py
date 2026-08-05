@@ -50,6 +50,7 @@ _SLASH_COMMANDS_CN: Dict[str, str] = {
     "/chat":   "管理聊天记忆 (list / switch <name> / new <name>)",
     "/mcp":    "MCP 服务器管理 (list / install <name> / remove <name>)",
     "/compact": "手动压缩对话历史，释放上下文空间",
+    "/history": "查看你向 AI 问过的问题（history [N] / -c <chat> / -a）",
     "/memory-mode": "切换记忆模式 (global/project)，project 为当前目录专属记忆",
     "/memmode": "同 /memory-mode",
     "/save":   "保存当前会话到磁盘",
@@ -79,6 +80,7 @@ _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/chat":   "Manage chat memory (list / switch <name> / new <name>)",
     "/mcp":    "MCP server management (list / install <name> / remove <name>)",
     "/compact": "Manually compress conversation history to free context",
+    "/history": "View the questions you asked the AI (history [N] / -c <chat> / -a)",
     "/memory-mode": "Switch memory mode (global/project); project = per-directory memory",
     "/memmode": "Same as /memory-mode",
     "/save":   "Save current session to disk",
@@ -1037,6 +1039,21 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         console.print(f"[green]{_t('compact_queued', lang)}[/]")
         return True
 
+    elif cmd == "/history":
+        """查看你向 AI 问过的问题（跟随记忆模式：global/project 根目录）"""
+        from bin.history_cmd import handle_history
+        try:
+            _home = ctx.get("user_home_dir")
+            try:
+                if ctx.get("memory_mode") == "project":
+                    _home = _memory_base_dir(_home, "project", ctx.get("cwd"))
+            except Exception:
+                pass
+            handle_history(["/history"] + args, "ai-repl", _home_dir=_home)
+        except Exception as e:
+            console.print(f"[yellow]history 执行失败: {e}[/]")
+        return True
+
     elif cmd in ("/memory-mode", "/memmode"):
         """记忆模式切换：global（全局 library）/ project（当前目录专属记忆）"""
         if args:
@@ -1127,7 +1144,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         return True
 
     else:
-        console.print(f"[yellow]{_t('unknown_cmd', lang).format(cmd)}[/]")
+        console.print(f"[yellow]{_t('unknown_cmd', lang, cmd=cmd)}[/]")
         return True
 
 
@@ -1241,7 +1258,7 @@ def ai_interactive_session(
                 _call_ai_engine(user_input, user_home_dir, onyx_module, global_config,
                               user_info, user_mode, parse_and_execute, ctx, **kwargs)
             except Exception as e:
-                console.print(f"[red]{_t('ai_error', current_lang).format(str(e))}[/]")
+                console.print(f"[red]{_t('ai_error', current_lang, reason=str(e))}[/]")
             finally:
                 _signal.signal(_signal.SIGINT, _old_sigint)
                 if esc_flag[0]:
@@ -1253,7 +1270,7 @@ def ai_interactive_session(
                 console.print(f"[dim]💬 {_t('ask_after_esc', current_lang)}[/]")
 
     except Exception as e:
-        console.print(f"[red]{_t('ai_exception', current_lang).format(str(e))}[/]")
+        console.print(f"[red]{_t('ai_exception', current_lang, reason=str(e))}[/]")
     finally:
         console.print(f"[dim]{_t('ai_exited', current_lang)}[/]")
 
@@ -1321,4 +1338,4 @@ def _call_ai_engine(
         except Exception:
             pass
     except Exception as e:
-        console.print(f"[red]{_t('ai_error', ctx.get('lang', 'chinese')).format(str(e))}[/]")
+        console.print(f"[red]{_t('ai_error', ctx.get('lang', 'chinese'), reason=str(e))}[/]")

@@ -96,10 +96,6 @@
         "subcommands": [],
         "options": []
     },
-    "which": {
-        "subcommands": [],
-        "options": []
-    },
     "whereis": {
         "subcommands": [],
         "options": []
@@ -114,7 +110,7 @@
     },
     "history": {
         "subcommands": [],
-        "options": ["-c", "-w"]
+        "options": ["-c", "-a", "-h", "--chat", "--all", "--help"]
     },
 
     "grep": {

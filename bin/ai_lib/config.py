@@ -73,7 +73,7 @@ def _load_ai_models() -> dict:
             "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro",
                        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
             "default_model": "gpt-5.6-terra",
-            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 131072},
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
             "price_per_million_tokens": {
                 "gpt-5.5-instant": {"input": 3.0, "output": 12.0},
                 "gpt-5.5": {"input": 5.0, "output": 18.0},
@@ -91,7 +91,7 @@ def _load_ai_models() -> dict:
             "models": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-fable-5",
                        "claude-mythos-5", "claude-sonnet-5"],
             "default_model": "claude-fable-5",
-            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 65536},
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
             "price_per_million_tokens": {
                 "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
                 "claude-opus-4-8": {"input": 5.0, "output": 25.0},

@@ -90,8 +90,7 @@ from lib.approval_tokens import (
 _MEMORY_QUERY_CACHE: dict[str, str] = {}
 _MEMORY_CACHE_MAX = 50
 
-# （解析函数已移至 bin/ai_lib/parsers.py）
-from .ai_lib.parsers import parse_sse_structured_response, _parse_ai_raw_response, _parse_legacy_shell
+# （解析已统一走 bin/ai_lib/parsers.py，纯 Markdown 直通，无标记语言）
 from .ai_lib.lang import get_lang_text
 from .ai_lib.i18n import _ as _i18n  # 双语文本（中英）
 from .ai_lib.tools import code_analysis  # 代码分析工具（py_*/Lsp*，独立工具包）
@@ -895,7 +894,9 @@ def preload_mcp_servers(user_home_dir: str = None) -> None:
     def _do_preload():
         try:
             _migrate_mcp_config_if_needed(home)
-            if install_default_mcp_server(home, auto_extras=True):
+            # 默认不自动安装推荐 MCP（fetch 等）：只有用户显式配置的 server 才会连接。
+            # auto_extras=False → 跳过 _AUTO_INSTALL_MCP 安装，仅保证 filesystem 可用。
+            if install_default_mcp_server(home, auto_extras=False):
                 connect_mcp_server("filesystem", home)
                 tools = _discover_mcp_tools("filesystem", home)
                 if tools:
@@ -1075,7 +1076,7 @@ def build_mcp_tools_prompt(lang: str = "chinese", user_home_dir: str = None) -> 
 
     lines = []
     lines.append("## Non-file Tools (Function Calling)")
-    lines.append("All tools use standard function calling (tool_calls). Do NOT use [tool:...] text format.")
+    lines.append("All tools use standard function calling (tool_calls) — call them directly through the API, never in text.")
     lines.append("The tools are already in your API function calling list — call them directly.")
 
     lines.append("")
@@ -1139,7 +1140,7 @@ def build_native_tools_prompt() -> str:
     lines.append("- `choose_ask(question, options)` — Present options to user when uncertain")
     lines.append("- `Skill(name, args?)` — Load a reusable skill playbook (e.g. debug, task-workflow, refactor)")
     lines.append("")
-    lines.append("> Reply in plain Markdown; shell commands go through the RunCommand tool. No [TXT]/[ANALYSIS]/[PLAN]/[ASK] markers.")
+    lines.append("> Reply in plain Markdown only — your text is displayed to the user as-is. No wrappers, no special formats: just speak naturally in Markdown.")
     return "\n".join(lines)
 
 
@@ -1487,14 +1488,14 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
 
         _make_tool(
             "Agent",
-            "启动子代理（隔离上下文，总结后喂回主 AI）。类型：explore=只读调查；plan=规划（只读+git）；lint=代码分析（可经安全管线跑分析命令）；test=测试（可经安全管线跑测试）。可指定 1~3 个任务并行。mode=sync 阻塞等待总结；mode=async 立即返回，完成后结果自动注入会话。",
+            "启动子代理（隔离上下文，总结后喂回主 AI）。类型：explore=只读调查；plan=规划（只读+git）；lint=代码分析（可经安全管线跑分析命令）；test=测试（可经安全管线跑测试）。explore/plan 完全只读、自动执行无需用户确认；lint/test 需显式批准。适合大规模只读调查或可并行子任务——主上下文只接收总结，注意不要滥用。可指定 1~3 个任务并行。mode=sync 阻塞等待总结；mode=async 立即返回，完成后结果自动注入会话。",
             {
                 "description": {"type": "string", "description": "子代理任务描述"},
                 "prompt": {"type": "string", "description": "子代理的完整指令；多任务时可用 '1. ...\\n2. ...' 编号或 --- 分隔，配合 count 并行"},
                 "name": {"type": "string", "description": "可选子代理名称"},
                 "type": {"type": "string", "enum": ["explore", "plan", "lint", "test"], "description": "子代理类型（默认 explore）"},
                 "mode": {"type": "string", "enum": ["sync", "async"], "description": "sync=等待完成并返回总结；async=后台运行，完成自动注入（默认 sync）"},
-                "model": {"type": "string", "description": "可选模型名覆盖（默认当前平台最便宜模型，即 X Pro）"},
+                "model": {"type": "string", "description": "可选模型名覆盖（默认与主 AI 相同模型）"},
                 "count": {"type": "integer", "description": "并行子代理数量 1~3（默认 1；tasks 存在时按 tasks 长度）"},
                 "tasks": {"type": "array", "items": {"type": "string"}, "description": "可选：1~3 个子任务数组，每个元素启动一个子代理"},
             },
@@ -1760,10 +1761,10 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
     # ── Shell 命令执行（function calling）──
     # 命令经 Onyx 安全管线执行：危险命令弹用户确认、输出捕获后以 tool 结果
     # 回传。ReadOnly 权限仅用于跳过工具门控——真正的安全确认在 handler 内部
-    # （is_dangerous_command → confirm_dangerous_command），与旧 @@SHELL 路径一致。
+    # （is_dangerous_command → confirm_dangerous_command）。
     native.append(_make_tool(
         "RunCommand",
-        "Execute a shell command through Onyx's security pipeline. Output is captured and returned to you; dangerous commands require user confirmation. Use this instead of @@SHELL blocks.",
+        "Execute a shell command through Onyx's security pipeline. Output is captured and returned to you; dangerous commands require user confirmation.",
         {"command": {"type": "string", "description": "Shell command to execute (single line)"}},
         ["command"], PERM_READONLY,
     ))
@@ -2324,7 +2325,7 @@ def _find_skill_file(skill_name: str) -> Tuple[Optional[str], str]:
         # ═══ Onyx 原生（最高优先级）═══
         os.path.join(_cwd, ".onyx", "skills"),
         os.path.join(_cwd, ".onyx", "commands"),
-        # ═══ Claude Code 兼容 ═══
+        # ═══ 第三方技能目录兼容（.claude 等）═══
         os.path.join(_cwd, ".claude", "skills"),
         os.path.join(_cwd, ".claude", "commands"),
         # ═══ 其他 ═══
@@ -3780,6 +3781,13 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
     except Exception:
         pass
 
+    # ── Agent 工具分级：explore/plan 完全只读 → 自动放行（等同 ReadOnly）──
+    # lint/test 可经安全管线跑命令 → 保持 DangerFullAccess（显式批准）
+    if raw_tool == "Agent":
+        _agent_type = str((params or {}).get("type", "explore")).lower()
+        if _agent_type in ("explore", "plan"):
+            _tool_permission = PERM_READONLY
+
     if _tool_permission == PERM_DANGER_FULL:
         # DangerFullAccess：显式用户批准 + 审批令牌
         _lang = get_current_lang()
@@ -3936,56 +3944,6 @@ AI_FILE_TOOLS = frozenset({
     "move_file", "copy_file", "delete_file", "delete_directory",
     "list_allowed_directories", "get_workspace_folders",
 })
-
-
-def parse_mcp_tool_calls(text: str) -> List[Dict[str, str]]:
-    """
-    从 AI 响应中解析 [tool:名称]JSON参数[tool:名称:done] 块。
-    - 工具名: mcp__<server>__<tool> 格式
-    - 块体为 JSON 参数字符串
-    - 兼容旧格式：[tool:名 空格参数]...[tool:名:done]
-    """
-    calls = []
-    # 新格式: [tool:mcp__server__tool]\n{json}\n[tool:mcp__server__tool:done]
-    # 注意: 用 (.+?) 而非 (\{.*?\})，因为 JSON 内容中的 } 会导致非贪婪匹配提前截断
-    pattern_new = r'\[tool:(mcp__\S+)\]\n(.+?)\n\[tool:\1:done\]'
-    for m in re.findall(pattern_new, text, re.DOTALL):
-        full_name = m[0]
-        json_body = m[1].strip()
-        # 解析 mcp__server__tool → server, tool
-        server, tool = _parse_mcp_tool_name(full_name)
-        calls.append({
-            "name": tool,
-            "server": server,
-            "full_name": full_name,
-            "params_str": json_body,
-            "body": json_body,
-        })
-        continue
-
-    # 兼容旧格式: [tool:名 空格参数]...[tool:名:done]
-    pattern_old = r'\[tool:(\S+)\s+([^\]]*)\]\n?(.*?)\n?\[tool:\1:done\]'
-    for m in re.findall(pattern_old, text, re.DOTALL):
-        old_name = m[0]
-        # 如果已经被新模式匹配过就跳过
-        if any(c.get("full_name") == old_name for c in calls):
-            continue
-        # 尝试解析为 mcp__server__tool
-        server, tool = _parse_mcp_tool_name(old_name)
-        # 尝试将 body 解析为 JSON
-        body_text = m[2].strip() if len(m) > 2 else ""
-        params = m[1].strip()
-        if body_text and body_text.startswith("{"):
-            params = body_text  # JSON 在块体中
-        calls.append({
-            "name": tool,
-            "server": server,
-            "full_name": old_name,
-            "params_str": params,
-            "body": body_text if body_text else params,
-        })
-
-    return calls
 
 
 def _parse_mcp_tool_name(full_name: str) -> tuple:
@@ -4194,6 +4152,243 @@ def _run_shell_cmd(cmd: str, timeout: int = 10) -> str:
 # ========================================================================
 
 # -------------------------- 11. handle_ai 核心函数（SSE模式）-------------------------
+
+# ── 对话压缩管道（/compact 与自动压缩共用）──
+# 自动压缩阈值：估算 token 数（含 reasoning_content），超过即触发。
+# 压缩会重置缓存前缀（一次性 miss），换来后续注意力集中与更长的有效记忆窗口。
+_AUTO_COMPACT_TOKEN_THRESHOLD = 300 * 1024
+
+# 工具 schema 的固定 token 开销：校准 tokPerChar 时从真实 prompt tokens 中扣除。
+# 约 55 个内置工具 + 描述，实测约 2 万余 token。
+_TOOL_SCHEMA_TOKEN_OVERHEAD = 22_000
+
+# ── 分层压缩状态 ──
+# Layer 2 / TimeBased：闲置超过 60 分钟无交互 → 清理已被 AI 消费的旧工具结果
+_IDLE_COMPACT_SECONDS = 60 * 60
+_last_ai_interaction_ts = time.time()
+# Layer 3 熔断器：连续压缩后仍 ≥90% 阈值达 3 次 → 本会话停止自动压缩，避免反复烧 token
+_COMPACT_BREAKER_COUNTS: Dict[str, int] = {}
+_COMPACT_BREAKER_DISABLED: Dict[str, bool] = {}
+
+# ── 窗口感知阈值（trigger = 窗口 − 13K 安全缓冲；400 报错实测值可覆盖）──
+_WINDOW_SAFETY_BUFFER = 13_000
+_SESSION_CONTEXT_WINDOWS: Dict[str, int] = {}
+
+
+def _compact_conversation_history(conversation_history: List[Dict], keep_last: int = 8,
+                                  user_home_dir: str = None, session_id: str = ""):
+    """新一代压缩：轮级分区（用户原话/错误轮/旧摘要保留）+ LLM 保真摘要（失败回退正则）。
+
+    管道：
+      1. 边界保护：不切断 tool_calls → tool_result 配对
+      2. 轮级分区 partition_rounds_keep_fold：keep 原样保留，fold 进摘要
+      3. Stage1 Supersede：同文件先 VIEW 后 EDIT/WRITE → 去重过时 VIEW
+      4. LLM 分块并行摘要（七段式简报，用户原话不折叠）；失败逐块回退正则
+      5. 组装：摘要 system 消息 + kept 原话 + 最近原文
+
+    Returns:
+        (new_history, saved_count, superseded_count, old_len, trident_stats)
+        new_history 为 None 时表示无可安全压缩的旧消息。
+    """
+    from .ai_lib.memory_compact import (
+        summarize_messages, stage1_supersede, get_compact_continuation_message,
+        partition_rounds_keep_fold, llm_summarize_messages,
+        run_trident_stages, merge_compact_summaries,
+        extract_summary_from_compact_message, compress_summary,
+    )
+    _total = len(conversation_history)
+
+    # ── Guard: 不切断 tool_calls → tool_result 配对 ──
+    # 扫描 ALL tool_calls 块，累积最小安全边界。
+    # 任何 tool 结果跨越压缩边界的 tool_calls 块整体保留。
+    _min_recent_idx = _total - keep_last
+    for _j in range(_total - 1, -1, -1):
+        _m = conversation_history[_j]
+        if _m.get("tool_calls"):
+            _tool_end = _j + 1
+            while _tool_end < _total and conversation_history[_tool_end].get("role") == "tool":
+                _tool_end += 1
+            # 如果此块的 tool 结果触及 _recent，则整块纳入 _recent
+            if _tool_end > _min_recent_idx:
+                _min_recent_idx = min(_min_recent_idx, _j)
+    keep_last = max(keep_last, _total - _min_recent_idx)
+    keep_last = min(keep_last, _total - 1)  # 至少保留 1 条在 _old
+
+    _old = conversation_history[:-keep_last] if keep_last < _total else []
+    _recent = conversation_history[-keep_last:] if keep_last > 0 else []
+
+    if not _old:
+        return None, 0, 0, 0, {}
+
+    # ── 轮级分区：keep（用户原话/错误轮/系统消息/旧摘要）原样保留；
+    #    fold（assistant 文本轮/无错误工具轮）进摘要 ──
+    _kept, _fold = partition_rounds_keep_fold(_old)
+
+    if not _fold:
+        # 无可折叠内容 → 全部原样保留，不压缩
+        return None, 0, 0, len(_old), {}
+
+    # ── 提取 kept 中的旧压缩摘要并合并（merge 防嵌套膨胀，单摘要出口）──
+    _existing_summaries = []
+    _kept_wo_compact = []
+    for _m in _kept:
+        if _m.get("role") == "system":
+            _old_sum = extract_summary_from_compact_message(_m.get("content", ""))
+            if _old_sum:
+                _existing_summaries.append(_old_sum)
+                continue
+        _kept_wo_compact.append(_m)
+    _kept = _kept_wo_compact
+
+    # ── fold 部分 → entries（Trident 预缩减 + LLM 摘要的输入）──
+    _old_entries = []
+    for _i, _m in enumerate(_fold):
+        _role = _m.get("role", "?")
+        _content = _m.get("content", "") or ""
+        if not isinstance(_content, str):
+            try:
+                _content = json.dumps(_content, ensure_ascii=False)
+            except Exception:
+                _content = str(_content)
+        _tc = _m.get("tool_calls")
+        _rc = _m.get("reasoning_content", "")
+        _body = _content
+        if _tc:
+            _tc_names = [t.get("function", {}).get("name", "?") for t in _tc]
+            try:
+                _args = " | ".join(
+                    (t.get("function", {}).get("arguments", "") or "")[:300] for t in _tc)
+            except Exception:
+                _args = ""
+            _body = f"[tool_calls: {', '.join(_tc_names)}]{(' ' + _args) if _args else ''}\n{_content}"
+        if _rc:
+            _body = f"[reasoning]\n{_rc}\n\n{_body}"
+        _old_entries.append({
+            "session_id": f"turn_{_i}",
+            "content": f"### {_role.upper()}\n{_body}",
+            "time": "",
+        })
+
+    # ── 三段式预缩减：supersede → collapse → cluster ──
+    _deduped, _trident_stats = run_trident_stages(_old_entries)
+    _superseded = _trident_stats.get("superseded", 0)
+    # ── LLM 保真摘要（分块并行；失败自动回退正则）──
+    _summary, _used_llm, _chunk_count = llm_summarize_messages(
+        _deduped if _deduped else _old_entries,
+        user_home_dir=user_home_dir,
+        session_id=session_id,
+    )
+    if not _summary:
+        _summary = summarize_messages(_deduped if _deduped else _old_entries)
+    if not _summary:
+        return None, 0, 0, len(_old), {}
+
+    # ── 合并旧摘要（merge_compact_summaries：展平 prior，追加新内容）──
+    for _old_sum in _existing_summaries:
+        _summary = merge_compact_summaries(_old_sum, _summary)
+
+    _compact_msg = {
+        "role": "system",
+        "content": get_compact_continuation_message(_summary),
+    }
+    _saved = max(0, len(_old) - len(_kept) - 1)
+    return [_compact_msg] + _kept + _recent, _saved, _superseded, len(_old), _trident_stats
+
+
+def _is_context_too_long_error(error_str: str) -> bool:
+    """检测上下文超限类 API 报错（DeepSeek/OpenAI/Anthropic 常见签名）。"""
+    _s = (error_str or "").lower()
+    _sigs = (
+        "context_length_exceeded",
+        "maximum context length",
+        "context length exceeded",
+        "prompt is too long",
+        "too many tokens",
+        "context is too long",
+        "max context",
+    )
+    return any(sig in _s for sig in _sigs)
+
+
+def _parse_context_window_from_error(error_str: str) -> Optional[int]:
+    """从 400 报错里解析实测上下文窗口（服务器返回窗口 → 重设触发阈值）。"""
+    try:
+        _m = re.search(r"maximum context length is (\d+)", error_str, re.IGNORECASE)
+        if _m:
+            return int(_m.group(1))
+        _m = re.search(r"(\d+) tokens[^>]*>?\s*(\d+)\s*maximum", error_str, re.IGNORECASE)
+        if _m:
+            return max(int(_m.group(1)), int(_m.group(2)))
+        _m = re.search(r"(\d+)\s*tokens(?:[^)]{0,40})", error_str, re.IGNORECASE)
+        if _m and "context" in error_str.lower():
+            return int(_m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _platform_context_window() -> int:
+    """按平台取默认上下文窗口（可被 400 报错实测值覆盖）。"""
+    try:
+        from .ai_lib.config import load_key_conf
+        _conf = load_key_conf() or {}
+        _plat = _conf.get("platform", "deepseek")
+        _map = {"deepseek": 1_000_000, "anthropic": 200_000,
+                "openai": 128_000, "custom": 128_000}
+        return _map.get(_plat, 1_000_000)
+    except Exception:
+        return 1_000_000
+
+
+def _effective_compact_threshold(session_id: str = "") -> int:
+    """自动压缩生效阈值 = min(用户 300K, 实测/默认窗口 − 13K 安全缓冲)。"""
+    _win = _SESSION_CONTEXT_WINDOWS.get(session_id) or _platform_context_window()
+    _thr = min(_AUTO_COMPACT_TOKEN_THRESHOLD, _win - _WINDOW_SAFETY_BUFFER)
+    return max(_thr, 32 * 1024)
+
+
+def _estimate_conversation_tokens(conversation_history: List[Dict]) -> int:
+    """估算整段对话历史（含 reasoning_content / tool_calls 参数）的 token 数。
+
+    优先用上一轮真实 usage 校准 tokPerChar（扣除工具 schema 固定开销），
+    无历史数据时回退 memory_compact 的 CJK 感知估算。
+    """
+    from .ai_lib.memory_compact import estimate_tokens
+    _total = 0
+    _chars = 0
+    for _m in conversation_history:
+        _c = _m.get("content") or ""
+        if not isinstance(_c, str):
+            try:
+                _c = json.dumps(_c, ensure_ascii=False)
+            except Exception:
+                _c = str(_c)
+        _total += estimate_tokens(_c)
+        _chars += len(_c)
+        _rc = _m.get("reasoning_content") or ""
+        if isinstance(_rc, str) and _rc:
+            _total += estimate_tokens(_rc)
+            _chars += len(_rc)
+        for _tc in _m.get("tool_calls") or []:
+            _args = _tc.get("function", {}).get("arguments", "") if isinstance(_tc, dict) else ""
+            if isinstance(_args, str) and _args:
+                _total += estimate_tokens(_args)
+                _chars += len(_args)
+    # ── 真实 usage 校准：tokPerChar = (上轮 prompt tokens − 工具 schema 开销) / 上轮字符数 ──
+    try:
+        _last_prompt = getattr(_thread_locals, "last_prompt_tokens", 0) or 0
+        if _last_prompt > 0 and _chars > 0:
+            from .ai_lib.api import get_last_request_chars as _glrc
+            _last_chars = _glrc() or 0
+            if _last_chars > 0:
+                _ratio = (_last_prompt - _TOOL_SCHEMA_TOKEN_OVERHEAD) / _last_chars
+                _ratio = min(max(_ratio, 0.10), 0.80)
+                return max(int(_chars * _ratio), _total)
+    except Exception:
+        pass
+    return _total
+
+
 def handle_ai(
     cmd_parts: List[str],
     request_id: str,
@@ -4320,7 +4515,7 @@ def handle_ai(
     except Exception:
         pass
 
-    # ── 主 AI RunCommand 执行器：与旧 @@SHELL 路径相同的安全管线 ──
+    # ── 主 AI RunCommand 执行器：走同一安全管线 ──
     # 危险命令弹用户确认（confirm_dangerous_command）、adv_code 模式语法拦截、
     # capture_command_output 捕获 + parse_and_execute 执行。
     # 供 RunCommand 内置工具（function calling）使用：结果以 tool role 消息回传，
@@ -4963,7 +5158,8 @@ def handle_ai(
     build_prompt_file(
         home_dir=_mem_home,
         system_prompt=_agreement_text,
-        tools_prompt=ai_tools_prompt,
+        # 工具描述已由 function schema 提供，不再注入文本清单（避免三份重复）
+        tools_prompt="",
     )
     refresh_prompt_tmp(_mem_home, current_session_id)
 
@@ -4978,6 +5174,21 @@ def handle_ai(
         _mem_home, current_chat_name, current_session_id,
         referenced_memory_uuid, True, mode
     )
+
+    # ── Layer 2 / TimeBased 闲置压缩：挂机 >60 分钟回来 → 清理已消费的旧工具结果 ──
+    # 只在 REPL 长会话生效；静默、无 LLM 调用、只动已被 AI 消费的 tool 输出。
+    try:
+        if _external_history and (time.time() - _last_ai_interaction_ts) > _IDLE_COMPACT_SECONDS:
+            if compact_consumed_tool_results(conversation_history):
+                from .ai_lib.api import bump_rewrite_version as _bump_idle
+                _bump_idle(current_session_id)
+                console.print("[dim]📦 闲置压缩: 已清理过期的工具输出[/]")
+    except Exception:
+        pass
+    _last_ai_interaction_ts = time.time()
+
+    # ── Layer 4 / Reactive 响应式兜底：上下文超限报错时允许强制压缩一次 ──
+    _reactive_compact_done = False
 
     while continue_asking:
         # ── 异步 Explore 子代理：每轮开始时把已完成任务的结果注入上下文 ──
@@ -5054,80 +5265,15 @@ def handle_ai(
         from rich.panel import Panel
         from rich.box import ROUNDED
         
-        # ── 多块流式状态机：每个字段类型独立缓冲区 + 独立 Panel ──
-        stream_buffer = ""        # 累积原始流式文本
-        txt_content = ""          # [TXT]...[TXT:DONE] 或 [TXT]:... 主回复内容
-        analysis_content = ""     # [ANALYSIS]:... 或 [ANALYSIS]...[ANSWER] 分析内容
-        plan_content = ""         # [plan]...[plan:done] 计划内容
-        ask_content = ""          # [ASK]:... 追问内容
-        answer_state = ""         # [ANSWER]:yes/no
-        memory_uuid = ""          # [MEMORY]:uuid
-        tag_val = ""              # [TAG]:value
-        prompt_val = ""           # [PROMPT]:value — 写入 .ai_s/onyx_ai.md
+        # ── 纯 Markdown 直通：单一流式文本缓冲（标记语言已彻底移除）──
+        stream_text = ""          # 累积流式 Markdown 文本
         live_ref = [None]         # Live 对象引用
         loading_flag = [True]
         tool_results_display = []  # 工具执行结果（用于面板展示：名前10行灰色虚影）
-        _txt_phase = "pre"        # "pre" | "in_txt" | "post_txt"
 
-        _SAFE_MARGIN = 20  # 安全缓冲（覆盖最长标记 [TXT:DONE]=10, [plan:done]=11）
+        # _strip_markers 已删除：标记语言彻底移除，AI 输出即纯 Markdown，无需剥离
 
-        def _strip_markers(text: str) -> str:
-            """去除所有格式标记，只保留纯文本（行首标记 + @@SHELL 块）"""
-            import re as _re
-            # 多行块闭合标记（可能单独成行残留）
-            text = _re.sub(r'\[TXT:DONE\]', '', text)
-            text = _re.sub(r'\[ANALYSIS:DONE\]', '', text)
-            text = _re.sub(r'\[PLAN:DONE\]', '', text)
-            text = _re.sub(r'\[PROMPT:DONE\]', '', text)
-            text = _re.sub(r'\[TAG:DONE\]', '', text)
-            # 行首单行标记（只移除标记本身，保留标记后的内容）
-            text = _re.sub(r'^\[TXT\]:?\s*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[ANALYSIS\]:?\s*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[ANSWER\]:?\w*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[ASK\]:?\s*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[TAG\]:?\s*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[CLASS[^\]]*\]:?\s*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[SLEEP\]:?\d*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[MEMORY\]:?\s*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[plan(?:\:done)?\]\s*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[tool:\S+\]?\s*', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^\[tool:\S+:done\]\s*', '', text, flags=_re.MULTILINE)
-            # @@SHELL / @@CMD 命令块 — 独立成行 + 同行粘连都过滤
-            text = _re.sub(r'^@@SHELL\s*$.*?(?=^@@|\Z)', '', text,
-                           flags=_re.MULTILINE | _re.DOTALL)
-            text = _re.sub(r'^.*@@SHELL.*$\n?', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^@@CMD\s*$.*?(?=^@@|\Z)', '', text,
-                           flags=_re.MULTILINE | _re.DOTALL)
-            text = _re.sub(r'^.*@@CMD.*$\n?', '', text, flags=_re.MULTILINE)
-            # >>>>>>>>>> 分隔符 — 独立成行 + 同行粘连都过滤
-            text = _re.sub(r'^>{8,}\s*$', '', text, flags=_re.MULTILINE)
-            text = _re.sub(r'^.*>{8,}.*$\n?', '', text, flags=_re.MULTILINE)
-            return text.strip()
-
-        def _write_onyx_ai_prompt(content: str, home_dir: str = None) -> None:
-            """将 AI 的 [PROMPT]: 内容追加写入 ~/.ai_s/onyx_ai.md（纯粹追加）"""
-            if not content.strip():
-                return
-            prompt_dir = home_dir if home_dir else os.path.expanduser("~")
-            prompt_file = os.path.join(prompt_dir, ".ai_s", "onyx_ai.md")
-            try:
-                os.makedirs(os.path.dirname(prompt_file), exist_ok=True)
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                entry = f"\n\n> [{timestamp}]\n\n{content.strip()}\n"
-                with open(prompt_file, "a", encoding="utf-8") as f:
-                    f.write(entry)
-                _mcp_debug(f"[PROMPT] 已追加到 {prompt_file}: {content[:80]}...")
-                # 控制台可见确认（不用 debug 模式也能看到）
-                try:
-                    console.print(f"📝 最高指示已更新: {content[:60]}{'...' if len(content) > 60 else ''}", style="dim cyan")
-                except Exception:
-                    pass
-            except Exception as e:
-                _mcp_debug(f"[PROMPT] 写入失败: {e}")
-                try:
-                    console.print(f"⚠️ 最高指示写入失败: {e}", style="bold red")
-                except Exception:
-                    pass
+        # _write_onyx_ai_prompt 已删除：[PROMPT] 标记随标记语言一并移除
 
         def _render_all_panels():
             """将所有已接收的内容块组合为复合 Panel"""
@@ -5137,34 +5283,10 @@ def handle_ai(
 
             parts = []
 
-            # 流式文本：TXT 块闭合或纯文本模式（pre）→ 绿色正式面板；in_txt 流式中 → 灰色预览
-            if txt_content.strip():
-                cleaned = _strip_markers(txt_content)
-                if cleaned.strip():
-                    if _txt_phase != "in_txt":
-                        # 正式面板：TXT 块已闭合（post_txt）或纯文本模式（pre，无标记语言）
-                        parts.append(Panel(Markdown(cleaned.strip()),
-                                           title="💬 回复", border_style="green", box=ROUNDED))
-                    else:
-                        # 仍在流式接收 → 灰色预览（最后100字符）——避免刷屏
-                        tail = cleaned.strip()[-100:] if len(cleaned.strip()) > 100 else cleaned.strip()
-                        if tail:
-                            parts.append(Text(tail, style="dim"))
-
-            # 分析 Panel
-            if analysis_content.strip():
-                parts.append(Panel(Markdown(analysis_content.strip()),
-                                   title="📊 分析", border_style="blue", box=ROUNDED))
-
-            # 计划 Panel
-            if plan_content.strip():
-                parts.append(Panel(Markdown(plan_content.strip()),
-                                   title="📋 计划", border_style="cyan", box=ROUNDED))
-
-            # 追问 Panel
-            if ask_content.strip():
-                parts.append(Panel(ask_content.strip(),
-                                   title="🤔 " + _i18n("ask_title", "bilingual"), border_style="yellow", box=ROUNDED))
+            # 纯 Markdown 直通：流式文本原样渲染为回复面板（无标记语言）
+            if stream_text.strip():
+                parts.append(Panel(Markdown(stream_text.strip()),
+                                   title="💬 回复", border_style="green", box=ROUNDED))
 
             # MCP 工具执行结果（前4行）
             if tool_results_display:
@@ -5268,226 +5390,20 @@ def handle_ai(
                 "preview": _preview
             })
 
-        def _try_extract_blocks() -> None:
-            """从 stream_buffer 中扫描所有已知块类型，分发到对应缓冲区并实时执行工具"""
-            import re as _re
-            nonlocal stream_buffer, txt_content, analysis_content, plan_content
-            nonlocal ask_content, answer_state, memory_uuid, tag_val, prompt_val
-            nonlocal _txt_phase
-
-            # 连续扫描直到无法再提取完整块
-            max_iter = 50  # 安全上限，防止死循环
-            for _ in range(max_iter):
-                buf = stream_buffer
-                if not buf:
-                    break
-                # 前导换行会让 _re.match 失效（[TXT] 块被 _re.search 消费后剩余 \n[ANSWER]...）
-                # buf_match 用于 _re.match 模式，buf 用于 _re.search 模式
-                buf_match = buf.lstrip('\n\r ')
-                match_offset = len(buf) - len(buf_match)
-
-                # ── [TXT]...[TXT:DONE] 多行块 ──
-                # (?![:D]) 防止误匹配 [TXT]: 和 [TXT:DONE] 前缀
-                # 不要求 \n 在 [TXT] 前，支持 [TXT]content 同行格式
-                m = _re.search(r'\[TXT\](?![:D])(.*?)\[TXT:DONE\]', buf, _re.DOTALL)
-                if m:
-                    block_text = m.group(1)
-                    txt_content += block_text  # 追加而非覆盖
-                    stream_buffer = buf[:m.start()] + buf[m.end():]
-                    _txt_phase = "post_txt"
-                    # ── 扫描 TXT 块内是否嵌套 [ANSWER]yes/no（AI 可能违反格式规范）──
-                    ans_inner = _re.search(r'\[ANSWER\](yes|no)', block_text)
-                    if ans_inner and not answer_state:
-                        answer_state = ans_inner.group(1)
-                    continue
-
-                # ── [TXT]: 单行（新格式，逐行提取）──
-                m = _re.match(r'\[TXT\]:(.*?)(\n|$)', buf_match)
-                if m:
-                    txt_content += m.group(1) + "\n"
-                    stream_buffer = buf[match_offset + m.end():]
-                    _txt_phase = "in_txt"
-                    continue
-
-                # ── [PLAN]...[PLAN:DONE] 多行块（大写新格式，优先）──
-                m = _re.search(r'\[PLAN\](.*?)\[PLAN:DONE\]', buf, _re.DOTALL)
-                if m:
-                    plan_content += m.group(1).strip()
-                    stream_buffer = buf[:m.start()] + buf[m.end():]
-                    continue
-
-                # ── [plan]...[plan:done] 多行块（小写旧格式，兼容）──
-                m = _re.search(r'\[plan\]\n(.*?)\[plan:done\]', buf, _re.DOTALL)
-                if m:
-                    plan_content += m.group(1)
-                    stream_buffer = buf[:m.start()] + buf[m.end():]
-                    continue
-
-                # ── [ANALYSIS]...[ANALYSIS:DONE] 多行块（优先于单行格式）──
-                m = _re.search(r'\[ANALYSIS\](?![:D])(.*?)\[ANALYSIS:DONE\]', buf, _re.DOTALL)
-                if m:
-                    analysis_content += m.group(1).strip()
-                    stream_buffer = buf[:m.start()] + buf[m.end():]
-                    continue
-
-                # ── [ANALYSIS]: 单行（兼容）──
-                m = _re.match(r'\[ANALYSIS\]:(.*?)(\n|$)', buf_match)
-                if m:
-                    analysis_content += m.group(1) + "\n"
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-                # ── [ANALYSIS]\n...[下一个 [XXX] 标记] 多行块（兼容旧格式）──
-                # 原版只认 [ANSWER] 终止，若 AI 输出 [ANALYSIS]\n内容\n[TXT] 会死锁
-                # 改为任意下一行 [ 开头的标记均可终止
-                m = _re.search(r'\[ANALYSIS\]\n(.*?)(?=\n\[)', buf, _re.DOTALL)
-                if m:
-                    analysis_content += m.group(1).strip()
-                    stream_buffer = buf[:m.start()] + buf[m.end():]
-                    continue
-
-                # ── [ANSWER]:yes/no ──
-                m = _re.match(r'\[ANSWER\]:(yes|no)', buf_match)
-                if m:
-                    answer_state = m.group(1)
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-                # ── [ANSWER]yes/no（无冒号）──
-                m = _re.match(r'\[ANSWER\](yes|no)', buf_match)
-                if m:
-                    answer_state = m.group(1)
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-                # ── [ASK]:text ──
-                m = _re.match(r'\[ASK\]:(.*?)(\n|$)', buf_match)
-                if m:
-                    ask_content = m.group(1).strip()
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-                # ── [MEMORY]:uuid ──
-                m = _re.match(r'\[MEMORY\]:(.*?)(\n|$)', buf_match)
-                if m:
-                    memory_uuid = m.group(1).strip()
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-                # ── [TAG]:value ──
-                m = _re.match(r'\[TAG\]:(.*?)(\n|$)', buf_match)
-                if m:
-                    tag_val = m.group(1).strip()
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-                # ── [PROMPT]...[PROMPT:DONE] 多行块（优先于单行格式）──
-                m = _re.search(r'\[PROMPT\](?![:D])(.*?)\[PROMPT:DONE\]', buf, _re.DOTALL)
-                if m:
-                    prompt_val = m.group(1).strip()
-                    if prompt_val:
-                        _write_onyx_ai_prompt(prompt_val, user_home_dir)
-                    stream_buffer = buf[:m.start()] + buf[m.end():]
-                    continue
-
-                # ── [PROMPT]:value（单行兼容）──
-                m = _re.match(r'\[PROMPT\]:(.*?)(\n|$)', buf_match)
-                if m:
-                    prompt_val = m.group(1).strip()
-                    if prompt_val:
-                        _write_onyx_ai_prompt(prompt_val, user_home_dir)
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-                # ── [PROMPT]text（无冒号单行兼容）──
-                m = _re.match(r'\[PROMPT\](.*?)(\n|$)', buf_match)
-                if m:
-                    prompt_val = m.group(1).strip()
-                    if prompt_val:
-                        _write_onyx_ai_prompt(prompt_val, user_home_dir)
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-
-
-                # ── [CLASS]:N / [SLEEP]:N（元数据，静默消费）──
-                m = _re.match(r'\[(?:CLASS|SLEEP)\]:(.*?)(\n|$)', buf_match)
-                if m:
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-                # ── [tool:name]\n{json}\n[tool:name:done] 新格式 ──
-                # 注意: 用 (.+?) 而非 (\{.*?\})，因为 JSON 内容中的 } 会导致非贪婪匹配提前截断
-                m = _re.search(r'\[tool:(\S+)\]\n(.+?)\n\[tool:\1:done\]', buf, _re.DOTALL)
-                if m:
-                    tool_name = m.group(1)
-                    params_str = m.group(2).strip()
-                    stream_buffer = buf[:m.start()] + buf[m.end():]
-                    _execute_single_tool(tool_name, params_str)
-                    continue
-
-                # ── [tool:name 空格参数]...[tool:name:done] 旧格式 ──
-                m = _re.search(r'\[tool:(\S+)\s+([^\]]*)\](.*?)\[tool:\1:done\]', buf, _re.DOTALL)
-                if m:
-                    tool_name = m.group(1)
-                    params_str = m.group(2).strip()
-                    body = m.group(3).strip() if m.lastindex and m.lastindex >= 3 else ""
-                    stream_buffer = buf[:m.start()] + buf[m.end():]
-                    params = _parse_tool_params(params_str, body)
-                    import json as _json
-                    ps = _json.dumps(params, ensure_ascii=False) if isinstance(params, dict) else str(params)
-                    _execute_single_tool(tool_name, ps)
-                    continue
-
-                # ── [ANSWER]（无冒号，多行格式的结束标记，静默消费）──
-                m = _re.match(r'\[ANSWER\]\s*(\n|$)', buf_match)
-                if m:
-                    stream_buffer = buf[match_offset + m.end():]
-                    continue
-
-                # ── 裸文本行（无标记前缀）→ pre/in_txt 阶段收集到 txt ──
-                # 仅排除真正的标记起始（已知标记名）。其余一律视为正文 —— 否则
-                # markdown 链接（[文本](url)）或表格等以 [ 开头的行会永远匹配不上
-                # 裸文本模式而卡死流式渲染。
-                if _txt_phase in ("pre", "in_txt"):
-                    m = _re.match(r'^\[(?:TXT|ANALYSIS|PLAN|ANSWER|ASK|MEMORY|TAG|PROMPT|CLASS|SLEEP|DEBUG)\]|^\[plan\]|^\[tool:\S+', buf_match)
-                    if not m:
-                        # 非标记开头 → 整行作为正文收集（含 [ 开头的 markdown）
-                        m = _re.match(r'^[^\n]+', buf_match)
-                        if m:
-                            raw = m.group(0)
-                            # 只移除控制字符（回车/换行/空字节），保留空格和制表符以保持缩进
-                            clean = raw.lstrip('\r\n\0')
-                            if clean:
-                                to_take = clean
-                                stream_buffer = buf[match_offset + len(raw):]
-                                txt_content += to_take + "\n"
-                                continue
-                            elif raw and raw != clean:
-                                # 只有控制字符 → 丢弃它们
-                                stream_buffer = buf[match_offset + len(raw):]
-                                continue
-
-                break  # 无法再提取任何完整块
 
         def on_stream_content(chunk: str) -> None:
-            """实时流式回调：统一提取所有块类型并更新复合 Panel"""
-            nonlocal stream_buffer, txt_content, _content_started
+            """实时流式回调：纯 Markdown 直通累积 + 更新复合 Panel"""
+            nonlocal stream_text, _content_started
             _content_started = True  # 首次收到内容，切换到内容面板
 
             # 规范化换行符 + 去除原始回车符（防止 ^M 污染显示）
             chunk = chunk.replace('\r\n', '\n').replace('\r', '\n')
 
-            stream_buffer += chunk
-
-            # _try_extract_blocks 负责从 stream_buffer 提取文本并追加到 txt_content
+            stream_text += chunk
 
             # 防止缓冲区无限增长（异常情况下丢旧数据）
-            if len(stream_buffer) > 50000:
-                stream_buffer = stream_buffer[-5000:]
-
-            # 提取所有完整块（处理 [TXT]/[ANSWER]/[TAG] 等结构化标记）
-            _try_extract_blocks()
+            if len(stream_text) > 100000:
+                stream_text = stream_text[-20000:]
 
             # 更新 Live Panel
             if live_ref[0]:
@@ -5525,81 +5441,69 @@ def handle_ai(
             if log_info:
                 log_info(lang_text["api_call"].format(current_question[:50]), current_session_id)
 
-            # ── 手动对话压缩：仅 /compact 命令触发，不再自动压缩 ──
-            # 旧轮次 → Trident Supersede 去重 → summarize_messages 结构化摘要 → 注入 system
-            # 新轮次 → 保留原文（即时上下文不丢失）
+            # ── 手动对话压缩：仅 /compact 命令触发（与自动压缩共用同一 Trident 管道）──
             if _mcp_shared._MANUAL_COMPACT_REQUESTED and interaction_count > 2:
                 try:
-                    from .ai_lib.memory_compact import (
-                        summarize_messages, stage1_supersede,
-                        get_compact_continuation_message,
+                    _new_hist, _saved, _superseded, _old_len, _trident_stats = _compact_conversation_history(
+                        conversation_history,
+                        user_home_dir=_mem_home,
+                        session_id=current_session_id,
                     )
-                    _keep_last = 5  # 保留最近 5 条消息
-                    _total = len(conversation_history)
-
-                    # ── Guard: 不切断 tool_calls → tool_result 配对 ──
-                    # 扫描 ALL tool_calls 块，累积最小安全边界。
-                    # 任何 tool 结果跨越压缩边界的 tool_calls 块整体保留。
-                    _min_recent_idx = _total - _keep_last
-                    for _j in range(_total - 1, -1, -1):
-                        _m = conversation_history[_j]
-                        if _m.get("tool_calls"):
-                            _tool_end = _j + 1
-                            while _tool_end < _total and conversation_history[_tool_end].get("role") == "tool":
-                                _tool_end += 1
-                            # 如果此块的 tool 结果触及 _recent，则整块纳入 _recent
-                            if _tool_end > _min_recent_idx:
-                                _min_recent_idx = min(_min_recent_idx, _j)
-                    _keep_last = max(_keep_last, _total - _min_recent_idx)
-                    _keep_last = min(_keep_last, _total - 1)  # 至少保留 1 条在 _old
-
-                    _old = conversation_history[:-_keep_last] if _keep_last < _total else []
-                    _recent = conversation_history[-_keep_last:] if _keep_last > 0 else []
-
-                    if not _old:
+                    if _new_hist is None:
                         console.print("[dim]📦 对话压缩: 无可安全压缩的旧消息（tool_calls 链覆盖全部）[/]")
                     else:
-                        # 转换为 entries 格式（兼容 Trident 管道）
-                        _old_entries = []
-                        for _i, _m in enumerate(_old):
-                            _role = _m.get("role", "?")
-                            _content = _m.get("content", "") or ""
-                            _tc = _m.get("tool_calls")
-                            _rc = _m.get("reasoning_content", "")
-                            _body = _content
-                            if _tc:
-                                _tc_names = [t.get("function", {}).get("name", "?") for t in _tc]
-                                _body = f"[tool_calls: {', '.join(_tc_names)}]\n{_content}"
-                            if _rc:
-                                _body = f"[reasoning]\n{_rc}\n\n{_body}"
-                            _old_entries.append({
-                                "session_id": f"turn_{_i}",
-                                "content": f"### {_role.upper()}\n{_body}",
-                                "time": "",
-                            })
-
-                        # Stage 1: Supersede — 同一文件先 VIEW 后 EDIT/WRITE → 去重 VIEW
-                        _deduped, _superseded = stage1_supersede(_old_entries)
-                        # 结构化摘要（scope / tools / files / timeline）
-                        _summary = summarize_messages(_deduped if _deduped else _old_entries)
-                        if _summary:
-                            _compact_msg = {
-                                "role": "system",
-                                "content": get_compact_continuation_message(_summary),
-                            }
-                            conversation_history = [_compact_msg] + _recent
-                            _saved = len(_old) - 1  # old messages replaced by 1 summary
-                            # 通知缓存诊断：rewrite 版本号 +1，归因缓存断裂为日志重写
-                            from .ai_lib.api import bump_rewrite_version as _bump
-                            _bump(current_session_id)
-                            console.print(
-                                f"[dim]📦 对话压缩: {len(_old)} 条 → 摘要 "
-                                f"({_saved} 条节省, {_superseded} 条去重)[/]"
-                            )
+                        conversation_history = _new_hist
+                        # 通知缓存诊断：rewrite 版本号 +1，归因缓存断裂为日志重写
+                        from .ai_lib.api import bump_rewrite_version as _bump
+                        _bump(current_session_id)
+                        console.print(
+                            f"[dim]📦 对话压缩: {_old_len} 条 → 摘要 "
+                            f"({_saved} 条节省, {_superseded} 条去重"
+                            f", {_trident_stats.get('collapsed_msgs', 0)} 折叠"
+                            f", {_trident_stats.get('clustered_msgs', 0)} 聚类)[/]"
+                        )
                 except Exception:
                     pass
                 finally:
                     _mcp_shared._MANUAL_COMPACT_REQUESTED = False  # 单次触发，执行后复位
+
+            # ── 自动对话压缩：上下文超过阈值时自动触发（无需用户干预）──
+            # 旧轮 → LLM 保真摘要（保留用户原话 + 最近 8 条原文 + 不切断 tool 配对）
+            if (not _mcp_shared._MANUAL_COMPACT_REQUESTED and interaction_count > 2
+                    and not _COMPACT_BREAKER_DISABLED.get(current_session_id)):
+                try:
+                    _eff_thr = _effective_compact_threshold(current_session_id)
+                    if _estimate_conversation_tokens(conversation_history) >= _eff_thr:
+                        _new_hist, _saved, _superseded, _old_len, _trident_stats = _compact_conversation_history(
+                            conversation_history,
+                            user_home_dir=_mem_home,
+                            session_id=current_session_id,
+                        )
+                        if _new_hist is not None:
+                            conversation_history = _new_hist
+                            from .ai_lib.api import bump_rewrite_version as _bump
+                            _bump(current_session_id)
+                            console.print(
+                                f"[dim]📦 自动压缩: ~{_eff_thr // 1024}K tokens 上下文 "
+                                f"→ 摘要 ({_saved} 条节省, {_superseded} 条去重"
+                                f", {_trident_stats.get('collapsed_msgs', 0)} 折叠"
+                                f", {_trident_stats.get('clustered_msgs', 0)} 聚类)[/]"
+                            )
+                            # ── 熔断器：压缩后仍 ≥90% 阈值 → 计数；连续 3 次 → 本会话停用自动压缩 ──
+                            _after = _estimate_conversation_tokens(conversation_history)
+                            if _after >= int(_eff_thr * 0.9):
+                                _COMPACT_BREAKER_COUNTS[current_session_id] = (
+                                    _COMPACT_BREAKER_COUNTS.get(current_session_id, 0) + 1)
+                                if _COMPACT_BREAKER_COUNTS[current_session_id] >= 3:
+                                    _COMPACT_BREAKER_DISABLED[current_session_id] = True
+                                    console.print(
+                                        "[bold yellow]⚠️ 连续 3 次压缩后上下文仍接近阈值，"
+                                        "本会话已停止自动压缩。请用 /compact 手动压缩，"
+                                        f"或调大 {_eff_thr // 1024}K 阈值。[/]")
+                            else:
+                                _COMPACT_BREAKER_COUNTS[current_session_id] = 0
+                except Exception:
+                    pass
 
             with Live(initial_panel, console=console, refresh_per_second=15, transient=False) as live:
                 live_ref[0] = live
@@ -5705,7 +5609,6 @@ def handle_ai(
                     parsed_txt = (api_raw_result or {}).get("txt", "").strip()
                     api_error = (api_raw_result or {}).get("error", "")
                     if parsed_txt:
-                        parsed_txt = _strip_markers(parsed_txt)
                         live.update(render_ai_panel(parsed_txt))
                         _live_shown = True
                     elif api_error:
@@ -5714,11 +5617,12 @@ def handle_ai(
                         _live_shown = True
             
             # SSE返回的已经是解析好的dict
-            if isinstance(api_raw_result, dict):
-                ai_result = api_raw_result
-            else:
-                ai_result = {"error": f"Format error: {str(api_raw_result)[:50]}", "answer": "no", "ask": ""}
+            if 'api_raw_result' not in locals() or not isinstance(api_raw_result, dict):
+                # 防御：API 调用段异常时兜底，避免 UnboundLocalError 上抛
+                ai_result = {"error": "SSE processing error: API 调用未完成", "answer": "no", "ask": ""}
                 live_ref[0] = None
+            else:
+                ai_result = api_raw_result
                 
         except Exception as e:
             import traceback as _tb
@@ -5736,15 +5640,6 @@ def handle_ai(
         
         ai_result = process_ai_result_fields(ai_result)
 
-        # ── 流式解析的 answer_state 合并到 ai_result（流式解析能捕获 TXT 块内嵌套的 [ANSWER]）──
-        if answer_state:
-            ai_result["answer"] = answer_state
-
-        # 处理 [PROMPT]: 字段 — 写入 .ai_s/onyx_ai.md 最高指示
-        _prompt_from_result = ai_result.get("prompt", "") or prompt_val
-        if _prompt_from_result.strip():
-            _write_onyx_ai_prompt(_prompt_from_result, _mem_home)
-
         was_interrupted = ai_result.get("_interrupted", False)
         if was_interrupted:
             continue_asking = False  # don't auto-loop, but still process any commands below
@@ -5755,72 +5650,13 @@ def handle_ai(
         ai_ask = ai_result.get("ask", "") or ""
         tag = ai_result.get("tag", "") or ""
         memory_uuid = ai_result.get("memory", "") or ""
-        # 优先用 [PLAN] 文本标记，其次用 submit_plan 工具结果
-        plan_text = ai_result.get("plan", "") or _pending_plan or ""
+        # 计划文本来自 submit_plan 工具结果（标记语言已移除）
+        plan_text = _pending_plan or ""
         tool_calls = ai_result.get("tool_calls", [])
         sleep_value = ai_result.get("sleep")
         class_level = ai_result.get("class", "1")
 
-        # ── 处理标记块（[VIEW:]、[EDIT:]、[WRITE:] 等 AI 文件操作）──
-        _markup_blocks = ai_result.get("markup_blocks", [])
-        if _markup_blocks and not has_error:
-            try:
-                from lib.native_fs import process_blocks as _process_blocks
-                # 确定沙箱根目录
-                _sb_root = None
-                try:
-                    from core.context import get_ctx as _get_ctx
-                    _ctx_sb = _get_ctx()
-                    if _ctx_sb._SANDBOX_ENABLED:
-                        _sb_root = _ctx_sb.ROOT_DIR
-                except Exception:
-                    pass
-                _mb_results = _process_blocks(
-                    _markup_blocks,
-                    cwd=os.getcwd(),
-                    user_mode=user_mode.current_mode if user_mode else "mid",
-                    sandbox_root=_sb_root,
-                )
-                for _r in _mb_results:
-                    _icon = "✅" if _r.success else "❌"
-                    _type_label = _r.type.upper()
-                    console.print(f"  {_icon} [{_type_label}] {_r.path}: {_r.message}", style="bold white")
-                # 将标记块执行结果合并到 ai_result，供后续记录
-                ai_result["_markup_results"] = [r.to_dict() for r in _mb_results if hasattr(r, 'to_dict')]
-            except Exception as _mb_e:
-                if debug_mode:
-                    console.print(f"  [dim]markup_blocks 处理异常: {_mb_e}[/]")
-
-        sleep_seconds = 0
-        if sleep_value is not None:
-            try:
-                sleep_seconds = int(sleep_value)
-            except (ValueError, TypeError):
-                sleep_seconds = 0
-        
-        if sleep_seconds > 0 and answer == "no":
-            interrupted, waited_seconds = handle_sleep_wait(sleep_seconds, current_session_id, lang_text, log_info)
-            
-            _md = current_lang == "english"
-            sleep_record = f"\n\n### {'Sleep' if _md else '休眠'} ({time.strftime('%H:%M:%S')})\n\n"
-            if interrupted:
-                sleep_record += f"- {'Interrupted after' if _md else '中断于'} {waited_seconds}/{sleep_seconds}s\n"
-            else:
-                sleep_record += f"- {'Completed' if _md else '完成'} {sleep_seconds}s\n"
-            
-            existing_content, record_path = get_latest_ai_session(_mem_home, current_session_id)
-            if record_path:
-                try:
-                    with open(record_path, "a", encoding="utf-8") as f:
-                        f.write(sleep_record)
-                except Exception:
-                    pass
-            
-            continue
-        
-        if memory_uuid and not referenced_memory_uuid:
-            referenced_memory_uuid = memory_uuid
-            console.print(lang_text["memory_referenced"].format(memory_uuid[:8] + "..."), style="bold cyan")
+        # （标记语言已移除：无 [VIEW:]/[EDIT:] 文件标记执行、无 [SLEEP] 休眠、无 [MEMORY] 引用）
         
         if has_error:
             error_str = str(ai_result["error"])
@@ -5830,6 +5666,49 @@ def handle_ai(
                 console.print(f"❌ {lang_text['api_error'].format(error_str)}", style="bold red")
             if log_error:
                 log_error(f"AI error: {error_str}", current_session_id)
+            # ── Layer 4 / Reactive：上下文超限报错 → 强制压缩一次并重试（最后保命兜底）──
+            if _is_context_too_long_error(error_str) and not _reactive_compact_done:
+                _reactive_compact_done = True
+                # 从报错里学习实测窗口（服务器 400 返回窗口 → 重设阈值）
+                _win_parsed = _parse_context_window_from_error(error_str)
+                if _win_parsed:
+                    _SESSION_CONTEXT_WINDOWS[current_session_id] = _win_parsed
+                    console.print(
+                        f"[dim]📏 已记录实测上下文窗口: {_win_parsed:,} tokens "
+                        f"(自动压缩阈值 → {_effective_compact_threshold(current_session_id) // 1024}K)[/]")
+                try:
+                    _new_hist, _saved, _superseded, _old_len = _compact_conversation_history(
+                        conversation_history,
+                        user_home_dir=_mem_home,
+                        session_id=current_session_id,
+                    )
+                    if _new_hist is not None:
+                        conversation_history = _new_hist
+                        from .ai_lib.api import bump_rewrite_version as _bump_react
+                        _bump_react(current_session_id)
+                        conversation_history.append({
+                            "role": "system",
+                            "content": _mcp_t(
+                                "⚠️ 上轮请求因上下文超限失败，系统已强制压缩历史并重试。继续当前任务。",
+                                "⚠️ The previous request failed with a context-length error; "
+                                "the system force-compacted history and is retrying. Continue the task."),
+                        })
+                        console.print(
+                            "[bold yellow]📦 应急压缩: 上下文超限 → 已强制压缩并重试[/]")
+                        continue_asking = True
+                        continue
+                except Exception:
+                    pass
+            # ── 失败轮也记录提问（history 命令可查）：AI 报错≠问题没发生 ──
+            if not message_appended and (last_user_question or "").strip():
+                try:
+                    append_message_to_chat(
+                        _mem_home, current_chat_name, current_session_id,
+                        last_user_question,
+                        f"（AI 调用失败：{error_str[:200]}）", "", "1")
+                    message_appended = True
+                except Exception:
+                    pass
             continue_asking = False
             continue
         
@@ -5850,74 +5729,12 @@ def handle_ai(
         elif message_appended and answer == "yes":
             update_message_tag(_mem_home, current_chat_name, current_session_id, tag, class_level)
         
-        if ai_ask.strip():
-            # 如果已通过流式展示了 txt 内容，不再重复打印
-            if has_txt and not txt_content.strip():
-                console.print(lang_text["ai_answer"], style="bold green")
-                console.print("-" * 50, style="white")
-                for line in ai_result["txt"].strip().split('\n'):
-                    console.print(line, style="white")
-                console.print("-" * 50, style="white")
-            
-            # Rich Panel 展示 AI 提问
-            console.print(Panel(
-                ai_ask.strip(),
-                title="🤔 " + lang_text.get("ai_ask", "AI 提问"),
-                border_style="yellow",
-                box=ROUNDED,
-                padding=(1, 2),
-            ))
-            
-            try:
-                user_answer = ui_text_input("💬 You").strip()
-                last_user_question = user_answer  # 记录追问，供聊天记忆使用
-                message_appended = False           # 新输入 → 允许追加新消息
-                # 标准 messages：AI 提问 + 用户回答
-                _ask_reasoning = ai_result.get("_reasoning", "")
-                _ask_msg = {
-                    "role": "assistant",
-                    "content": ai_ask.strip(),
-                    "reasoning_content": _ask_reasoning,  # thinking 模式必须回传
-                }
-                conversation_history.append(_ask_msg)
-                conversation_history.append({"role": "user", "content": user_answer})
-                _user_input_round = True  # 用户回答了 AI 追问
-                current_question = f"{current_question}\n\nUser answer: {user_answer}" if current_lang == "english" else f"{current_question}\n\n用户回答：{user_answer}"
-                continue_asking = True
-                
-                if interaction_count == 1:
-                    record_ai_session(_mem_home, current_session_id, initial_question, ai_result, user_answer, {}, referenced_memory_uuid or "", markup_results=ai_result.get("_markup_results"))
-                    _user_input_round = False  # 首轮提问+回答已由 record_ai_session 记录，消费标记
-                else:
-                    existing_content, record_path = get_latest_ai_session(_mem_home, current_session_id)
-                    if existing_content and record_path:
-                        _ts = time.strftime('%Y-%m-%d %H:%M:%S')
-                        _md = current_lang == "english"
-                        new_content = f"\n\n### {'Interaction' if _md else '交互'} #{interaction_count} ({_ts})\n\n"
-                        new_content += f"- **{'AI Ask' if _md else 'AI询问'}**:\n  {ai_ask.strip()}\n"
-                        new_content += f"- **{'User Answer' if _md else '用户回答'}**:\n  {user_answer}\n"
-                        try:
-                            with open(record_path, "a", encoding="utf-8") as f:
-                                f.write(new_content)
-                        except Exception:
-                            pass
-                    _user_input_round = False  # AI追问+用户回答已写入 library，消费标记
-                
-                continue
-            except KeyboardInterrupt:
-                console.print("\n^C", style="bold yellow")
-                user_answer = "User cancelled the answer" if current_lang == "english" else "用户取消了回答"
-                continue_asking = False
-            except EOFError:
-                console.print("\n^D", style="bold yellow")
-                user_answer = "User terminated the session" if current_lang == "english" else "用户终止了会话"
-                continue_asking = False
+        # （[ASK] 标记交互流已移除：AI 提问走 choose_ask 工具，或作为普通文本由用户下一轮回复）
         
         # 如果已通过流式或 Live Panel 展示了 txt 内容，不再重复打印
         # _live_shown 在 Live 块内设为 True，避免 Live 结束后 console.print 再打一遍
-        if has_txt and not ai_ask.strip() and not _live_shown:
-            cleaned_txt = _strip_markers(ai_result["txt"])
-            console.print(render_ai_panel(cleaned_txt.strip()))
+        if has_txt and not _live_shown:
+            console.print(render_ai_panel(ai_result["txt"].strip()))
         
         ai_commands = extract_ai_commands(ai_result)
         # 硬限制：最多执行 10 条命令，超出的丢弃并通知 AI
@@ -5927,15 +5744,16 @@ def handle_ai(
             _warn = lang_text.get("cmd_limit", "⚠️ 命令超过 10 条限制，已截断前 10 条执行") if False else "⚠️ 命令超过 10 条限制，已截断前 10 条执行"
             console.print(f"  [bold yellow]{_warn}[/]")
             conversation_history.append({"role": "system", "content": f"{_warn}。多余的 {len(_discarded)} 条命令被丢弃，请下一轮继续。"})
-        analysis_content = (ai_result.get("analysis", "") or "").strip()
+        # 命令执行摘要面板（[ANALYSIS] 标记已移除 — AI 分析直接走正文 Markdown）
+        commands_summary = ""
         
-        if ai_commands and not analysis_content:
-            analysis_content = lang_text["analysis_cmd_prefix"].format(len(ai_commands))
+        if ai_commands and not commands_summary:
+            commands_summary = lang_text["analysis_cmd_prefix"].format(len(ai_commands))
             for idx, cmd in enumerate(ai_commands, 1):
-                analysis_content += f"{idx}. {cmd}\n"
+                commands_summary += f"{idx}. {cmd}\n"
         
-        if analysis_content:
-            console.print(render_analysis_panel(analysis_content))
+        if commands_summary:
+            console.print(render_analysis_panel(commands_summary))
         
         # ── Token usage stats (from stream_options.include_usage) ──
         _usage_info = ai_result.get("_usage") if isinstance(ai_result, dict) else None
@@ -6144,7 +5962,7 @@ def handle_ai(
             if _native_feedback.strip():
                 conversation_history.append({"role": "system", "content": f"工具执行结果：\n{_native_feedback.strip()}"})
 
-        # 处理 AI 工具调用 ([tool:...] 格式)
+        # 处理 AI 工具调用（原生 function calling）
         if tool_calls:
             try:
                 _tc_pending = list(tool_calls)
@@ -6204,24 +6022,10 @@ def handle_ai(
                             # 路径/参数完整显示，绝不截断 —— 用户需要看到具体改的是哪个文件
                             _param_preview = f" {_key}={_val}"
                             break
-                    _is_builtin = tool_name in (
-                        "read_file","write_file","edit_file","get_file_info",
-                        "glob_search","grep_search","search_file","validate_edit","preview_edit",
-                        "delete_file","delete_directory","create_directory","move_file","copy_file",
-                        "ListDirectory","DirectoryTree",
-                        "GitStatus","GitDiff","GitLog","GitBranch",
-                        "RunCommand",
-                        "ToolSearch","Skill","TodoWrite","Sleep","StructuredOutput",
-                        "submit_plan","mark_step_complete","EnterPlanMode","ExitPlanMode",
-                        "choose_ask","Config","Agent","WebFetch","WebSearch",
-                        "TaskCreate","TaskList","TaskGet","TaskUpdate","TaskStop",
-                        "TaskBoard","TaskRemove","TeamCreate","TeamList","TeamDelete",
-                        "CronCreate","CronList","CronDisable","CronDelete",
-                        "py_diagnostics","py_symbols",
-                        "LspDiagnostics","LspSymbols",
-                        "MemoryRead","MemorySearch","UndoLastEdit",
-                    )
-                    _tag = "" if _is_builtin else " [MCP]"
+                    # 只有工具名带 mcp_/mcp__ 前缀的才是真正的 MCP 工具
+                    # （build_native_tools 统一命名为 mcp_<tool>，见 mcp_prefixed）。
+                    # 其余一律是内置工具，不标 MCP。
+                    _tag = " [MCP]" if tool_name.startswith("mcp_") else ""
                     console.print(f"  [bold green]🔧 {_tool_display_name}{_tag}[/]{_param_preview}")
 
                     # 流式执行：用 Status spinner 展示工具运行过程
@@ -6673,7 +6477,7 @@ def handle_ai(
                         final_ai_result["txt"] = refuse_summary
                 
                 if interaction_count == 1:
-                    record_ai_session(_mem_home, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "", markup_results=final_ai_result.get("_markup_results"))
+                    record_ai_session(_mem_home, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "")
                     _user_input_round = False  # 首轮提问已由 record_ai_session 记录，消费标记
                 else:
                     existing_content, record_path = get_latest_ai_session(_mem_home, current_session_id)
@@ -6721,7 +6525,7 @@ def handle_ai(
                         final_ai_result["txt"] = refuse_summary
                 
                 if interaction_count == 1:
-                    record_ai_session(_mem_home, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "", markup_results=final_ai_result.get("_markup_results"))
+                    record_ai_session(_mem_home, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "")
                     _user_input_round = False  # 首轮提问已由 record_ai_session 记录，消费标记
                 else:
                     existing_content, record_path = get_latest_ai_session(_mem_home, current_session_id)
@@ -6771,15 +6575,12 @@ def handle_ai(
                 box=DebugBox,
             ))
         
-        # ── 自动判断是否继续循环（不再依赖 AI 的 [ANSWER] 标记）──
-        # 规则：仅当响应中只有 txt/analysis 纯文本字段时才停止循环；
-        #       但凡存在其他字段（memory/plan/ask/commands/本轮新工具调用），
-        #       都需要回问 AI 以传递上下文反馈。
+        # ── 自动判断是否继续循环（纯 Markdown 回复，无标记语言）──
+        # 规则：仅当响应中只有纯文本且无挂起项时才停止循环；
+        #       存在待执行命令/工具调用/计划/被拒原因时，回问 AI 传递上下文反馈。
         has_pending = bool(
-            memory_uuid or
             _commands_processed_this_round or
             _tool_calls_processed_this_round or
-            ai_ask.strip() or
             plan_text.strip() or
             user_refuse_reasons  # 有被拒绝的命令 → 让 AI 看到反馈后重新尝试
         )
@@ -6793,9 +6594,7 @@ def handle_ai(
             continue_asking = False
         else:
             # ═══ 无待执行项 ═══
-            # AI 可以主动用 [ANSWER]yes 表示完成。但如果 AI 写了 [ANSWER]no
-            # 却没给任何命令/工具，说明它只是习惯性写 no，实际已无事可做。
-            # 此时忽略 answer，直接停止循环 + 显示 ESC 门控让用户决定后续。
+            # 纯文本回复，任务已完成，直接停止循环 + 显示 ESC 门控让用户决定后续。
             # ── 显示 token 量（优先 API 精确值，其次估算）──
             _pt = getattr(_thread_locals, "last_prompt_tokens", 0)
             _ct = getattr(_thread_locals, "last_completion_tokens", 0)

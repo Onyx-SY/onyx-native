@@ -1,7 +1,7 @@
 """
 edit_engine.py — 编辑验证引擎
 
-对标 Claude Code 的 SEARCH/REPLACE 干运行校验 + 回滚。
+对标主流 AI 编码助手的 SEARCH/REPLACE 干运行校验 + 回滚。
 
 能力:
   - validate_edit: 检查 SEARCH 文本存在且唯一

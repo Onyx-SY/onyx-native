@@ -132,6 +132,15 @@ def clear_payload_hash_state(session_id: str = "") -> None:
     _PAYLOAD_HASH_STATE.pop(key, None)
 
 
+# ── 最近一次请求的 messages 字符数（供下一轮 token 估算校准 tokPerChar）──
+_last_request_chars = 0
+
+
+def get_last_request_chars() -> int:
+    """返回最近一次 API 请求的 messages 总字符数（不含工具 schema）。"""
+    return _last_request_chars
+
+
 from . import mcp_state as _mcp_state
 
 
@@ -191,7 +200,7 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
             "stream_format": "openai",
             "models": [conf.get("model", "gpt-4")],
             "default_model": conf.get("model", "gpt-4"),
-            "params": {"temperature": 0.1, "max_tokens": 4096},
+            "params": {"temperature": 0.1, "max_tokens": 8192},
         }
     else:
         plat_info = _SUPPORTED_PLATFORMS.get(plat_key, _SUPPORTED_PLATFORMS["deepseek"])
@@ -288,7 +297,6 @@ Onyx Mode: {onyx_mode}
 {language_label}: {get_current_lang()}
 {tools_label} ({tool_count})
 {chr(10).join(tool_list)}
-{ai_tools_prompt}
 {_i18n('env_persistent_memory', 'bilingual')}
 {onyx_ai_prompt if onyx_ai_prompt else _i18n('env_none', 'bilingual')}"""
 
@@ -381,7 +389,7 @@ Onyx Mode: {onyx_mode}
         headers["Authorization"] = f"Bearer {api_key}"
 
     # ── 合并参数 ──
-    default_params = dict(plat_info.get("params", {"temperature": 0.1, "top_p": 0.2, "max_tokens": 4096}))
+    default_params = dict(plat_info.get("params", {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192}))
     model_overrides = plat_info.get("model_params", {}).get(model, {})
     p = {**default_params, **model_overrides, **user_params}
 
@@ -548,6 +556,30 @@ Onyx Mode: {onyx_mode}
         except Exception:
             pass
     _payload_hash_info = _track_payload_hash(session_id, payload, _deb_dir)
+
+    # ── 记录本轮 messages 字符数（含 content / reasoning_content / tool_calls 参数）──
+    # 供 handle_ai 下一轮 _estimate_conversation_tokens 用真实 usage 校准 tokPerChar
+    global _last_request_chars
+    _last_request_chars = 0
+    try:
+        for _m in _messages:
+            _c = _m.get("content")
+            if isinstance(_c, str):
+                _last_request_chars += len(_c)
+            elif isinstance(_c, list):
+                for _blk in _c:
+                    if isinstance(_blk, dict):
+                        _last_request_chars += len(str(_blk.get("text", "")))
+                        _last_request_chars += len(str(_blk.get("input", "")))
+            _rc = _m.get("reasoning_content")
+            if isinstance(_rc, str):
+                _last_request_chars += len(_rc)
+            for _tc in _m.get("tool_calls") or []:
+                _args = _tc.get("function", {}).get("arguments", "")
+                if isinstance(_args, str):
+                    _last_request_chars += len(_args)
+    except Exception:
+        pass
 
     for retry in range(max_retries):
         try:
@@ -771,20 +803,9 @@ Onyx Mode: {onyx_mode}
             _ACTIVE_RESPONSE = None
 
             raw_full = full_content
-            if full_content:
-                import re as _re
-                full_content = _re.sub(
-                    r'(?<!\n)(\[TXT\](?![:D])|\[TXT:DONE\]|\[ANALYSIS\](?![:D])|\[ANALYSIS:DONE\]|@@SHELL|>>>>>>>>>>|\[ANSWER\]|\[ASK\]|\[PLAN\]|\[PLAN:DONE\]|\[PROMPT\]|\[PROMPT:DONE\]|\[TAG\]|\[TAG:DONE\]|\[MEMORY\]|\[CLASS\]|\[SLEEP\])',
-                    r'\n\1', full_content
-                )
 
+            # 纯 Markdown 直通：不再解析任何方括号标记（标记语言已移除）
             result = parse_sse_structured_response(full_content)
-
-            try:
-                from lib.native_fs.markup_parser import parse_markup as _parse_markup
-                result["markup_blocks"] = _parse_markup(raw_full if raw_full else full_content)
-            except Exception:
-                result["markup_blocks"] = []
 
             if _tool_calls_acc:
                 native_tools = []

@@ -2573,11 +2573,6 @@ def _lazy_help(cmd_parts: List[str], request_id: str) -> None:
     from bin.help.help import main as help_handler
     return help_handler(cmd_parts, request_id)
 
-def _lazy_which(cmd_parts: List[str], request_id: str) -> None:
-    """延迟导入 which 命令处理器"""
-    from bin.which_cmd import handle_which
-    return handle_which(cmd_parts, request_id)
-
 # -------------------------- 工具箱命令映射（第一级优先级） --------------------------
 
 
@@ -2601,7 +2596,6 @@ BUILTIN_COMMANDS: Dict[str, Callable[[List[str], str], None]] = {
     "help": _lazy_help,
 
     "source": _lazy_source,
-    "which": _lazy_which,
     "sado": handle_sado,
     "nanosado": handle_nanosado,
     }

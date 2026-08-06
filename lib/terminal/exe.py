@@ -204,6 +204,9 @@ _persistent_shell: Optional['PersistentShell'] = None
 # AI 执行模式标志 — 由 ai_cmd.py 在执行命令前设为 True，执行后恢复
 # 用于给 AI 触发的命令加超时保护和用户弹窗
 AI_EXECUTION_MODE = False
+# AI 触发的上一条命令退出码（ai_cmd.py 执行前重置为 None；
+# 内置命令不经 subprocess → 保持 None，显示 "-"）
+AI_LAST_EXIT_CODE: Optional[int] = None
 
 # ========== getcwd 缓存（减少频繁系统调用） ==========
 _cached_cwd: Optional[str] = None
@@ -1559,6 +1562,65 @@ def is_shell_alive() -> bool:
     return _persistent_shell is not None and _persistent_shell.is_alive()
 
 
+# ======================================================================
+# AI 执行模式：subprocess 直跑（避免 PTY 终端污染 + 可靠退出码）
+# ======================================================================
+# AI 触发的命令（RunCommand 工具）不走持久 shell PTY：
+#   - PTY 会混入命令回显、bracketed-paste 控制序列（[?2004l）等终端垃圾，
+#     污染 AI 工具结果与 library 记录；
+#   - subprocess 直接捕获 stdout/stderr + 真实退出码，输出干净可解析。
+# 交互式程序（vim/top/ssh 等）需要 TTY，仍回退 PTY 路径。
+
+# 需要 TTY 的交互式命令（subprocess 无 TTY 会挂死/报错）
+_AI_INTERACTIVE_TOKENS = frozenset({
+    "vim", "vi", "nano", "top", "htop", "less", "more", "watch",
+    "ssh", "telnet", "ftp", "sftp", "mc", "ranger",
+})
+
+
+def _exec_ai_subprocess(cmd: str, output_buffer: List[str],
+                        cwd: Optional[str]) -> Optional[int]:
+    """AI 执行模式：subprocess 直跑命令。
+
+    返回退出码；命令属于交互式（需要 TTY）时返回 None 让调用方回退 PTY。
+    """
+    import subprocess as _sp
+    _head = (cmd or "").strip().split(None, 1)[0].lower() if (cmd or "").strip() else ""
+    if _head and os.path.basename(_head) in _AI_INTERACTIVE_TOKENS:
+        return None  # 交互式命令 → 回退 PTY
+
+    try:
+        _res = _sp.run(
+            cmd, shell=True, capture_output=True, text=True,
+            errors="replace", cwd=cwd, timeout=600,
+        )
+    except _sp.TimeoutExpired:
+        output_buffer.append("[AI 命令执行超时（>600s），已终止]")
+        return 124
+    except Exception as _e:
+        output_buffer.append(f"[AI 命令执行异常: {_e}]")
+        return -1
+
+    _out = (_res.stdout or "").rstrip()
+    _err = (_res.stderr or "").rstrip()
+    # 写回 output_buffer（供 is_tool 缓存 / AI_TOOL_OUTPUT_CACHE 使用）
+    if _out:
+        output_buffer.append(_out)
+        try:
+            sys.stdout.write(_out + "\n")  # 经 RealTimeOutputCatcher 实时显示前 N 行
+            sys.stdout.flush()
+        except Exception:
+            pass
+    if _err:
+        output_buffer.append(_err)
+        try:
+            sys.stderr.write(_err + "\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+    return _res.returncode
+
+
 def run_cmd_sync(
     cmd: str,
     request_id: str,
@@ -1576,6 +1638,7 @@ def run_cmd_sync(
     passthrough: bool = False
 ) -> int:
     """Execute command synchronously (based on persistent shell)"""
+    global AI_LAST_EXIT_CODE
     _ = is_interactive_command_func
     _ = user_interactive_cmds
 
@@ -1593,6 +1656,30 @@ def run_cmd_sync(
         if cwd is None:
             cwd = _get_cwd_cached()
 
+        # ── AI 执行模式：subprocess 直跑（避免 PTY 终端污染 + 可靠退出码）──
+        if AI_EXECUTION_MODE:
+            _ai_ret = _exec_ai_subprocess(cmd, output_buffer, cwd)
+            if _ai_ret is not None:
+                if _ai_ret != 0:
+                    if log_error_func:
+                        try:
+                            log_error_func(f"Command failed (exit code {_ai_ret}): {cmd}", request_id)
+                        except TypeError:
+                            log_error_func(f"Command failed (exit code {_ai_ret}): {cmd}")
+                else:
+                    if log_info_func:
+                        try:
+                            log_info_func(f"Command succeeded (exit code 0): {cmd}", request_id)
+                        except TypeError:
+                            log_info_func(f"Command succeeded (exit code 0): {cmd}")
+                if is_tool and AI_TOOL_OUTPUT_CACHE is not None:
+                    full_output = "".join(output_buffer) if output_buffer else ""
+                    AI_TOOL_OUTPUT_CACHE[request_id] = full_output.strip() or "[No output]"
+                AI_LAST_EXIT_CODE = _ai_ret
+                return _ai_ret
+            # 交互式命令 → 回退下方 PTY 路径
+            debug_log(f"AI interactive command fallback to PTY: {repr(cmd)}")
+
         shell = _get_persistent_shell(cwd=cwd)
 
         with _shell_lock:
@@ -1602,6 +1689,9 @@ def run_cmd_sync(
                 log_info=log_info_func,
                 log_error=log_error_func,
             )
+
+        if AI_EXECUTION_MODE:
+            AI_LAST_EXIT_CODE = return_code
 
         if return_code != 0:
             if log_error_func:
@@ -1625,6 +1715,8 @@ def run_cmd_sync(
     except KeyboardInterrupt:
         print("\n\033[33mCtrl+C\033[0m")
         debug_log("run_cmd_sync interrupted by Ctrl+C")
+        if AI_EXECUTION_MODE:
+            AI_LAST_EXIT_CODE = -1
         if log_error_func:
             try:
                 log_error_func(f"User interrupted command: {cmd}", request_id)
@@ -1637,6 +1729,8 @@ def run_cmd_sync(
         err_msg = str(e)
         print(f"\033[91m{err_msg}\033[0m")
         debug_log(f"run_cmd_sync exception: {err_msg}\n{traceback.format_exc()}", 'error')
+        if AI_EXECUTION_MODE:
+            AI_LAST_EXIT_CODE = -1
         if log_error_func:
             try:
                 log_error_func(f"Command execution exception: {err_msg}, command: {cmd}", request_id)

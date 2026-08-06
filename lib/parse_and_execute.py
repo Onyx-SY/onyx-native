@@ -1910,9 +1910,10 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             'read', 'printf', 'test', 'true', 'false', 'exec', 'eval',
             'set', 'unset', 'shift', 'umask', 'ulimit', 'history',
         })
-        if _unknown_origin and actual_cmd_head and actual_cmd_head not in _SHELL_BUILTINS:
+        if _unknown_origin and actual_cmd_head and actual_cmd_head not in _SHELL_BUILTINS and not is_ai_triggered:
             import shutil as _shutil
             # bash 执行完了，用 which 快速判断命令是否真的不存在
+            # （is_ai_triggered：AI 触发的命令不打印"你是不是想输入"，避免交互提示污染 AI 工具结果）
             # （只查 PATH，shell 函数/alias 不在此列，但不影响体验）
             if not _shutil.which(actual_cmd_head):
                 similar_cmds = _find_similar_cmds_local(actual_cmd_head, cmd_mapping)

@@ -96,13 +96,13 @@ def resolve(vpath: str) -> str:
     虚拟路径 → 物理路径。
 
     规则：
-      /x    → <root>/x            （虚拟根 = cwd）
+      /x    → <root>/x            （虚拟根 = cwd；存在任一即解析：虚拟根候选存在
+                                 或真实文件系统存在；两者都不存在原样放行 ——
+                                 /api 可能是网络接口；已在沙箱内的物理路径原样返回）
       ~/x   → <user_home>/x       （解析后仍须在 root 内，否则拦截）
       x     → <root>/x            （相对路径以 cwd 为基准）
       ./x   → <root>/x
       ../x  → <root>/../x         若结果仍在 root 内放行，否则拦截
-      /绝对物理路径 → 一律视为虚拟路径映射到 <root> 下
-
     沙盒未激活时原样返回（兼容非 AI 场景）。
     """
     if _root is None:
@@ -119,10 +119,16 @@ def resolve(vpath: str) -> str:
         joined = os.path.join(_user_home or os.path.expanduser("~"), "")
     elif vpath.startswith("~/"):
         joined = os.path.join(_user_home or os.path.expanduser("~"), vpath[2:])
-    # 绝对路径（/x）→ 虚拟根映射
+    # 绝对路径（/x）→ 虚拟根映射；存在任一即解析：虚拟根候选存在或真实文件系统存在。
+    # 两者都不存在（如 /api 网络接口）→ 原样放行；已在沙箱内的物理路径 → 原样返回。
     elif vpath.startswith("/"):
+        if is_within(vpath):
+            return vpath  # 已在虚拟沙箱内 → 无需解析
         rel = vpath.lstrip("/")
-        joined = os.path.join(_root, rel) if rel else _root
+        _cand = os.path.join(_root, rel) if rel else _root
+        if rel and not os.path.exists(_cand) and not os.path.exists(vpath):
+            return vpath
+        joined = _cand
     # 相对路径（x、./x、../x）→ 以 cwd 为基准
     else:
         joined = os.path.join(_root, vpath)

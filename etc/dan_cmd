@@ -1,5 +1,4 @@
-rm -rf 
-rm -f
+
 mkfs.ext4/dev/sda1
 mkfs.vfat/dev/sdb1
 mkfs.ntfs/dev/sdc1

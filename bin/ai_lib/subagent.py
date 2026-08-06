@@ -6,15 +6,16 @@ subagent.py — Explore 只读子代理（第一个 sub-agent）
 - Explore：隔离上下文的只读调查代理。只允许调用文件读取类工具
   （get_file_info / read_file / glob_search / grep_search / search_file /
    ListDirectory / DirectoryTree），无任何写/执行/Web 能力。
-- 可指定 1~3 个任务（tasks 数组优先；count 拆分或同题多跑），
-  并发上限 MAX_CONCURRENT=3（BoundedSemaphore），超出自动排队。
+- 可指定 1~5 个任务（tasks 数组优先；count 拆分或同题多跑），
+  并发上限 MAX_CONCURRENT=5（BoundedSemaphore），超出自动排队。
 - 提示词 = 默认系统提示词（etc/ai/agreement.md + Explore 角色段，只暴露
   只读工具）+ AI 下达的任务（user 消息）。
 - 同步模式：前端阻塞等待，总结直接作为 Agent 工具结果交还主 AI 上下文。
 - 异步模式：立即返回任务 ID，主 AI 继续工作；完成结果由 handle_ai
   每轮 drain 注入本会话。
 - 模型：默认当前平台最便宜模型（「X Pro」= 最低价 AI，resolve_cheapest_model），
-  可用 Agent 工具的 model 参数覆盖；每次 API 调用按 _usage 记入 cost.json。
+  可用 Agent 工具的 model 参数覆盖；plan 类型默认自动升档到同系列更聪明的模型
+  （resolve_smarter_model，如 deepseek flash → pro）。每次 API 调用按 _usage 记入 cost.json。
 - 线程安全：子线程只写 ExploreTask/manager 内部状态（锁保护），
   主线程独占 conversation_history。
 """
@@ -30,8 +31,9 @@ from typing import Dict, List, Optional, Tuple
 
 
 # ── 常量 ──
-MAX_CONCURRENT = 3                  # 并发上限（最多 3 个子代理）
-MAX_ROUNDS = 20                     # 单个子代理最大工具轮次
+MAX_CONCURRENT = 5                  # 并发上限（最多 5 个子代理并行）
+MAX_ROUNDS = 20                     # plan/lint/test 最大工具轮次
+MAX_EXPLORE_ROUNDS = 100             # explore 轮次上限；最后一轮强制输出总结
 MAX_SUMMARY_CHARS = 6000            # 总结上限（字符）
 SYNC_TIMEOUT = 900                  # 同步模式最长等待（秒）
 TOOL_OUTPUT_CAP = 32 * 1024         # 单工具结果回传上限（字节）
@@ -132,7 +134,7 @@ _RUN_COMMAND_TOOL: Dict = {
     "type": "function",
     "function": {
         "name": "RunCommand",
-        "description": "Run a shell command through Onyx's security pipeline (same checks as the main AI; dangerous commands are denied). Use for linters, analyzers, and test suites. Output is captured and returned.",
+        "description": "Run a shell command through Onyx's security pipeline (same checks as the main AI; dangerous commands are denied). Use for linters, analyzers, and test suites. Output and exit code are captured and returned.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -321,7 +323,7 @@ class ExploreTask:
 
 
 class ExploreManager:
-    """Explore 子代理管理器：并发上限 3，同步/异步，结果收集。"""
+    """Explore 子代理管理器：并发上限 MAX_CONCURRENT(5)，同步/异步，结果收集。"""
 
     def __init__(self):
         self._sem = threading.BoundedSemaphore(MAX_CONCURRENT)
@@ -362,7 +364,7 @@ class ExploreManager:
                     mode: str = "sync", model: Optional[str] = None,
                     agent_type: str = "explore",
                     wait: bool = True) -> List[ExploreTask]:
-        """批量提交（1~3 个）。先全部启动（真正并行），sync 且 wait=True 时统一等待全部完成。"""
+        """批量提交（1~MAX_CONCURRENT 个）。先全部启动（真正并行），sync 且 wait=True 时统一等待全部完成。"""
         if not prompts:
             return []
         prompts = prompts[:MAX_CONCURRENT]
@@ -407,6 +409,28 @@ class ExploreManager:
             if task:
                 out.append(task)
         return out
+
+    def drain_done(self, tasks: List[ExploreTask]) -> None:
+        """从完成队列中移除指定任务（不返回、不注入）。
+
+        sync 模式子代理的总结已直接作为 Agent 工具结果交还主 AI，
+        若不移除，下一轮开始时 handle_ai 的收集器会把总结再次注入
+        conversation_history（重复注入）。只移除 status==done 的任务；
+        超时仍在运行的任务保留在队列，完成后仍由收集器正常注入。
+        """
+        ids = {t.id for t in tasks if t.status == "done"}
+        if not ids:
+            return
+        with self._lock:
+            kept = queue.Queue()
+            while True:
+                try:
+                    tid = self._done_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if tid not in ids:
+                    kept.put(tid)
+            self._done_queue = kept
 
     def has_pending(self) -> bool:
         with self._lock:
@@ -455,6 +479,13 @@ class ExploreManager:
         model = (task.model or conf.get("model", "")
                  or resolve_default_model(platform)
                  or resolve_cheapest_model(platform))
+        # 规划子代理（plan）默认升档：同系列更聪明的模型（如 deepseek flash → pro）
+        # 仅当调用方未显式指定 model 时生效；显式指定（Agent 工具 model 参数）尊重原值。
+        if task.agent_type == "plan" and not task.model:
+            from .cost import resolve_smarter_model
+            _smarter = resolve_smarter_model(platform, model)
+            if _smarter:
+                model = _smarter
 
         system_prompt = build_agent_system_prompt(task.agent_type)
         tools = build_agent_tools(task.agent_type)
@@ -464,13 +495,27 @@ class ExploreManager:
         ]
         mem_home = self.get_mem_home()
 
-        for rnd in range(1, MAX_ROUNDS + 1):
-            task.log(f"🤖 第 {rnd}/{MAX_ROUNDS} 轮 API 调用（{model}）")
+        # explore 上限 MAX_EXPLORE_ROUNDS(60) 轮；plan/lint/test 上限 MAX_ROUNDS(20) 轮。
+        # 最后一轮：提醒模型停止调工具、必须按要求输出总结，同时移除工具（强制文本输出）。
+        _max_rounds = MAX_EXPLORE_ROUNDS if task.agent_type == "explore" else MAX_ROUNDS
+        for rnd in range(1, _max_rounds + 1):
+            task.log(f"🤖 第 {rnd}/{_max_rounds} 轮 API 调用（{model}）")
+            _round_tools = tools
+            if rnd == _max_rounds:
+                _round_tools = []
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"⚠️ 现在已经是最后一轮了（第 {_max_rounds} 轮），你必须按照要求输出："
+                        "停止调用任何工具，直接给出最终总结（## Explore Summary / ## Plan Summary 等格式），"
+                        "覆盖任务要求的所有要点，不要遗漏。"
+                    ),
+                })
             try:
                 result = call_ai_api_sse(
                     question="",
                     messages=messages,
-                    tools=tools,
+                    tools=_round_tools,
                     ai_tools_prompt="",
                     user_home_dir=mem_home,
                     memory_block="",
@@ -570,7 +615,7 @@ class ExploreManager:
                     "is_error": _is_err,
                 })
 
-        # 轮次耗尽
+        # 轮次耗尽（防御：最后一轮已强制输出总结，正常不会走到这里）
         task.status = "error"
         task.error = f"max rounds ({MAX_ROUNDS}) exceeded"
         task.log("❌ " + task.error[:70])
@@ -593,8 +638,8 @@ def run_agent(agent_type: str = "explore", prompt: str = "", name: str = "",
               tasks: Optional[List[str]] = None,
               wait: bool = True) -> List[ExploreTask]:
     """
-    派发子代理任务（1~3 个，类型：explore / plan / lint / test）：
-    - tasks 数组 → 每项一个子代理（最多 3 个）
+    派发子代理任务（1~5 个，类型：explore / plan / lint / test）：
+    - tasks 数组 → 每项一个子代理（最多 5 个）
     - count > 1 → 尝试按编号/分隔符拆分 prompt；拆不动则同题并行 count 份
     - sync 模式：wait=True 阻塞至全部完成；wait=False 由调用方轮询等待（UI 刷新用）
     - async 立即返回

@@ -156,12 +156,21 @@ def _match_perm_rule(path: str) -> Optional[str]:
 def _should_resolve(path: str) -> bool:
     if not path or path == ".":
         return False
-    if path.startswith("/") and _is_in_virtual_root(path):
+    # 特殊路径（/dev/null、真实存在的 /dev/* 等）是显式白名单：真实存在、不转虚拟，
+    # 优先级高于「存在任一就解析」规则
+    if _is_special_real_path(path):
         return False
-    # ..  /  ~  -  ./  ../  都需要解析
+    if path.startswith("/"):
+        if _is_in_virtual_root(path):
+            return False  # 已在虚拟沙箱内 → 无需解析
+        # 存在任意一个就解析：解析后命中虚拟根（候选存在）或未解析命中真实根；
+        # 两者都不存在 → 不解析、原样放行（如 /api —— 可能是网络接口 URL）
+        _candidate = os.path.realpath(os.path.join(ROOT_DIR, path.lstrip("/")))
+        return os.path.exists(_candidate) or os.path.exists(path)
+    # ..  ~  -  ./  ../ 需要解析
     if path == "..":
         return True
-    return path.startswith(("/", "~", "-", "./", "../"))
+    return path.startswith(("~", "-", "./", "../"))
 
 
 # === 特殊路径：真实存在，不转虚拟路径 ===
@@ -261,6 +270,11 @@ def resolve_path(path: str) -> str:
     if _is_root_overlap():
         return path
 
+    # 先判断是否需要解析（不走缓存：不解析的路径即使旧缓存命中也不得映射，
+    # 避免 /api 这类路径在 TTL 内被旧缓存条目错误解析到虚拟根）
+    if not _should_resolve(path):
+        return path
+
     # 检查缓存
     if path in PATH_RESOLVE_CACHE:
         cached, ts, cwd = PATH_RESOLVE_CACHE[path]
@@ -275,9 +289,6 @@ def resolve_path(path: str) -> str:
             return FORBIDDEN_MSG
         _add_to_path_cache(path, resolved, time.time(), os.getcwd())
         return resolved
-
-    if not _should_resolve(path):
-        return path
 
     # 优先使用C库
     if C_LIB_AVAILABLE:
@@ -312,11 +323,14 @@ def _resolve_path_python_fallback(path: str) -> str:
     """Python实现的路径解析fallback"""
     if path == "/":
         base = ROOT_DIR
+        path = ""  # 不置空则 join(base, "/") 直接返回 "/"，误判越界
     elif path == "~":
         base = USER_HOME_DIR
+        path = ""
     elif path == "-":
         oldpwd = os.environ.get("OLDPWD", USER_HOME_DIR)
         base = oldpwd
+        path = ""
     elif path.startswith("~/"):
         base = USER_HOME_DIR
         path = path[2:]

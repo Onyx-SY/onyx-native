@@ -1426,7 +1426,7 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ),
         _make_tool(
             "submit_plan",
-            "提交多步骤计划给用户确认；plan 与 steps 二选一。确认后才可执行；复杂任务必须先提交计划。",
+            "提交计划给用户确认（硬性要求：任何修改文件/删除/移动/复制或执行命令的任务，必须先调用本工具并获确认，系统才会放行写类工具）。plan 与 steps 二选一；确认后按步骤执行。",
             {
                 "plan": {"type": "string", "description": "Markdown 格式的计划描述"},
                 "steps": {
@@ -1488,16 +1488,16 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
 
         _make_tool(
             "Agent",
-            "启动子代理（隔离上下文，总结后喂回主 AI）。类型：explore=只读调查；plan=规划（只读+git）；lint=代码分析（可经安全管线跑分析命令）；test=测试（可经安全管线跑测试）。explore/plan 完全只读、自动执行无需用户确认；lint/test 需显式批准。适合大规模只读调查或可并行子任务——主上下文只接收总结，注意不要滥用。可指定 1~3 个任务并行。mode=sync 阻塞等待总结；mode=async 立即返回，完成后结果自动注入会话。",
+            "启动子代理（隔离上下文，总结后喂回主 AI）。类型：explore=只读调查；plan=规划（只读+git）；lint=代码分析（可经安全管线跑分析命令）；test=测试（可经安全管线跑测试）。explore/plan 完全只读、自动执行无需用户确认；lint/test 需显式批准。适合大规模只读调查或可并行子任务——主上下文只接收总结，注意不要滥用。可指定 1~5 个任务并行（最多 5 个同时运行）。mode=sync 阻塞等待总结；mode=async 立即返回，完成后结果自动注入会话。**并行调查多个主题时，请用 `tasks` 数组在一次调用中派发，不要多次调用本工具。**",
             {
                 "description": {"type": "string", "description": "子代理任务描述"},
                 "prompt": {"type": "string", "description": "子代理的完整指令；多任务时可用 '1. ...\\n2. ...' 编号或 --- 分隔，配合 count 并行"},
                 "name": {"type": "string", "description": "可选子代理名称"},
                 "type": {"type": "string", "enum": ["explore", "plan", "lint", "test"], "description": "子代理类型（默认 explore）"},
                 "mode": {"type": "string", "enum": ["sync", "async"], "description": "sync=等待完成并返回总结；async=后台运行，完成自动注入（默认 sync）"},
-                "model": {"type": "string", "description": "可选模型名覆盖（默认与主 AI 相同模型）"},
-                "count": {"type": "integer", "description": "并行子代理数量 1~3（默认 1；tasks 存在时按 tasks 长度）"},
-                "tasks": {"type": "array", "items": {"type": "string"}, "description": "可选：1~3 个子任务数组，每个元素启动一个子代理"},
+                "model": {"type": "string", "description": "可选模型名覆盖；plan 类型未指定时默认自动升档到同系列更强模型（如 flash→pro）"},
+                "count": {"type": "integer", "description": "并行子代理数量 1~5（默认 1；tasks 存在时按 tasks 长度）"},
+                "tasks": {"type": "array", "items": {"type": "string"}, "description": "可选：1~5 个子任务数组，每个元素启动一个子代理"},
             },
             ["description", "prompt"],
             PERM_DANGER_FULL,
@@ -1763,8 +1763,17 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
     # 回传。ReadOnly 权限仅用于跳过工具门控——真正的安全确认在 handler 内部
     # （is_dangerous_command → confirm_dangerous_command）。
     native.append(_make_tool(
+        "EnvProbe",
+        "只读环境探测（秒回）。type 按任务类型动态调整探测范围：deploy=部署/批量、network=网络、python=Python 环境、build=编译链、database=数据库客户端、web=Web/Node、permission=权限专项，缺省 general=全量报告。which 查询指定命令的路径与版本（空格/逗号分隔多个；仅传 which 时输出轻量摘要）。仅用于相对郑重的任务（部署、批量操作、跨平台命令、权限敏感操作）或对环境不确定时——在规划获批后、执行命令前探测，可避免平台差异、权限限制、工具缺失导致的失败；简单命令无需探测。",
+        {
+            "type": {"type": "string", "description": "任务类型（可选，默认 general 全量），支持逗号组合多个：general=全量 / deploy=部署批量 / network=网络渗透（扫描/爆破/嗅探/无线）/ python=Python 环境 / build=编译构建 / database=数据库客户端 / web=Web 渗透（目录/漏洞/指纹）与前端 / permission=权限专项。示例：'web,network' 同时探测两者"},
+            "which": {"type": "string", "description": "可选：要查询的命令名，空格或逗号分隔多个，返回路径与版本；仅传此参数时输出轻量查询结果"},
+        },
+        [], PERM_READONLY,
+    ))
+    native.append(_make_tool(
         "RunCommand",
-        "Execute a shell command through Onyx's security pipeline. Output is captured and returned to you; dangerous commands require user confirmation.",
+        "Execute a shell command through Onyx's security pipeline. Output (stdout+stderr) and exit code are captured and returned; dangerous commands require user confirmation. Command construction rules: (1) NEVER assume tools exist — run EnvProbe first, respect platform differences (Android/Termux lacks ip/ss → use ifconfig/netstat; Windows lacks grep/uname); (2) probe before relying: `which X` or `X --version` when unsure; (3) keep output bounded — append `2>&1 | tail -50` for long-output commands; (4) one logical operation per call; chain freely with &&/||/;. Non-root: nmap -O/-sU quit entirely — avoid them.",
         {"command": {"type": "string", "description": "Shell command to execute (single line)"}},
         ["command"], PERM_READONLY,
     ))
@@ -3206,6 +3215,316 @@ def _exec_git_branch(path: str = "") -> str:
         return f"❌ git branch 错误: {e}"
 
 
+# ──────────────────── 环境探测工具执行器 ────────────────────
+
+# EnvProbe 探测的常用工具清单（shutil.which 逐个确认，秒回）
+_ENV_PROBE_TOOLS = [
+    "python3", "python", "pip", "pip3", "git", "curl", "wget",
+    "nmap", "netstat", "ss", "ping", "ifconfig", "ip", "arp", "lsof", "fuser",
+    "tar", "unzip", "gzip", "gcc", "make", "node", "npm", "npx", "java", "go",
+    "docker", "kubectl", "sqlite3", "redis-cli", "mysql", "psql", "dig",
+    "nslookup", "host", "openssl", "base64", "xxd", "od", "hexdump", "jq", "nc",
+    "socat", "tshark", "tcpdump", "msfconsole", "hydra", "sqlmap", "nikto",
+    "gobuster", "ffuf", "john", "hashcat", "busybox", "toybox", "termux-info",
+    "bash", "zsh", "fish", "sh",
+]
+
+# ── EnvProbe 任务类型：type 参数决定探测范围（sections）+ 工具子集 + 专属探测 ──
+# sections 可选块：system / user / network / disk / tools；tools=None 表示全量清单；
+# extra 为 (标签, 命令) 列表，命令失败静默跳过。
+_ENV_PROBE_TYPES = {
+    "general": {
+        "sections": ["system", "user", "network", "disk", "tools"],
+        "tools": None,
+        "extra": [],
+    },
+    "deploy": {
+        "sections": ["system", "user", "network", "disk", "tools"],
+        "tools": ["python3", "pip", "git", "curl", "wget", "tar", "unzip", "gzip",
+                  "docker", "kubectl", "sqlite3", "openssl", "bash", "node", "npm",
+                  "go", "gcc", "make", "systemctl"],
+        "extra": [("内存", "free -h 2>/dev/null | head -3"),
+                  ("CPU 核数", "nproc 2>/dev/null")],
+    },
+    "network": {
+        "sections": ["system", "user", "network", "tools"],
+        "tools": ["curl", "wget", "nmap", "zenmap", "masscan", "netstat", "ss",
+                  "ping", "ifconfig", "ip", "arp", "arp-scan", "netdiscover",
+                  "lsof", "fuser", "ncat", "nc", "socat", "dig", "nslookup", "host",
+                  "dnsenum", "dnsrecon", "fierce", "dnsmap", "theHarvester",
+                  "subfinder", "amass", "nuclei", "tshark", "tcpdump", "wireshark",
+                  "ettercap", "bettercap", "responder", "hydra", "medusa", "ncrack",
+                  "patator", "snmpwalk", "onesixtyone", "nbtscan", "enum4linux",
+                  "smbmap", "smbclient", "aircrack-ng", "airodump-ng", "aireplay-ng",
+                  "reaver", "crunch", "wifite", "macchanger", "proxychains", "msfconsole"],
+        "extra": [("监听端口", "ss -tln 2>/dev/null | head -10 || netstat -tln 2>/dev/null | head -10"),
+                  ("无线接口", "iwconfig 2>/dev/null | head -6")],
+    },
+    "python": {
+        "sections": ["system", "user", "tools"],
+        "tools": ["python3", "python", "pip", "pip3", "uv", "poetry", "conda",
+                  "pytest", "flake8", "mypy", "ruff"],
+        "extra": [("pip", "python3 -m pip --version 2>/dev/null | head -1"),
+                  ("关键包", "python3 -c \"import importlib.util as _i; print([m for m in ('flask','django','requests','rich','bs4','lxml','numpy','pandas') if _i.find_spec(m)] or '无')\" 2>/dev/null")],
+    },
+    "build": {
+        "sections": ["system", "user", "disk", "tools"],
+        "tools": ["gcc", "g++", "clang", "make", "cmake", "ninja", "go", "rustc",
+                  "cargo", "node", "npm", "npx", "java", "ld", "meson", "pkg-config"],
+        "extra": [("gcc", "gcc --version 2>/dev/null | head -1"),
+                  ("go", "go version 2>/dev/null"),
+                  ("node", "node --version 2>/dev/null"),
+                  ("rustc", "rustc --version 2>/dev/null")],
+    },
+    "database": {
+        "sections": ["system", "tools"],
+        "tools": ["sqlite3", "mysql", "mysqld", "psql", "redis-cli", "mongod",
+                  "mongo", "mongosh", "clickhouse-client", "duckdb"],
+        "extra": [("sqlite3", "sqlite3 --version 2>/dev/null | head -1"),
+                  ("mysql", "mysql --version 2>/dev/null"),
+                  ("psql", "psql --version 2>/dev/null"),
+                  ("redis", "redis-cli --version 2>/dev/null")],
+    },
+    "web": {
+        "sections": ["system", "network", "tools"],
+        "tools": ["node", "npm", "npx", "pnpm", "yarn", "bun", "curl", "wget",
+                  "nginx", "apache2", "httpd", "php", "openssl", "sqlmap", "nikto",
+                  "gobuster", "ffuf", "dirb", "dirsearch", "feroxbuster", "wpscan",
+                  "whatweb", "wafw00f", "xsstrike", "commix", "dalfox", "arjun",
+                  "paramspider", "jwt_tool", "nuclei", "httpx", "subfinder", "amass",
+                  "katana", "gau", "burpsuite", "zaproxy", "beef-xss", "msfvenom",
+                  "searchsploit", "msfconsole"],
+        "extra": [("node", "node --version 2>/dev/null"),
+                  ("npm", "npm --version 2>/dev/null"),
+                  ("nginx", "nginx -v 2>&1 | head -1"),
+                  ("php", "php --version 2>/dev/null | head -1"),
+                  ("本地 Web 端口", "ss -tln 2>/dev/null | grep -E ':(80|443|8000|8080|3000|5000|8888|9000) ' | head -8 || netstat -tln 2>/dev/null | grep -E ':(80|443|8000|8080|3000|5000|8888|9000) ' | head -8")],
+    },
+    "permission": {
+        "sections": ["system", "user", "tools"],
+        "tools": ["sudo", "su", "doas", "chmod", "chown", "setfacl", "getfacl",
+                  "openssl", "ssh", "gpg"],
+        "extra": [("完整身份", "id 2>/dev/null"),
+                  ("SELinux", "getenforce 2>/dev/null")],
+    },
+}
+
+
+def _env_probe_run(cmd: str, timeout: int = 3) -> str:
+    """EnvProbe 内部探测：subprocess 快速执行，失败静默。"""
+    import subprocess as _sp
+    try:
+        _r = _sp.run(cmd, shell=True, capture_output=True, text=True,
+                     errors="replace", timeout=timeout)
+        return ((_r.stdout or "").strip() + "\n" + (_r.stderr or "").strip()).strip()
+    except Exception:
+        return ""
+
+
+def _env_section_system() -> List[str]:
+    import platform as _pf
+    lines = ["### 系统", f"- OS: {_pf.system()} {_pf.release()}"]
+    _ver = _pf.version() or ""
+    if _ver:
+        lines.append(f"- 版本: {_ver[:80]}")
+    lines.append(f"- 架构: {_pf.machine()}")
+    lines.append(f"- Python: {_pf.python_version()}")
+    lines.append(f"- 解释器: {sys.executable}")
+    _uname = _env_probe_run("uname -a")
+    if _uname:
+        lines.append(f"- uname: {_uname[:140]}")
+    return lines
+
+
+def _env_section_user() -> List[str]:
+    import getpass as _gp
+    lines = ["### 用户与权限"]
+    try:
+        lines.append(f"- 用户: {_gp.getuser()}")
+    except Exception:
+        pass
+    _is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    lines.append(f"- 权限: {'✅ root（可执行 -O/-sU 等特权扫描）' if _is_root else '⚠️ 普通用户（非 root）：nmap -O/-sU 会直接退出、/proc/net/* 只读受限'}")
+    lines.append(f"- 工作目录: {os.getcwd()}")
+    lines.append(f"- 用户目录: {os.path.expanduser('~')}")
+    lines.append(f"- Shell: {os.environ.get('SHELL') or os.environ.get('ComSpec') or '?'}")
+    _lang = os.environ.get("LANG") or os.environ.get("LC_ALL") or ""
+    lines.append(f"- locale: {_lang or '(未设置)'}")
+    return lines
+
+
+def _env_section_network() -> List[str]:
+    lines = ["### 网络"]
+    _iface = _env_probe_run("ip -o addr 2>/dev/null | grep -v ' lo ' | head -5") or \
+             _env_probe_run("ifconfig 2>/dev/null | grep -E '^(eth|wlan|en|wl|br|docker|virbr)|inet ' | head -12")
+    if _iface:
+        lines.append(f"- 接口/地址:\n{_iface[:500]}")
+    else:
+        lines.append("- 接口: （无法枚举：无 ip/ifconfig 或权限受限）")
+    _route = _env_probe_run("ip route 2>/dev/null | head -4") or \
+             _env_probe_run("route -n 2>/dev/null | head -6")
+    if _route:
+        lines.append(f"- 路由:\n{_route[:300]}")
+    else:
+        lines.append("- 路由: （无法读取）")
+    return lines
+
+
+def _env_section_disk() -> List[str]:
+    _df = _env_probe_run("df -h 2>/dev/null | head -6")
+    if not _df:
+        return []
+    return ["### 磁盘", f"```\n{_df}\n```"]
+
+
+def _env_section_tools(tools: Optional[List[str]] = None) -> List[str]:
+    import shutil as _sh
+    _list = tools if tools else _ENV_PROBE_TOOLS
+    _avail, _missing = [], []
+    for _t in _list:
+        (_avail if _sh.which(_t) else _missing).append(_t)
+    return ["### 命令可用性",
+            f"- ✅ 可用 ({len(_avail)}): {', '.join(_avail)}",
+            f"- ❌ 缺失 ({len(_missing)}): {', '.join(_missing)}"]
+
+
+# which 参数允许的命令名字符（拒绝 shell 元字符，防注入）
+_ENV_WHICH_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.\+/]+$")
+
+
+def _env_probe_parse_types(probe_type: str) -> List[str]:
+    """解析逗号分隔的 type 列表：去重保序；非法项忽略，全非法或空 → ['general']。"""
+    _ts = []
+    for _t in re.split(r"[,，\s]+", probe_type or ""):
+        _t = _t.strip().lower()
+        if _t in _ENV_PROBE_TYPES and _t not in _ts:
+            _ts.append(_t)
+    return _ts or ["general"]
+
+
+def _env_probe_which_lines(which: str) -> List[str]:
+    """指定命令查询：shutil.which 找路径 + 无 shell 参数列表取版本（--version/-V/-v）。"""
+    import shutil as _sh
+    import subprocess as _sp
+    _cmds = [c for c in re.split(r"[,，\s]+", which or "") if c.strip()]
+    if not _cmds:
+        return []
+    lines = ["### 指定命令查询"]
+    for _c in _cmds[:10]:  # 上限 10 个，防滥用
+        if not _ENV_WHICH_NAME_RE.fullmatch(_c):
+            lines.append(f"- ⚠️ {_c[:40]}: 非法命令名（仅支持单个命令名，不能带参数）")
+            continue
+        _p = _sh.which(_c)
+        if not _p:
+            lines.append(f"- ❌ {_c}: 未找到（PATH 中不存在）")
+            continue
+        _ver = ""
+        for _flag in ("--version", "-V", "-v"):
+            try:
+                _r = _sp.run([_p, _flag], capture_output=True, text=True,
+                             errors="replace", timeout=2)
+                _out = ((_r.stdout or "").strip() + " " + (_r.stderr or "").strip()).strip()
+                if _out:
+                    _ver = _out.splitlines()[0][:80]
+                    break
+            except Exception:
+                continue
+        if _ver:
+            lines.append(f"- ✅ {_c}: {_p}（{_ver}）")
+        else:
+            lines.append(f"- ✅ {_c}: {_p}")
+    return lines
+
+
+def _exec_env_probe(probe_type: str = "", which: str = "") -> str:
+    """EnvProbe：按 AI 指定的任务类型动态探测环境（只读，秒回）。
+
+    - type=general（缺省）：全量报告（OS/架构/内核/Python/权限/网络/磁盘/工具表）
+    - type=deploy/network/python/build/database/web/permission：只探测相关块 +
+      该类型专属命令（版本/端口等），省 token
+    - type 支持逗号组合多个（如 'web,network'）：sections/tools/extra 取并集
+    - which=cmd1,cmd2：查询指定命令的路径与版本；仅传 which（未显式给 type）时
+      输出轻量结果（系统摘要 + 查询），不跑全量
+    """
+    _ts = _env_probe_parse_types(probe_type)
+    _explicit = bool((probe_type or "").strip())
+
+    # 轻量模式：只查命令（未显式指定 type）
+    if (which or "").strip() and not _explicit:
+        _lines = ["## 📡 环境探测（轻量查询）", ""] + _env_section_system()
+        _lines.append("")
+        _lines += _env_probe_which_lines(which)
+        return "\n".join(_lines)
+
+    lines = ["## 📡 环境探测报告", ""]
+    _secs_order = ["system", "user", "network", "disk", "tools"]
+    if "general" in _ts:
+        # general 参与组合 → sections/tools 取全量，extra 取其余类型的并集
+        _wanted = set(_secs_order)
+        _tools = None
+        _extra = []
+        for _t in _ts:
+            for _e in _ENV_PROBE_TYPES[_t].get("extra") or []:
+                if _e not in _extra:
+                    _extra.append(_e)
+    else:
+        _wanted = set()
+        _tools = []
+        _extra = []
+        for _t in _ts:
+            _cfg = _ENV_PROBE_TYPES[_t]
+            _wanted.update(_cfg["sections"])
+            for _tt in _cfg.get("tools") or []:
+                if _tt not in _tools:
+                    _tools.append(_tt)
+            for _e in _cfg.get("extra") or []:
+                if _e not in _extra:
+                    _extra.append(_e)
+        if not _tools:
+            _tools = None
+
+    _secs = {
+        "system": _env_section_system,
+        "user": _env_section_user,
+        "network": _env_section_network,
+        "disk": _env_section_disk,
+        "tools": lambda: _env_section_tools(_tools),
+    }
+    for _s in _secs_order:
+        if _s not in _wanted:
+            continue
+        _lines_block = _secs[_s]()
+        if _lines_block:
+            lines += _lines_block
+            lines.append("")
+    # 类型专属探测（多类型时取并集）
+    if _extra:
+        lines.append(f"### 专属探测（{','.join(_ts)}）")
+        for _label, _cmd in _extra:
+            _out = _env_probe_run(_cmd)
+            if _out:
+                lines.append(f"- {_label}:\n{_out[:300]}")
+        lines.append("")
+    # 附加指定命令查询
+    if (which or "").strip():
+        _w = _env_probe_which_lines(which)
+        if _w:
+            lines += _w
+            lines.append("")
+    # ── 动态反思要点：仅当探测到实际缺口时提示，避免每轮重复静态反思 ──
+    import shutil as _sh_tip
+    _tips = []
+    if not _sh_tip.which("ss") and _sh_tip.which("netstat"):
+        _tips.append("ss 缺失 → 端口/连接查询改用 netstat")
+    if not _sh_tip.which("ip") and _sh_tip.which("ifconfig"):
+        _tips.append("ip 缺失 → 接口/路由查询改用 ifconfig")
+    if not _sh_tip.which("grep"):
+        _tips.append("grep 缺失（Windows 环境）→ 用 findstr 替代")
+    if _tips:
+        lines.append("> 反思要点：" + "；".join(_tips))
+    return "\n".join(lines)
+
+
 def _exec_enter_plan_mode() -> str:
     """进入计划模式。通过修改全局标记实现。"""
     try:
@@ -3437,6 +3756,17 @@ def _exec_run_command(command: str) -> str:
         return f"命令执行失败: {e}"
 
 
+def _format_run_command_result(cmd: str, rc, captured: str) -> str:
+    """RunCommand 工具结果结构化：命令 / 退出码 / 执行结果。
+
+    AI 可见（tool role 消息）与转录落盘共用；rc 为 None 表示命令未经过
+    subprocess 执行（内置命令/被拦截），显示 "-"。
+    """
+    _rc = "-" if rc is None else str(rc)
+    _out = (captured or "").strip() or "(无输出)"
+    return f"命令: {cmd}\n退出码: {_rc}\n执行结果:\n{_out}"
+
+
 def set_subagent_command_executor(fn: Callable) -> None:
     """注入命令执行器（handle_ai 内的闭包：capture + parse_and_execute + 危险命令拒绝）。"""
     global _SUBAGENT_COMMAND_EXECUTOR
@@ -3505,6 +3835,9 @@ def _exec_agent(description: str, prompt: str, name: str = "",
                 _refresh_subagent_status(_subagent_mod)
                 _subagent_mod.get_manager().wait_any(timeout=0.3)  # 事件驱动等待（完成即醒）
             _refresh_subagent_status(_subagent_mod, final=True)
+            # ── 排空已完成任务：sync 模式总结已直接作为工具结果返回，
+            # 若不移除，下一轮开始时的收集器会把总结再次注入上下文（重复注入）。
+            _subagent_mod.get_manager().drain_done(_tasks)
         if mode == "async":
             ids = ", ".join(t.id for t in _tasks)
             names = ", ".join(f"「{t.name}」" for t in _tasks)
@@ -3578,6 +3911,39 @@ def _exec_web_search(query: str, allowed_domains: list = None) -> str:
 
 # 计划系统已简化为纯引导模式（不再跟踪步骤状态）
 _PLAN_MODE_ACTIVE = False  # 全局 plan 模式标记
+
+# ── 硬性规划门禁：修改类工具执行前必须先 submit_plan 并经用户确认 ──
+# 每次用户新输入（handle_ai 调用）重置为 False；用户在 submit_plan 弹窗确认后置 True。
+_PLAN_APPROVED = False
+PLAN_GATE_TOOLS = frozenset({
+    "write_file", "edit_file", "UndoLastEdit",
+    "delete_file", "delete_directory", "move_file", "copy_file", "create_directory",
+})
+
+
+def set_plan_approved(approved: bool) -> None:
+    """设置当前任务计划是否已获用户确认（确认后放行修改类工具）。"""
+    global _PLAN_APPROVED
+    _PLAN_APPROVED = approved
+
+
+def is_plan_approved() -> bool:
+    """当前任务计划是否已获用户确认。"""
+    return _PLAN_APPROVED
+
+# ── 规划子代理门禁：写类工具放行前必须先经 Agent(type="plan") 完成规划 ──
+_PLAN_PREPARED = False
+
+
+def set_plan_prepared(prepared: bool) -> None:
+    """设置当前任务是否已由 Agent(type="plan") 规划子代理产出计划。"""
+    global _PLAN_PREPARED
+    _PLAN_PREPARED = prepared
+
+
+def is_plan_prepared() -> bool:
+    """当前任务是否已完成规划子代理规划。"""
+    return _PLAN_PREPARED
 
 # ── 任务管理系统全局注册表 ──
 _TASK_STORAGE_DIR = os.path.join(os.path.expanduser("~"), ".ai_s", "tasks")
@@ -3653,6 +4019,7 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "search_file":  lambda p: _exec_search_file(p.get("pattern", ""), p.get("path", None)),
         # ── 搜索与发现 ──
         "ToolSearch":   lambda p: _exec_tool_search(p.get("query", "")),
+        "EnvProbe":     lambda p: _exec_env_probe(p.get("type", ""), p.get("which", "")),
         "Skill":        lambda p: _exec_skill(p.get("skill", ""), p.get("args", "")),
         # ── 计划与任务 ──
         "submit_plan":   lambda p: json.dumps({"plan": p.get("plan", ""), "steps": p.get("steps", [])}, ensure_ascii=False),
@@ -4495,21 +4862,22 @@ def handle_ai(
                 return f"⛔ 命令被拒绝（危险命令 [{_cmd_name}]，子代理无权执行）"
             with _SUBAGENT_CMD_LOCK:
                 _captured = ""
+                _rc = None
                 with capture_command_output() as (_out_catcher, _err_catcher):
                     _out_catcher._ai_triggered = True
                     _exe_mod = sys.modules.get('lib.terminal.exe')
                     if _exe_mod:
                         _exe_mod.AI_EXECUTION_MODE = True
+                        _exe_mod.AI_LAST_EXIT_CODE = None
                     try:
                         if parse_and_execute:
                             parse_and_execute(_cmd)
                     finally:
                         if _exe_mod:
                             _exe_mod.AI_EXECUTION_MODE = False
+                            _rc = getattr(_exe_mod, "AI_LAST_EXIT_CODE", None)
                     _captured = (_out_catcher.get_output() + "\n" + _err_catcher.get_output()).strip()
-            if _captured:
-                return f"$ {_cmd}\n{_captured}"
-            return f"$ {_cmd}\n(无输出)"
+            return _format_run_command_result(_cmd, _rc, _captured)
         except Exception as _e:
             return f"命令执行失败: {_e}"
     try:
@@ -4542,21 +4910,22 @@ def handle_ai(
                 return f"⛔ 命令包含被禁止的语法，已被拦截：{_cmd[:200]}"
             with _SUBAGENT_CMD_LOCK:
                 _captured = ""
+                _rc = None
                 with capture_command_output() as (_out_catcher, _err_catcher):
                     _out_catcher._ai_triggered = True
                     _exe_mod = sys.modules.get('lib.terminal.exe')
                     if _exe_mod:
                         _exe_mod.AI_EXECUTION_MODE = True
+                        _exe_mod.AI_LAST_EXIT_CODE = None
                     try:
                         if parse_and_execute:
                             parse_and_execute(_cmd)
                     finally:
                         if _exe_mod:
                             _exe_mod.AI_EXECUTION_MODE = False
+                            _rc = getattr(_exe_mod, "AI_LAST_EXIT_CODE", None)
                     _captured = (_out_catcher.get_output() + "\n" + _err_catcher.get_output()).strip()
-            if _captured:
-                return f"$ {_cmd}\n{_captured}"
-            return f"$ {_cmd}\n(无输出)"
+            return _format_run_command_result(_cmd, _rc, _captured)
         except Exception as _e:
             return f"命令执行失败: {_e}"
     try:
@@ -4964,6 +5333,10 @@ def handle_ai(
     global _AI_INTERRUPTED
     _AI_INTERRUPTED = False
 
+    # 硬性规划门禁：新用户输入 = 新任务 → 重置计划批准状态（需重新 submit_plan）
+    set_plan_approved(False)
+    set_plan_prepared(False)  # 规划子代理状态同样重置（需重新 Agent(type="plan") 规划）
+
     # _MANUAL_COMPACT_REQUESTED 通过 _mcp_shared 模块属性访问，无需 global
 
     current_session_id = request_id
@@ -4973,6 +5346,7 @@ def handle_ai(
     _user_input_round = False  # 本轮是否有真正的用户输入（library 记录去重用）
     interaction_count = 0
     _pending_plan = ""  # 来自 submit_plan 工具调用的计划文本（跨循环持久化）
+    _pending_tool_logs: List[str] = []  # 待落盘的工具结果记录（交互记录写完后按顺序 flush，保证顺序正确）
     plan_confirmed = False  # Plan 模式：计划是否已获用户确认
     _plan_warned = False          # Plan 模式警告是否已注入记忆（每会话仅一次，避免每轮重复插入段落）
     _plan_block_count = 0         # Plan 模式连续拦截计数（>=2 时直接询问用户，防止无提示无限循环）
@@ -4994,6 +5368,20 @@ def handle_ai(
                 f.write(f"Session ID: {current_session_id}\n"
                         f"Record time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                         f"{'=' * 60}\n")
+
+    def _flush_pending_tool_logs():
+        """把缓存的工具结果记录追加到 library 文件（在交互记录落盘之后，保持时间顺序）。"""
+        if not _pending_tool_logs:
+            return
+        try:
+            from .ai_lib.storage import get_ai_session_library_dir as _gld
+            _rp = os.path.join(_gld(_mem_home), f"{current_session_id}.txt")
+            with open(_rp, "a", encoding="utf-8") as _f:
+                for _seg in _pending_tool_logs:
+                    _f.write(f"\n\n{_seg}\n")
+            _pending_tool_logs.clear()
+        except Exception:
+            pass
     
     # ── last_prompt_tokens 清零（每场对话独立） ──
     _thread_locals.last_prompt_tokens = 0
@@ -5874,6 +6262,7 @@ def handle_ai(
                 # 计划正文保留在历史中，每轮以缓存命中价（约 1/10）回传，前缀保持稳定。
                 _pending_plan = ""
                 plan_confirmed = True
+                set_plan_approved(True)  # 硬性规划门禁：用户确认计划 → 放行修改类工具
                 continue_asking = True
                 continue
 
@@ -5969,9 +6358,41 @@ def handle_ai(
         # 处理 AI 工具调用（原生 function calling）
         if tool_calls:
             try:
+                # ── Agent 并行预派发：同一轮多个 Agent 调用先全部丢进后台线程 ──
+                # 主 AI 常发多个独立的 Agent 工具调用（各自 sync），逐个执行会严格串行
+                # （第一个阻塞到完成，第二个才开始）。预派发后主循环 join 取结果，
+                # 总耗时 = max(各 Agent) 而非 sum；结果仍按 tool_calls 顺序回填。
+                _agent_futures = {}
+                _agent_out = {}
+                for _ai, _atc in enumerate(tool_calls):
+                    if _atc.get("name") != "Agent":
+                        continue
+                    _ap_str = _atc.get("params_str", "")
+                    _ap = {}
+                    try:
+                        if _ap_str.strip().startswith("{"):
+                            _ap = json.loads(_ap_str.strip())
+                        else:
+                            _ap = _parse_tool_params(_ap_str, _atc.get("body", ""))
+                    except Exception:
+                        _ap = {}
+
+                    def _agent_worker(_idx, _params):
+                        try:
+                            _a_ok, _a_out = execute_mcp_tool(
+                                "Agent", _params, "filesystem", _current_user_mode,
+                                path_validator=_mcp_path_validator)
+                        except Exception as _e:
+                            _a_ok, _a_out = False, f"tool execution error: {_e}"
+                        _agent_out[_idx] = (_a_ok, _a_out)
+
+                    _t = threading.Thread(target=_agent_worker, args=(_ai, _ap), daemon=True)
+                    _t.start()
+                    _agent_futures[_ai] = _t
                 _tc_pending = list(tool_calls)
                 while _tc_pending:
                     tc = _tc_pending.pop(0)
+                    _tc_i = len(tool_calls) - len(_tc_pending) - 1
                     tool_name = tc.get("name", "")
                     tool_params_str = tc.get("params_str", "")
                     tool_body = tc.get("body", "")
@@ -6026,11 +6447,24 @@ def handle_ai(
                             # 路径/参数完整显示，绝不截断 —— 用户需要看到具体改的是哪个文件
                             _param_preview = f" {_key}={_val}"
                             break
+                    # Agent 多任务：一次调用可并行派发 N 个子代理（tasks 数组或 count>1），
+                    # 在工具名上标出数量，避免视觉上像只有一个。
+                    _agent_n = 0
+                    if tool_name == "Agent":
+                        _t_list = params.get("tasks")
+                        if isinstance(_t_list, list) and _t_list:
+                            _agent_n = len(_t_list)
+                        else:
+                            try:
+                                _agent_n = max(1, int(params.get("count", 1) or 1))
+                            except (TypeError, ValueError):
+                                _agent_n = 1
                     # 只有工具名带 mcp_/mcp__ 前缀的才是真正的 MCP 工具
                     # （build_native_tools 统一命名为 mcp_<tool>，见 mcp_prefixed）。
                     # 其余一律是内置工具，不标 MCP。
                     _tag = " [MCP]" if tool_name.startswith("mcp_") else ""
-                    console.print(f"  [bold green]🔧 {_tool_display_name}{_tag}[/]{_param_preview}")
+                    _agent_mark = f" ×{_agent_n}" if _agent_n > 1 else ""
+                    console.print(f"  [bold green]🔧 {_tool_display_name}{_agent_mark}{_tag}[/]{_param_preview}")
 
                     # 流式执行：用 Status spinner 展示工具运行过程
                     # 交互式工具（choose_ask 选项菜单 + 自由输入框）不包 spinner：
@@ -6049,9 +6483,35 @@ def handle_ai(
                         if tool_name == "Agent":
                             global _SUBAGENT_STATUS
                             _SUBAGENT_STATUS = _status if _status_started else None
-                        # 先尝试内置 handler，走不通再走 MCP
-                        ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
-                                                      path_validator=_mcp_path_validator)
+                        # ── 硬性规划门禁：修改类工具必须先经规划子代理规划 + submit_plan 用户确认 ──
+                        if tool_name in PLAN_GATE_TOOLS and not (is_plan_prepared() and is_plan_approved()):
+                            if not is_plan_prepared():
+                                ok, output = False, (
+                                    f"⛔ 规划门禁：`{tool_name}` 是修改类工具，当前任务尚未完成规划。"
+                                    f"请先调用 `Agent(type=\"plan\", description=..., prompt=...)` 规划子代理"
+                                    f"（只读分析，自动使用同系列更强模型）产出实施计划，"
+                                    f"再用 `submit_plan` 提交给用户确认。确认前不要重试被拒绝的工具。"
+                                )
+                            else:
+                                ok, output = False, (
+                                    f"⛔ 规划门禁：计划已由规划子代理产出，但尚未获得用户确认。"
+                                    f"请调用 `submit_plan` 提交计划（目标/涉及文件/分步步骤/验证方式），"
+                                    f"等待用户确认后再执行 `{tool_name}`。"
+                                )
+                        elif tool_name == "Agent" and _tc_i in _agent_futures:
+                            # Agent：join 预派发线程取并行结果（顺序不变）
+                            try:
+                                _agent_futures[_tc_i].join()
+                            except Exception:
+                                pass
+                            ok, output = _agent_out.get(_tc_i, (False, "Agent 结果丢失"))
+                        else:
+                            # 先尝试内置 handler，走不通再走 MCP
+                            ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
+                                                          path_validator=_mcp_path_validator)
+                        # ── 规划子代理完成 → 记录已规划状态（写类工具放行条件之一）──
+                        if ok and tool_name == "Agent" and str(params.get("type", "")).lower() == "plan":
+                            set_plan_prepared(True)
                         # ── 采集工具结果 ──
                         if ok and tool_name in LIB_CAPTURE_TOOLS:
                             try:
@@ -6103,8 +6563,19 @@ def handle_ai(
                             output = output[:_MAX_TOOL_OUTPUT // 2] + f"\n\n…[truncated {len(output) - _MAX_TOOL_OUTPUT} bytes of {len(output)} total]…\n\n" + output[-_MAX_TOOL_OUTPUT // 2:]
                         tool_results.append(output)
                         # 灰字显示简短结果
-                        short = output[:100] + ("..." if len(output) > 100 else "")
-                        console.print(f"   → {short}", style="dim")
+                        if tool_name == "Agent" and ("】总结】" in output or "】失败】" in output):
+                            # 多任务 Agent：按「【…子代理「…」总结/失败】」分栏逐条显示，
+                            # 避免多个子代理的结果挤在一个 100 字符截断里，视觉上像只有一个。
+                            _blocks = re.split(r"(?=\n?【[^】]*子代理「[^」]*」(?:总结|失败)】)", output)
+                            for _blk in _blocks:
+                                _blk = _blk.strip()
+                                if not _blk:
+                                    continue
+                                _blk_short = _blk[:100] + ("..." if len(_blk) > 100 else "")
+                                console.print(f"   → {_blk_short}", style="dim")
+                        else:
+                            short = output[:100] + ("..." if len(output) > 100 else "")
+                            console.print(f"   → {short}", style="dim")
                     else:
                         err_msg = f"❌ 工具执行失败: {output}"
                         tool_results.append(err_msg)
@@ -6230,18 +6701,44 @@ def handle_ai(
                                 break
                         if _summary_lines:
                             _res = _summary_lines[0] + "\n_(正文已省略，使用 MemoryRead 重新查询)_"
+                    # RunCommand 结构化展示：命令 / 退出码 / 执行结果 分栏（普通人可读）
+                    if _tn == "RunCommand":
+                        _cmd_shown = ""
+                        try:
+                            _tc_params = json.loads(tc.get("params_str") or "{}")
+                            _cmd_shown = str(_tc_params.get("command", "")).strip()
+                        except Exception:
+                            _cmd_shown = ""
+                        _rc_shown, _out_shown = "", _res
+                        if isinstance(_res, str) and _res.startswith("命令: "):
+                            _n1 = _res.find("\n")
+                            _n2 = _res.find("\n", _n1 + 1) if _n1 >= 0 else -1
+                            if _n1 > 0 and _n2 > 0 and _res[_n1 + 1:_n2].startswith("退出码: "):
+                                _rc_shown = _res[_n1 + 1:_n2][len("退出码: "):].strip()
+                                _out_shown = _res[_n2 + 1:]
+                                if _out_shown.startswith("执行结果:"):
+                                    _out_shown = _out_shown[len("执行结果:"):].lstrip("\n")
+                                _out_shown = _out_shown.strip("\n")
+                        _log_lines.append(f"- **工具**: `{_tn}`")
+                        if _cmd_shown:
+                            _log_lines.append(f"  - **命令**: `{_cmd_shown}`")
+                        if _rc_shown:
+                            _log_lines.append(f"  - **退出码**: {_rc_shown}")
+                        _log_lines.append(f"  - **执行结果**:")
+                        _log_lines.append(f"    ```")
+                        _out_body = _out_shown or "(无输出)"
+                        for _l in _out_body.split("\n"):
+                            _log_lines.append(f"    {_l}")
+                        _log_lines.append(f"    ```")
+                        continue
                     _log_lines.append(f"- **工具**: `{_tn}`")
                     _log_lines.append(f"  ```")
                     _log_lines.append(f"  {_res}")
                     _log_lines.append(f"  ```")
                 _log_text = "\n".join(_log_lines)
-                _, record_path = get_latest_ai_session(user_home_dir, current_session_id)
-                if record_path:
-                    try:
-                        with open(record_path, "a", encoding="utf-8") as f:
-                            f.write(f"\n\n{_log_text}\n")
-                    except Exception:
-                        pass
+                # 顺序策略：工具结果先缓存，等「交互记录」（用户提问+AI回复）落盘后再 flush，
+                # 保证文件里顺序为「交互记录 → 该次交互的过程（工具结果）」，而非倒序。
+                _pending_tool_logs.append(_log_text)
 
         # ── AI 纯文本回复 → 追加 assistant 消息 ──
         _ai_txt = (ai_result.get("txt", "") or "").strip()
@@ -6483,6 +6980,7 @@ def handle_ai(
                 if interaction_count == 1:
                     record_ai_session(_mem_home, current_session_id, initial_question, final_ai_result, "", cmd_results, referenced_memory_uuid or "")
                     _user_input_round = False  # 首轮提问已由 record_ai_session 记录，消费标记
+                    _flush_pending_tool_logs()  # 交互记录落盘后按顺序补写工具结果
                 else:
                     existing_content, record_path = get_latest_ai_session(_mem_home, current_session_id)
                     if existing_content and record_path:
@@ -6518,6 +7016,7 @@ def handle_ai(
                                 f.write(new_content)
                         except Exception:
                             pass
+                        _flush_pending_tool_logs()  # 交互记录落盘后按顺序补写工具结果
         else:
             if not ai_ask.strip():
                 final_ai_result = ai_result.copy()
@@ -6531,6 +7030,7 @@ def handle_ai(
                 if interaction_count == 1:
                     record_ai_session(_mem_home, current_session_id, initial_question, final_ai_result, "", {}, referenced_memory_uuid or "")
                     _user_input_round = False  # 首轮提问已由 record_ai_session 记录，消费标记
+                    _flush_pending_tool_logs()  # 交互记录落盘后按顺序补写工具结果
                 else:
                     existing_content, record_path = get_latest_ai_session(_mem_home, current_session_id)
                     if existing_content and record_path:
@@ -6560,6 +7060,7 @@ def handle_ai(
                                 f.write(new_content)
                         except Exception:
                             pass
+                        _flush_pending_tool_logs()  # 交互记录落盘后按顺序补写工具结果
         
         if not ai_ask.strip():
             if tag:
@@ -6689,3 +7190,4 @@ def handle_ai(
     import signal as _signal
     _signal.signal(_signal.SIGINT, _original_sigint)
     cleanup_output_cache()
+    _flush_pending_tool_logs()  # 兜底：确保工具结果记录落盘（中断/提前退出路径）

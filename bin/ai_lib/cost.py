@@ -104,6 +104,44 @@ def resolve_default_model(platform: str) -> str:
         return ""
 
 
+def resolve_smarter_model(platform: str, base_model: str = "") -> str:
+    """
+    同系列中比 base_model 更聪明的模型（按单价取更高档，取最近一档）。
+
+    规划子代理（plan）默认档：主 AI 用 flash 时 → 返回 pro；已是最高档或
+    无价格表时返回 base_model 本身，保证调用方拿到的永远是有效模型名。
+    """
+    try:
+        from .config import _SUPPORTED_PLATFORMS
+        info = _SUPPORTED_PLATFORMS.get(platform or "", {})
+        models = info.get("models") or []
+        prices = info.get("price_per_million_tokens") or {}
+        if not models or not base_model:
+            return base_model or ""
+        if not prices:
+            # 无价格表：取模型列表里排在 base 之后的第一个（列表按强弱排序）
+            try:
+                idx = models.index(base_model)
+                if idx + 1 < len(models):
+                    return models[idx + 1]
+            except ValueError:
+                pass
+            return base_model
+        def _total(m: str) -> float:
+            p = prices.get(m)
+            if not p:
+                return float("inf")
+            return float(p.get("input", 0.0)) + float(p.get("output", 0.0))
+        base_total = _total(base_model)
+        if base_total == float("inf"):
+            return base_model
+        # 取比 base 更贵且价格最低的一档（最近的上一档，如 flash → pro）
+        candidates = sorted([m for m in models if _total(m) > base_total], key=_total)
+        return candidates[0] if candidates else base_model
+    except Exception:
+        return base_model
+
+
 def estimate_cost(platform: str, model: str,
                   prompt_tokens: int, completion_tokens: int) -> float:
     """按解析单价估算 USD 费用。"""

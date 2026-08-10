@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "exit": {
+      "Chinese": "用法：exit\n功能：安全退出Onyx Toolbox程序，释放占用的系统资源\n注意：执行后将关闭当前终端会话\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: exit\nFunction: Safely exit Onyx Toolbox program and release system resources\nNote: This will close the current terminal session\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

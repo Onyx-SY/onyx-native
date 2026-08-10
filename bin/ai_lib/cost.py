@@ -13,6 +13,7 @@ cost.py — 成本估算模块（models.json 价格表驱动）
 
 import os
 import json
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -150,6 +151,11 @@ def estimate_cost(platform: str, model: str,
             completion_tokens / 1_000_000 * pout)
 
 
+# append_cost_record 并发写保护：web_search 弱 AI 摘要等多线程调用会对 cost.json
+# 做 read-modify-write，无锁会有丢失更新/文件损坏风险。
+_COST_APPEND_LOCK = threading.Lock()
+
+
 def append_cost_record(mem_root: str, platform: str, model: str,
                        prompt_tokens: int, completion_tokens: int) -> None:
     """
@@ -157,33 +163,34 @@ def append_cost_record(mem_root: str, platform: str, model: str,
     与 ai_interactive 原 _append_cost_record 行为一致（5000 条上限），
     但单价改为 models.json 动态解析。
     """
-    try:
-        cost_path = os.path.join(mem_root, ".ai_s", "cost.json")
-        cost = estimate_cost(platform, model, prompt_tokens, completion_tokens)
-        record = {
-            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "platform": platform,
-            "model": model,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "cost_usd": round(cost, 6),
-        }
-        data: List[dict] = []
-        if os.path.exists(cost_path):
-            try:
-                with open(cost_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, list):
-                    data = loaded
-            except Exception:
-                data = []
-        data.append(record)
-        data = data[-5000:]
-        os.makedirs(os.path.dirname(cost_path), exist_ok=True)
-        with open(cost_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    with _COST_APPEND_LOCK:
+        try:
+            cost_path = os.path.join(mem_root, ".ai_s", "cost.json")
+            cost = estimate_cost(platform, model, prompt_tokens, completion_tokens)
+            record = {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "platform": platform,
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost_usd": round(cost, 6),
+            }
+            data: List[dict] = []
+            if os.path.exists(cost_path):
+                try:
+                    with open(cost_path, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, list):
+                        data = loaded
+                except Exception:
+                    data = []
+            data.append(record)
+            data = data[-5000:]
+            os.makedirs(os.path.dirname(cost_path), exist_ok=True)
+            with open(cost_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
 
 def cost_disclaimer(lang: str = "chinese") -> str:

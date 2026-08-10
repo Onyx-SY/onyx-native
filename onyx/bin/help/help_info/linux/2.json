@@ -1,0 +1,28 @@
+{
+  "命令": {
+    "gzip": {
+      "Chinese": "用法：gzip [选项] <文件...>\n功能：压缩/解压.gz文件（Linux/Termux专属）\n核心选项：-d（解压）、-v（显示进度）、-k（保留原文件）\n示例：\n  gzip test.txt - 压缩为test.txt.gz\n  gzip -d test.txt.gz - 解压文件\n适配系统：仅Linux/Termux",
+      "English": "Usage: gzip [option] <file...>\nFunction: Compress/decompress .gz files (Linux/Termux only)\nCore options: -d (decompress), -v (verbose), -k (keep original file)\nExamples:\n  gzip test.txt - Compress to test.txt.gz\n  gzip -d test.txt.gz - Decompress file\nCompatible systems: Linux/Termux only"
+    },
+    "find": {
+      "Chinese": "用法：find <路径> [选项] <条件>\n功能：查找文件或目录（Linux/Termux专属）\n核心选项：-name（按名称查找）、-type（按类型查找）、-size（按大小查找）、-mtime（按修改时间查找）\n示例：\n  find /home -name \"*.txt\" - 查找/home下所有txt文件\n  find /tmp -type f -size +10M - 查找/tmp下大于10M的文件\n适配系统：仅Linux/Termux",
+      "English": "Usage: find <path> [option] <condition>\nFunction: Search for files and directories (Linux/Termux only)\nCore options: -name (search by name), -type (search by type), -size (search by size), -mtime (search by modification time)\nExamples:\n  find /home -name \"*.txt\" - Find all txt files under /home\n  find /tmp -type f -size +10M - Find files larger than 10M under /tmp\nCompatible systems: Linux/Termux only"
+    },
+    "grep": {
+      "Chinese": "用法：grep [选项] <匹配模式> <文件...>\n功能：文本内容搜索工具（Linux/Termux专属）\n核心选项：-i（忽略大小写）、-v（反向匹配）、-n（显示行号）、-r（递归搜索目录）\n示例：\n  grep \"error\" log.txt - 在log.txt中查找error关键字\n  grep -r \"TODO\" /project - 递归搜索/project下所有含TODO的文件\n适配系统：仅Linux/Termux",
+      "English": "Usage: grep [option] <pattern> <file...>\nFunction: Text search utility (Linux/Termux only)\nCore options: -i (ignore case), -v (invert match), -n (show line numbers), -r (recursive search)\nExamples:\n  grep \"error\" log.txt - Search for 'error' in log.txt\n  grep -r \"TODO\" /project - Recursively search 'TODO' in /project\nCompatible systems: Linux/Termux only"
+    },
+    "tar": {
+      "Chinese": "用法：tar [选项] <归档文件名> <文件/目录...>\n功能：打包压缩/解压文件（Linux/Termux专属）\n核心选项：-c（创建归档）、-x（解压归档）、-f（指定文件名）、-z（gzip压缩）、-j（bzip2压缩）\n示例：\n  tar -czf backup.tar.gz /data - 打包并压缩/data目录\n  tar -xzf backup.tar.gz - 解压gzip压缩的归档文件\n适配系统：仅Linux/Termux",
+      "English": "Usage: tar [option] <archive name> <file/directory...>\nFunction: Archive and compress/decompress files (Linux/Termux only)\nCore options: -c (create archive), -x (extract archive), -f (specify filename), -z (gzip compression), -j (bzip2 compression)\nExamples:\n  tar -czf backup.tar.gz /data - Archive and compress /data directory\n  tar -xzf backup.tar.gz - Extract gzip-compressed archive\nCompatible systems: Linux/Termux only"
+    },
+    "ps": {
+      "Chinese": "用法：ps [选项]\n功能：查看当前运行的进程（Linux/Termux专属）\n核心选项：-aux（显示所有进程详细信息）、-ef（全格式显示进程）\n示例：\n  ps aux - 查看系统所有进程\n  ps -ef | grep python - 查找Python相关进程\n适配系统：仅Linux/Termux",
+      "English": "Usage: ps [option]\nFunction: View current running processes (Linux/Termux only)\nCore options: -aux (show all processes with details), -ef (full-format process listing)\nExamples:\n  ps aux - View all system processes\n  ps -ef | grep python - Find Python-related processes\nCompatible systems: Linux/Termux only"
+    },
+    "kill": {
+      "Chinese": "用法：kill [选项] <进程ID>\n功能：终止指定进程（Linux/Termux专属）\n核心选项：-9（强制终止）、-15（正常终止，默认）\n示例：\n  kill 1234 - 正常终止PID为1234的进程\n  kill -9 5678 - 强制终止PID为5678的进程\n适配系统：仅Linux/Termux",
+      "English": "Usage: kill [option] <process ID>\nFunction: Terminate specified process (Linux/Termux only)\nCore options: -9 (force termination), -15 (normal termination, default)\nExamples:\n  kill 1234 - Terminate process with PID 1234 normally\n  kill -9 5678 - Force terminate process with PID 5678\nCompatible systems: Linux/Termux only"
+    }
+  }
+}

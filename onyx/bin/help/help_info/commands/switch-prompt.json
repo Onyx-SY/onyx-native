@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "switch-prompt": {
+      "Chinese": "用法：switch-prompt <list/preview/switch> [参数]\n功能：管理终端命令提示符样式（支持查看、预览、切换）\n支持样式：ubuntu、kali、onyx、zsh、def（默认）、skali、termux\n子命令说明：\n  switch-prompt list                - 列出所有可用提示符样式及当前使用状态\n  switch-prompt preview <样式名>    - 预览指定样式的显示效果（例：switch-prompt preview zsh）\n  switch-prompt switch <样式名>     - 切换为指定样式（例：switch-prompt switch kali）\n示例：\n  switch-prompt list                - 查看全部可用样式\n  switch-prompt preview onyx        - 预览onyx风格提示符\n  switch-prompt switch def          - 恢复默认提示符样式\n适配系统：Windows/Linux/Termux全兼容\n注意：样式切换后即时生效，配置自动保存（重启程序不失效）",
+      "English": "Usage: switch-prompt <list/preview/switch> [parameter]\nFunction: Manage terminal command prompt styles (support list, preview, switch)\nSupported styles: ubuntu, kali, onyx, zsh, def (default), skali, termux\nSubcommand Description:\n  switch-prompt list                - List all available prompt styles and current status\n  switch-prompt preview <style>     - Preview the display effect of the specified style (e.g.: switch-prompt preview zsh)\n  switch-prompt switch <style>      - Switch to the specified style (e.g.: switch-prompt switch kali)\nExamples:\n  switch-prompt list                - View all available styles\n  switch-prompt preview onyx        - Preview onyx-style prompt\n  switch-prompt switch def          - Restore default prompt style\nCompatible systems: Windows/Linux/Termux\nNote: Style changes take effect immediately, and configurations are saved automatically (persists after program restart)"
+    }
+  }
+}

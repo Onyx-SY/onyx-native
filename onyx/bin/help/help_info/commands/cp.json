@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "cp": {
+      "Chinese": "用法：cp [选项] <源路径> <目标路径>\n功能：复制文件或目录（Windows等效 copy/xcopy 命令）\n核心选项：-r（递归复制目录）、-i（覆盖前提示）、-v（显示进度）、-f（强制覆盖）\n适配系统：Windows/Linux/Termux全兼容（Windows自动映射copy/xcopy功能）",
+      "English": "Usage: cp [option] <source path> <target path>\nFunction: Copy files or directories (equivalent to copy/xcopy on Windows)\nCore options: -r (recursive copy), -i (prompt before overwrite), -v (verbose output), -f (force overwrite)\nCompatible systems: Windows/Linux/Termux (auto-map to copy/xcopy on Windows)"
+    }
+  }
+}

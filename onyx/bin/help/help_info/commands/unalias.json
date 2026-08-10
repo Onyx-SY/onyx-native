@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "unalias": {
+      "Chinese": "用法：unalias <别名> | unalias -a\n功能：删除命令别名\n示例：\n  unalias ll - 删除ll别名\n  unalias -a - 删除所有别名\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: unalias <alias> | unalias -a\nFunction: Remove command aliases\nExamples:\n  unalias ll - Remove alias ll\n  unalias -a - Remove all aliases\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

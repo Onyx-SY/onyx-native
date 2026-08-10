@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "autocmd": {
+      "Chinese": "用法：autocmd add <命令> | autocmd remove <ID> | autocmd list\n功能：管理开机自启命令\n示例：\n  autocmd add ls - 添加ls命令到自启列表\n  autocmd list - 查看所有自启命令（含ID）\n  autocmd remove 1 - 删除ID为1的自启命令\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: autocmd add <command> | autocmd remove <ID> | autocmd list\nFunction: Manage startup commands\nExamples:\n  autocmd add ls - Add ls to startup list\n  autocmd list - View all startup commands (with ID)\n  autocmd remove 1 - Delete startup command with ID 1\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

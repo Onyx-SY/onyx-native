@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "source": {
+      "Chinese": "用法：source <文件路径> 或 . <文件路径>\n功能：在当前Shell会话中执行指定脚本文件的命令，脚本中的环境变量、函数定义直接作用于当前会话，不会创建子进程\n使用规则：\n  1. 支持相对路径和绝对路径，文件需有可读权限\n  2. 执行的脚本无需添加可执行权限（chmod +x）\n  3. 常用作加载环境配置、自定义函数、变量导出的脚本\n  4. 与直接执行脚本不同，修改的环境变量在执行后仍有效\n示例：\n  source ~/.bashrc 加载bash的环境配置文件\n  source ./env.sh 执行当前目录下的环境配置脚本\n  . /etc/profile 简写形式，加载系统全局配置\n  source ./functions.sh 加载自定义的Shell函数脚本",
+      "English": "Usage: source <file path> or . <file path>\nFunction: Execute the commands of the specified script file in the current Shell session, the environment variables and function definitions in the script take effect directly on the current session without creating a child process\nUsage rules:\n  1. Support relative and absolute paths, the file must have read permission\n  2. The executed script does not need to add executable permission (chmod +x)\n  3. Commonly used to load scripts for environment configuration, custom functions and variable export\n  4. Different from executing the script directly, the modified environment variables remain valid after execution\nExamples:\n  source ~/.bashrc Load the bash environment configuration file\n  source ./env.sh Execute the environment configuration script in the current directory\n  . /etc/profile Short form, load the system global configuration\n  source ./functions.sh Load the custom Shell function script"
+    }
+  }
+}

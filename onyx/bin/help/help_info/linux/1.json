@@ -1,0 +1,16 @@
+{
+  "命令": {
+    "sudo": {
+      "Chinese": "用法：sudo <命令/工具> [参数]\n功能：以管理员权限执行命令（Linux/Termux专属）\n示例：\n  sudo rm -rf /tmp/test - 强制删除系统目录\n  sudo nmap -sS 192.168.1.1 - 管理员权限执行端口扫描\n适配系统：仅Linux/Termux",
+      "English": "Usage: sudo <command/tool> [arguments]\nFunction: Execute command with elevated privileges (Linux/Termux only)\nExamples:\n  sudo rm -rf /tmp/test - Force delete system directory\n  sudo nmap -sS 192.168.1.1 - Run port scan with admin privileges\nCompatible systems: Linux/Termux only"
+    },
+    "du": {
+      "Chinese": "用法：du [选项] <文件/目录...>\n功能：统计磁盘占用空间（Linux/Termux专属）\n核心选项：-h（人类可读格式）、-s（仅显示总计）、-c（显示总和）\n示例：du -sh /home - 统计/home目录总大小\n适配系统：仅Linux/Termux",
+      "English": "Usage: du [option] <file/directory...>\nFunction: Estimate file space usage (Linux/Termux only)\nCore options: -h (human-readable), -s (summary only), -c (total sum)\nExample: du -sh /home - Calculate total size of /home directory\nCompatible systems: Linux/Termux only"
+    },
+    "chmod": {
+      "Chinese": "用法：chmod <权限> <文件/目录...>\n功能：修改文件/目录权限（Linux/Termux专属，仅adv模式可用）\n权限格式：数字（755/644）或符号（u+x/g-w）\n示例：\n  chmod 755 test.sh - 赋予脚本可执行权限\n  chmod u+rwx file.txt - 给所有者读写执行权限\n适配系统：仅Linux/Termux",
+      "English": "Usage: chmod <permission> <file/directory...>\nFunction: Change file/directory permissions (Linux/Termux only, adv mode only)\nPermission format: Numeric (755/644) or Symbolic (u+x/g-w)\nExamples:\n  chmod 755 test.sh - Grant executable permission to script\n  chmod u+rwx file.txt - Grant read/write/execute to owner\nCompatible systems: Linux/Termux only"
+    }
+  }
+}

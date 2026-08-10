@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "import": {
+      "Chinese": "用法：import <系统命令名>\n功能：将系统命令导入到工具箱命令映射表\n示例：import nano - 导入nano命令到工具箱\n适配系统：Windows/Linux/Termux全兼容（导入对应系统命令）",
+      "English": "Usage: import <system command name>\nFunction: Import system commands into toolbox mapping table\nExamples: import nano - Import nano command to toolbox\nCompatible systems: Windows/Linux/Termux (import corresponding system commands)"
+    }
+  }
+}

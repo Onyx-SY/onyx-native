@@ -152,6 +152,8 @@ static int match_perm_rule(const char* path, char* out_resolved) {
 static int should_resolve(const char* path, const char* root_abs) {
     if (!path) return 0;
     if (strcmp(path, ".") == 0) return 0;
+    /* 与 Python 层 _should_resolve 对齐：裸 `..` 也需要解析（相对 cwd 回退） */
+    if (strcmp(path, "..") == 0) return 1;
 
     if (path[0] == '/' && is_in_root_dir(path, root_abs))
         return 0;

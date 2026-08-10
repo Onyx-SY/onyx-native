@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "mktool": {
+      "Chinese": "用法：mktool -n <工具名> -l <语言>\n功能：创建新的工具箱插件工具，自动生成配置/权限文件\n支持语言：python/c/cpp/bash（Windows推荐python）\n工具路径：tools/plugin/<工具名>\n示例：mktool -n port_scanner -l python\n适配系统：Windows/Linux/Termux全兼容（Windows自动处理路径分隔符）",
+      "English": "Usage: mktool -n <tool name> -l <language>\nFunction: Create new toolbox plugin tool (auto-generate config/perm files)\nSupported languages: python/c/cpp/bash (Python recommended for Windows)\nTool path: tools/plugin/<tool name>\nExample: mktool -n port_scanner -l python\nCompatible systems: Windows/Linux/Termux (auto-handle path separators on Windows)"
+    }
+  }
+}

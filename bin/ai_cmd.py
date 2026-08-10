@@ -98,7 +98,8 @@ from .ai_lib.helpers import (
     handle_sleep_wait, set_ai_thread_priority, confirm_plan,
     parse_arguments, show_loading,
     init_ai_dangerous_commands, load_ai_dangerous_commands,
-    is_dangerous_command, confirm_dangerous_command, has_forbidden_syntax,
+    init_ai_extra_dangerous_commands, load_ai_extra_dangerous_commands,
+    is_dangerous_command, is_extra_dangerous_command, confirm_dangerous_command, has_forbidden_syntax,
 )
 from .ai_lib.mcp_state import (
     _AI_INTERRUPTED, _MCP_DEBUG, _MCP_DEBUG_START,
@@ -111,8 +112,8 @@ from .ai_lib.mcp_state import (
 )
 # _MANUAL_COMPACT_REQUESTED 通过 mcp_state 模块属性访问（避免 from-import 拷贝问题）
 from .ai_lib import mcp_state as _mcp_shared
-# MCP 客户端（协议 + 服务器管理）
-from .ai_lib import mcp_client
+# （mcp_client.py 为历史遗留模块，当前无调用方；MCP 进程注册表由本文件自管，
+#   见下方“旧版兼容变量”——避免与 mcp_state 双注册表）
 # AI 虚拟沙盒（虚拟根 / 映射为 cwd，文件工具路径拦截与脱敏）
 from .ai_lib import sandbox
 from .ai_lib.sandbox import SandboxBlockError as _SandboxBlockError
@@ -274,18 +275,10 @@ def _migrate_mcp_config_if_needed(user_home_dir: str = None) -> str:
             pass
 
     # 没有模板，创建默认配置（使用 {CWD} 模板标记）
+    # 默认零 MCP：不预置任何 server（避免默认下载/连接；需要时用 ai -mcp install <name>）
     default_config = {
-        "_comment": "Onyx MCP server registry — per-user config",
-        "servers": {
-            "filesystem": {
-                "name": "filesystem",
-                "description": "文件系统操作 (read/write/edit/list/search)",
-                "command": "npx",
-                "args": ["-y", "@modelcontextprotocol/server-filesystem", "{CWD}"],
-                "auto_start": False,
-                "installed": False
-            }
-        }
+        "_comment": "Onyx MCP server registry — 默认零 MCP（不自动下载/连接）。需要时用 ai -mcp install <name> 显式安装",
+        "servers": {}
     }
     _ensure_dir(os.path.dirname(user_path))
     with open(user_path, "w", encoding="utf-8") as f:
@@ -493,58 +486,14 @@ def is_mcp_server_running(name: str) -> bool:
     return False
 
 
-def _ensure_npx_available() -> bool:
-    """检查 npx 是否可用"""
-    try:
-        result = subprocess.run(
-            ["npx", "--version"], capture_output=True, text=True, timeout=10
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-# ── 推荐自动安装的 MCP 服务器列表 ──
-_AUTO_INSTALL_MCP = [
-    {"name": "fetch", "desc": "网页抓取/HTTP API"},
-]
-
 def install_default_mcp_server(user_home_dir: str = None, auto_extras: bool = False) -> bool:
-    """标记 filesystem 为已安装。auto_extras=True 时同时安装推荐 MCP 模块。"""
-    home = user_home_dir or USER_HOME_DIR
-    config = _load_mcp_config(home)
-    fs_config = config.get("servers", {}).get("filesystem", {})
+    """默认零 MCP：不再自动注册/标记任何 server（取消默认下载/连接）。
 
-    if not _ensure_npx_available():
-        return False
-
-    # 1. 确保 filesystem 已标记
-    with MCP_INSTALL_LOCK:
-        config2 = _load_mcp_config(home)
-        fs2 = config2.get("servers", {}).get("filesystem", {})
-        if not fs2.get("installed", False):
-            fs_config["installed"] = True
-            config.setdefault("servers", {})["filesystem"] = fs_config
-            _save_mcp_config(config, home)
-
-    # 2. 自动安装推荐 MCP（仅在 preload 时触发，避免阻塞 AI 调用）
-    if auto_extras:
-        for mcp_info in _AUTO_INSTALL_MCP:
-            mcp_name = mcp_info["name"]
-            mcp_desc = mcp_info["desc"]
-            cfg = _load_mcp_config(home)
-            if mcp_name in cfg.get("servers", {}):
-                continue
-            pkg = f"@modelcontextprotocol/server-{mcp_name}"
-            console.print(_mcp_t(f"📦 自动安装 {mcp_name} ({mcp_desc})...", f"📦 Auto-installing {mcp_name} ({mcp_desc})..."), style="dim")
-            result = install_mcp_server_cmd(mcp_name, pkg)
-            if "✅" in result:
-                try:
-                    connect_mcp_server(mcp_name, home)
-                except Exception:
-                    pass
-
-    return True
+    需要 MCP server 时请用 `ai -mcp install <name>` 显式安装；
+    显式安装且 auto_start=true 的 server 由 preload_mcp_servers 在
+    mcp_enabled=true 时预载。
+    """
+    return False
 
 
 def connect_mcp_server(name: str = "filesystem", user_home_dir: str = None) -> Optional[subprocess.Popen]:
@@ -894,24 +843,42 @@ def preload_mcp_servers(user_home_dir: str = None) -> None:
     def _do_preload():
         try:
             _migrate_mcp_config_if_needed(home)
-            # 默认不自动安装推荐 MCP（fetch 等）：只有用户显式配置的 server 才会连接。
-            # auto_extras=False → 跳过 _AUTO_INSTALL_MCP 安装，仅保证 filesystem 可用。
-            if install_default_mcp_server(home, auto_extras=False):
-                connect_mcp_server("filesystem", home)
-                tools = _discover_mcp_tools("filesystem", home)
-                if tools:
-                    console.print(_mcp_t(
-                        f"✅ MCP 预加载: {len(tools)} 个工具就绪",
-                        f"✅ MCP preload: {len(tools)} tools ready"
-                    ), style="dim")
-                    # 标记预加载已完成，后续启动跳过
-                    try:
-                        flag_path = os.path.join(os.path.expanduser("~"), ".cache", "onyx", "mcp_preloaded.flag")
-                        _ensure_dir(os.path.dirname(flag_path))
-                        with open(flag_path, "w") as _f:
-                            _f.write(str(time.time()))
-                    except Exception:
-                        pass
+            # ── 默认零 MCP：不自动下载/连接任何 server ──
+            # 仅当用户显式启用 MCP（manage set mcp true 写入 mcp_enabled 文件）
+            # 且配置中存在 installed+auto_start 的 server 时才预载（用户配置驱动）。
+            _enabled = False
+            try:
+                _ep = os.path.join(home, ".config", "onyx", "mcp_enabled")
+                if os.path.exists(_ep) and os.path.isfile(_ep):
+                    with open(_ep, "r") as _f:
+                        _enabled = _f.read().strip().lower() in ("true", "1", "yes", "on")
+            except Exception:
+                pass
+            if not _enabled:
+                return
+            _cfg = _load_mcp_config(home) or {}
+            for _sname, _sinfo in (_cfg.get("servers") or {}).items():
+                try:
+                    if _sinfo.get("installed") and _sinfo.get("auto_start"):
+                        if connect_mcp_server(_sname, home):
+                            _tools = _discover_mcp_tools(_sname, home)
+                            if _tools:
+                                console.print(_mcp_t(
+                                    f"✅ MCP 预加载: {len(_tools)} 个工具就绪（{_sname}）",
+                                    f"✅ MCP preload: {len(_tools)} tools ready ({_sname})"
+                                ), style="dim")
+                                # 标记预加载已完成，后续启动跳过
+                                try:
+                                    flag_path = os.path.join(os.path.expanduser("~"), ".cache", "onyx", "mcp_preloaded.flag")
+                                    _ensure_dir(os.path.dirname(flag_path))
+                                    with open(flag_path, "w") as _f:
+                                        _f.write(str(time.time()))
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
         except Exception as e:
             pass  # 预加载失败不打扰用户
 
@@ -1162,6 +1129,23 @@ def _make_tool(name: str, description: str, properties: dict, required: list,
     _desc = _i18n(f"tool_desc.{name}", _tool_lang)
     if _desc == f"tool_desc.{name}":
         _desc = description
+    # ── 权限文案自动生成：描述与强制层保持一致，防止“承诺了但没强制”──
+    # 仅当使用代码内嵌描述（无 i18n 覆盖）时追加权限声明。
+    if _desc == description and permission in (PERM_WORKSPACE_WRITE, PERM_DANGER_FULL):
+        _perm_hint = {
+            PERM_WORKSPACE_WRITE: (
+                "（写入工作区：自动放行，可用 UndoLastEdit 撤销）"
+                if _tool_lang == "chinese"
+                else " (workspace write: auto-approved, reversible via UndoLastEdit)"
+            ),
+            PERM_DANGER_FULL: (
+                "（危险操作：需用户显式批准，low/mid 模式弹确认）"
+                if _tool_lang == "chinese"
+                else " (dangerous access: requires explicit user approval in low/mid mode)"
+            ),
+        }.get(permission, "")
+        if _perm_hint:
+            _desc = _desc.rstrip() + _perm_hint
     _props = {}
     for _pkey, _pval in properties.items():
         _pval = dict(_pval)
@@ -1426,7 +1410,7 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ),
         _make_tool(
             "submit_plan",
-            "提交计划给用户确认（硬性要求：任何修改文件/删除/移动/复制或执行命令的任务，必须先调用本工具并获确认，系统才会放行写类工具）。plan 与 steps 二选一；确认后按步骤执行。",
+            "提交计划给用户确认（系统门禁：大型写操作——单次 >4KB 或本轮累计 ≥8KB——与破坏性操作（删除/移动/复制/建目录）在确认前会被拦截；小型修改可直接执行）。plan 与 steps 二选一；确认后按步骤执行。",
             {
                 "plan": {"type": "string", "description": "Markdown 格式的计划描述"},
                 "steps": {
@@ -1471,14 +1455,15 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ),
         _make_tool(
             "Config",
-            "获取或设置 Onyx 配置：get 返回当前配置，set 设置键值。",
+            "获取或设置 Onyx 配置：get 返回当前配置，set 设置键值。"
+            "注意：set 会写入 ~/.config/onyx/config.json（cwd 沙盒之外），需要用户显式批准。",
             {
                 "action": {"type": "string", "enum": ["get", "set"], "description": "操作类型"},
                 "key": {"type": "string", "description": "配置键名"},
                 "value": {"type": "string", "description": "配置值（set 时需要）"},
             },
             ["action", "key"],
-            PERM_WORKSPACE_WRITE,
+            PERM_DANGER_FULL,
         ),
 
         # ═══════════════════════════════════════════
@@ -1488,39 +1473,79 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
 
         _make_tool(
             "Agent",
-            "启动子代理（隔离上下文，总结后喂回主 AI）。类型：explore=只读调查；plan=规划（只读+git）；lint=代码分析（可经安全管线跑分析命令）；test=测试（可经安全管线跑测试）。explore/plan 完全只读、自动执行无需用户确认；lint/test 需显式批准。适合大规模只读调查或可并行子任务——主上下文只接收总结，注意不要滥用。可指定 1~5 个任务并行（最多 5 个同时运行）。mode=sync 阻塞等待总结；mode=async 立即返回，完成后结果自动注入会话。**并行调查多个主题时，请用 `tasks` 数组在一次调用中派发，不要多次调用本工具。**",
+            "启动子代理（隔离上下文，总结后喂回主 AI）。类型：explore=只读调查；plan=规划（只读+git）；lint=代码分析；test=测试；web_search_agent=联网调研（web_search 多重混合搜索+抓页）。所有类型均可经安全管线执行命令（危险命令与 Onyx 内置命令如 exit/clear/ai 不可用）。explore/plan 自动执行无需用户确认；lint/test/web_search_agent 需显式批准。适合大规模只读调查或可并行子任务——主上下文只接收总结，注意不要滥用。可指定 1~5 个任务并行（最多 5 个同时运行）。mode=sync 阻塞等待总结；mode=async 立即返回，完成后结果自动注入会话。**并行调查多个主题时，请用 `tasks` 数组在一次调用中派发，不要多次调用本工具。**",
             {
                 "description": {"type": "string", "description": "子代理任务描述"},
                 "prompt": {"type": "string", "description": "子代理的完整指令；多任务时可用 '1. ...\\n2. ...' 编号或 --- 分隔，配合 count 并行"},
                 "name": {"type": "string", "description": "可选子代理名称"},
-                "type": {"type": "string", "enum": ["explore", "plan", "lint", "test"], "description": "子代理类型（默认 explore）"},
+                "type": {"type": "string", "enum": ["explore", "plan", "lint", "test", "web_search_agent"], "description": "子代理类型（默认 explore）"},
                 "mode": {"type": "string", "enum": ["sync", "async"], "description": "sync=等待完成并返回总结；async=后台运行，完成自动注入（默认 sync）"},
                 "model": {"type": "string", "description": "可选模型名覆盖；plan 类型未指定时默认自动升档到同系列更强模型（如 flash→pro）"},
                 "count": {"type": "integer", "description": "并行子代理数量 1~5（默认 1；tasks 存在时按 tasks 长度）"},
-                "tasks": {"type": "array", "items": {"type": "string"}, "description": "可选：1~5 个子任务数组，每个元素启动一个子代理"},
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {"type": "string", "description": "任务指令（使用调用级 type/model）"},
+                            {"type": "object", "properties": {
+                                "prompt": {"type": "string", "description": "该子代理的任务指令（必填）"},
+                                "type": {"type": "string", "enum": ["explore", "plan", "lint", "test", "web_search_agent"], "description": "可选：该子代理角色（决定系统提示词与工具集），默认与调用级 type 一致"},
+                                "model": {"type": "string", "description": "可选：该子代理使用的模型"},
+                                "name": {"type": "string", "description": "可选：该子代理名称（显示用）"},
+                            }, "required": ["prompt"]},
+                        ]
+                    },
+                    "description": "可选：1~5 个子任务；每个元素可为字符串（指令）或对象（prompt + 可选 type/model/name）——每个子代理独立提示词/角色/模型，完全独立工作",
+                },
             },
             ["description", "prompt"],
             PERM_DANGER_FULL,
         ),
         _make_tool(
-            "WebFetch",
-            "获取 URL 并转为可读文本。需用户批准。",
+            "web_search",
+            "网络调研全能工具（唯一 web 工具，旧 WebSearch/WebFetch 已合并）。三模式：search=仅多引擎搜索；fetch=抓取指定 urls 的页面正文；mixed=搜索+自动抓页（默认）。用法：先 search 看 snippet 摘要判断相关性，需要正文细节再 fetch_pages/mixed；queries 建议 ≤3 个；权威站点用 allowed_domains 限定。支持多查询 × 多引擎、域名双向过滤、语言/地区/时效、安全搜索、正文长度控制、text/json 双输出。引擎可用性自动降级、结果带短时缓存，无需额外处理。可选 ai_assist=长文弱 AI 摘要开关（缺省跟随全局 web_ai_assist）。查资料、查文档、对比信息首选。自动执行。",
             {
-                "url": {"type": "string", "description": "要获取的 URL"},
-                "prompt": {"type": "string", "description": "关于获取内容的具体问题"},
+                "action": {"type": "string", "enum": ["search", "fetch", "mixed"], "description": "操作模式：search=仅搜索；fetch=仅抓取 urls 指定页面；mixed=搜索+抓取（默认）"},
+                "ai_assist": {"type": "boolean", "description": "长文弱 AI 摘要：true=长文完整交给辅助 AI 总结后返回摘要；false=关键行压缩；缺省=跟随全局开关 web_ai_assist（Config 工具设置）"},
+                "query": {"type": "string", "description": "主搜索查询（action=search/mixed 必填；fetch 模式可省略）"},
+                "queries": {"type": "array", "items": {"type": "string"}, "description": "附加查询列表（混合查资料：一次覆盖多个角度，最多 10 个）"},
+                "topics": {
+                    "type": "array",
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "该主题的搜索查询（必填）"},
+                            "engines": {"type": "array", "items": {"type": "string", "enum": ["duckduckgo", "bing"]}, "description": "该主题搜索引擎（默认继承顶层）"},
+                            "max_results": {"type": "integer", "minimum": 1, "maximum": 15, "description": "该主题条数上限（默认继承顶层）"},
+                            "fetch_pages": {"type": "boolean", "description": "该主题是否自动抓页（默认继承顶层）"},
+                            "fetch_limit": {"type": "integer", "minimum": 1, "maximum": 5, "description": "该主题抓页上限（默认继承顶层）"},
+                            "max_chars_per_page": {"type": "integer", "minimum": 500, "maximum": 8000, "description": "该主题单页字符上限（默认继承顶层）"},
+                            "ai_assist": {"type": "boolean", "description": "该主题长文摘要开关（默认继承顶层）"},
+                            "allowed_domains": {"type": "array", "items": {"type": "string"}, "description": "该主题域名白名单（默认继承顶层）"},
+                            "exclude_domains": {"type": "array", "items": {"type": "string"}, "description": "该主题域名黑名单（默认继承顶层）"},
+                        },
+                        "required": ["query"],
+                    },
+                    "description": "批量独立主题（最多 5 个）：一次并行查询多个互不相关的主题，每主题独立搜索+抓页+分栏输出；与 queries 不同——queries 是同一主题的多角度，topics 是多个独立主题",
+                },
+                "urls": {"type": "array", "items": {"type": "string"}, "description": "指定 URL 列表直接抓取正文（action=fetch 必填；mixed 时追加抓取；同样过域名过滤与 SSRF 防护）"},
+                "engines": {"type": "array", "items": {"type": "string", "enum": ["duckduckgo", "bing"]}, "description": "搜索引擎列表（默认两者都用）"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 15, "description": "每个查询每个引擎返回条数上限（默认 8）"},
+                "allowed_domains": {"type": "array", "items": {"type": "string"}, "description": "仅保留这些域名下的结果（如 github.com）"},
+                "exclude_domains": {"type": "array", "items": {"type": "string"}, "description": "排除这些域名下的结果"},
+                "language": {"type": "string", "description": "语言偏好（如 zh/en，best-effort）"},
+                "region": {"type": "string", "description": "地区偏好（如 cn-zh/us-en，best-effort）"},
+                "time_range": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "时效过滤（best-effort，仅支持的引擎生效）"},
+                "safe_search": {"type": "boolean", "description": "安全搜索：严格模式过滤成人内容（默认 false）"},
+                "fetch_pages": {"type": "boolean", "description": "搜索后自动抓取排名靠前结果的页面正文（默认 false）"},
+                "fetch_limit": {"type": "integer", "minimum": 1, "maximum": 5, "description": "自动抓取页数上限 1~5（默认 3）"},
+                "max_chars_per_page": {"type": "integer", "minimum": 500, "maximum": 8000, "description": "单页正文最大字符数（默认 3000）"},
+                "output_format": {"type": "string", "enum": ["text", "json"], "description": "输出格式：text=易读文本；json=结构化数据（默认 text）"},
+                "timeout": {"type": "integer", "minimum": 5, "maximum": 60, "description": "单请求超时秒数（默认 15）"},
             },
-            ["url", "prompt"],
-            PERM_DANGER_FULL,
-        ),
-        _make_tool(
-            "WebSearch",
-            "搜索网络获取最新信息并返回引用。需用户批准。",
-            {
-                "query": {"type": "string", "minLength": 2, "description": "搜索关键词"},
-                "allowed_domains": {"type": "array", "items": {"type": "string"}, "description": "可选限制搜索域名"},
-            },
-            ["query"],
-            PERM_DANGER_FULL,
+            [],
+            PERM_READONLY,
         ),
     ]
 
@@ -1605,11 +1630,12 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
          ["team_id"], PERM_WORKSPACE_WRITE),
 
         ("CronCreate",
-         "创建一个定时任务条目。schedule 为 cron 表达式，如 '0 * * * *'（每小时）。",
+         "创建一个定时任务条目。schedule 为 cron 表达式，如 '0 * * * *'（每小时）。"
+         "注意：定时任务到点会以 shell 形式执行 prompt，创建需要用户显式批准。",
          {"schedule": {"type": "string", "description": "cron 表达式"},
           "prompt": {"type": "string", "description": "定时执行的任务描述"},
           "description": {"type": "string", "description": "可选说明"}},
-         ["schedule", "prompt"], PERM_WORKSPACE_WRITE),
+         ["schedule", "prompt"], PERM_DANGER_FULL),
 
         ("CronList",
          "列出所有定时任务，可选仅显示启用的。",
@@ -1793,12 +1819,32 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
 # 只有 MCP 连接成功写入 registry 或 mcp 开关切换（key 变化）时才重建。
 _NATIVE_TOOLS_CACHE: Dict[str, Any] = {"key": None, "tools": None, "prompt": None}
 
+# 工具名 → x_permission 惰性映射（从冻结工具表构建一次；随 invalidate 失效）。
+# execute_mcp_tool 的权限门禁查它——避免每次工具调用都全量重建 build_native_tools()
+# （重建会重新遍历全部工具描述，且可能触发 MCP 发现/连接，是慢路径）。
+_TOOL_PERMISSION_LOOKUP: Dict[str, str] = {}
+
+
+def _get_tool_permission(tool_name: str) -> str:
+    """从缓存工具表查 x_permission，缺失时回退 ReadOnly（安全默认）。"""
+    if not _TOOL_PERMISSION_LOOKUP:
+        try:
+            _tools, _ = get_native_tools_cached(USER_HOME_DIR, True)
+            for _t in _tools:
+                _n = _t.get("function", {}).get("name", "")
+                if _n:
+                    _TOOL_PERMISSION_LOOKUP[_n] = _t.get("x_permission", PERM_READONLY)
+        except Exception:
+            pass
+    return _TOOL_PERMISSION_LOOKUP.get(tool_name, PERM_READONLY)
+
 
 def invalidate_native_tools_cache() -> None:
     """MCP 工具表变化（新连接/Registry 更新）后调用，强制下次重建。"""
     _NATIVE_TOOLS_CACHE["key"] = None
     _NATIVE_TOOLS_CACHE["tools"] = None
     _NATIVE_TOOLS_CACHE["prompt"] = None
+    _TOOL_PERMISSION_LOOKUP.clear()
 
 
 def get_native_tools_cached(user_home_dir: str, mcp_enabled: bool) -> tuple:
@@ -2810,6 +2856,9 @@ def _resolve_memory_path(path: str) -> str:
       chat/<name>          → ~/.ai_s/chat/<name>.json
       onyx_ai              → ~/.ai_s/onyx_ai.md
     记忆根跟随 get_memory_home()（project 模式 → ~/.ai_s/projects/<id>/）
+
+    边界守卫：任何路径（含 ../ 穿越与绝对路径）必须落在记忆根内，
+    越界抛 ValueError（防任意文件读取）。
     """
     home = get_memory_home()
     base = os.path.join(home, ".ai_s")
@@ -2817,19 +2866,26 @@ def _resolve_memory_path(path: str) -> str:
         name = path[5:]
         if name.endswith(".json"):
             name = name[:-5]
-        return os.path.join(base, "chat", name + ".json")
-    if path.startswith("library/"):
+        _cand = os.path.join(base, "chat", name + ".json")
+    elif path.startswith("library/"):
         uuid_part = path[8:]
         if uuid_part.endswith(".txt"):
             uuid_part = uuid_part[:-4]
-        return os.path.join(base, "library", uuid_part + ".txt")
-    if path == "onyx_ai" or path == "onyx_ai.md":
-        return os.path.join(base, "onyx_ai.md")
+        _cand = os.path.join(base, "library", uuid_part + ".txt")
+    elif path == "onyx_ai" or path == "onyx_ai.md":
+        _cand = os.path.join(base, "onyx_ai.md")
+    elif os.path.isabs(path):
+        _cand = path
+    else:
+        _cand = os.path.join(base, path)
 
-    # 完整路径直接返回
-    if os.path.isabs(path):
-        return path
-    return os.path.join(base, path)
+    # ── 边界守卫：realpath 后必须在记忆根内，否则拒绝 ──
+    _base_real = os.path.realpath(base)
+    _norm = os.path.normpath(_cand)
+    _p_real = os.path.realpath(_norm) if os.path.exists(_norm) else os.path.abspath(_norm)
+    if _p_real == _base_real or _p_real.startswith(_base_real + os.sep):
+        return _norm
+    raise ValueError(f"⛔ 记忆路径越界: '{path}' 不在记忆根 {base} 内")
 
 
 def _cache_query(key: str, result: str) -> str:
@@ -2943,6 +2999,11 @@ def _exec_memory_search(pattern: str, uuid: str = "all", context: int = 3,
             if uuid_part.endswith(".txt"):
                 uuid_part = uuid_part[:-4]
             file_path = os.path.join(base, "library", uuid_part + ".txt")
+            # ── 边界守卫：uuid 含 ../ 或绝对路径时拒绝（防穿越）──
+            _base_real = os.path.realpath(base)
+            _fp_real = os.path.realpath(file_path) if os.path.exists(file_path) else os.path.abspath(file_path)
+            if not (_fp_real == _base_real or _fp_real.startswith(_base_real + os.sep)):
+                return _i18n("mem_search_uuid_missing", "bilingual", uuid=uuid, path=file_path)
             if not os.path.exists(file_path):
                 return _i18n("mem_search_uuid_missing", "bilingual", uuid=uuid, path=file_path)
             search_targets = [file_path]
@@ -3686,10 +3747,13 @@ def _exec_config(action: str, key: str, value: str = None) -> str:
         return f"❌ Config failed: {e}"
 
 
-# ── 子代理命令执行器（由 handle_ai 注入：lint/test 子代理经同一安全管线执行命令）──
+# ── 子代理命令执行器（由 handle_ai 注入：子代理经同一安全管线执行命令）──
 _SUBAGENT_COMMAND_EXECUTOR = None
 _SUBAGENT_CMD_LOCK = threading.Lock()  # 全端子代理命令串行化（共享 PTY 防输出交错）
 _SUBAGENT_STATUS = None                # 当前 Agent 工具的 Status spinner 引用（同步模式实时刷新）
+# ── 子代理联网执行器（由 handle_ai 注入：web_search_agent 的 web 工具直接走底层实现，
+#    不逐次弹确认——批准发生在 Agent 派发时；SSRF/协议/超时防线与主 AI 一致）──
+_SUBAGENT_WEB_EXECUTOR = None
 
 # ── 主 AI 命令执行器（由 handle_ai 注入：RunCommand 工具经完整安全管线执行，
 #    危险命令弹用户确认。模块级 handler 通过 get_main_command_executor 获取）──
@@ -3730,6 +3794,7 @@ LIB_CAPTURE_TOOLS = frozenset({
     "search_files", "search_content", "ListDirectory", "DirectoryTree",
     "MemoryRead", "MemorySearch",
     "py_diagnostics", "py_symbols", "LspDiagnostics", "LspSymbols",
+    "LspHover", "LspDefinition", "LspReferences", "LspCompletion", "LspFormat",
     "GitStatus", "GitDiff", "GitLog", "GitBranch",
     # 写类
     "write_file", "edit_file", "validate_edit", "preview_edit",
@@ -3777,6 +3842,57 @@ def get_subagent_command_executor() -> Optional[Callable]:
     return _SUBAGENT_COMMAND_EXECUTOR
 
 
+def set_subagent_web_executor(fn: Callable) -> None:
+    """注入子代理联网执行器（handle_ai 内的闭包：直接调用底层 web 实现，不弹确认）。"""
+    global _SUBAGENT_WEB_EXECUTOR
+    _SUBAGENT_WEB_EXECUTOR = fn
+
+
+def get_subagent_web_executor() -> Optional[Callable]:
+    return _SUBAGENT_WEB_EXECUTOR
+
+
+def build_subagent_blocked_commands(builtin_commands: Optional[Dict] = None,
+                                    root_dir: str = None) -> set:
+    """子代理禁用的内置命令集合：Onyx BUILTIN_COMMANDS + other_terminal_cmd.json + cd。
+
+    子代理只许执行真实系统/工具命令；内置命令（exit/clear/ai/manage/sado/source、
+    export/sudo/...、cd）会篡改 REPL 状态（退出、清屏、切目录、改环境、提权），
+    一律不暴露。root_dir 为 None 时跳过配置文件加载（调用方传 ROOT_DIR）。
+    """
+    _blocked: set = set()
+    try:
+        if builtin_commands:
+            _blocked.update(str(k).lower() for k in builtin_commands.keys())
+    except Exception:
+        pass
+    try:
+        from lib.safe import load_other_terminal_commands as _load_otc
+        _otc = _load_otc(root_dir)
+        for _cmds in _otc.values():
+            for _c in _cmds:
+                _blocked.add(str(_c).lower())
+    except Exception:
+        pass
+    try:
+        from Onyx import BUILTIN_COMMANDS as _OB_C
+        if _OB_C:
+            _blocked.update(str(k).lower() for k in _OB_C.keys())
+    except Exception:
+        pass
+    _blocked.add("cd")  # shell 内置 cd 会改共享 shell CWD（Onyx 会同步回 Python）
+    _blocked.discard("")
+    return _blocked
+
+
+def extract_subagent_command_head(cmd: str) -> str:
+    """提取子代理命令首行第一个词（小写），用于内置命令拦截。"""
+    _first = (cmd or "").strip().splitlines()[0].strip() if (cmd or "").strip() else ""
+    if not _first:
+        return ""
+    return _first.split(maxsplit=1)[0].strip().lower()
+
+
 def _refresh_subagent_status(_sa_mod, final: bool = False) -> None:
     """把子代理最近活动（灰色）刷新到当前 Status spinner，证明没卡住。"""
     try:
@@ -3799,7 +3915,7 @@ def _exec_agent(description: str, prompt: str, name: str = "",
                 mode: str = "sync", model: str = "",
                 count: int = 1, tasks: list = None,
                 agent_type: str = "explore") -> str:
-    """启动子代理（explore=探索 / plan=规划 / lint=代码分析 / test=测试）。
+    """启动子代理（explore=探索 / plan=规划 / lint=代码分析 / test=测试 / web_search_agent=联网调研）。
 
     - 同步：阻塞等待完成，总结直接作为工具结果交还主 AI 上下文。
     - 异步：立即返回任务 ID；主 AI 继续其他工作，完成结果自动注入本会话。
@@ -3825,7 +3941,8 @@ def _exec_agent(description: str, prompt: str, name: str = "",
             wait=(mode != "sync"),   # sync 模式由本函数轮询等待（顺便实时刷新灰色活动尾行）
         )
         if not _tasks:
-            return "❌ Agent: 任务列表为空（请提供 prompt 或 tasks）"
+            return ("❌ Agent: 任务列表为空（请提供 prompt 或 tasks；"
+                    "若指定了 count>1，请确保 prompt 可拆分为多个编号任务或 --- 分隔段）")
         if mode == "sync":
             # ── 等待期间实时刷新灰色活动尾行（告诉用户没卡住）──
             _deadline = time.time() + _subagent_mod.SYNC_TIMEOUT
@@ -3835,9 +3952,13 @@ def _exec_agent(description: str, prompt: str, name: str = "",
                 _refresh_subagent_status(_subagent_mod)
                 _subagent_mod.get_manager().wait_any(timeout=0.3)  # 事件驱动等待（完成即醒）
             _refresh_subagent_status(_subagent_mod, final=True)
-            # ── 排空已完成任务：sync 模式总结已直接作为工具结果返回，
-            # 若不移除，下一轮开始时的收集器会把总结再次注入上下文（重复注入）。
-            _subagent_mod.get_manager().drain_done(_tasks)
+            # ── 快照状态 → 汇总 → 按同一快照排空 ──
+            # 修复竞态：原实现 drain_done 与下方汇总各读一次 status（无同步），
+            # 任务在两次读取之间完成会「双注入」（drain 时 running、汇总时 done）
+            # 或「丢失」（汇总时 running、drain 时 done）。一次观察，两个消费者。
+            _subagent_snap = [(t, t.status) for t in _tasks]
+            _subagent_mod.get_manager().drain_ids(
+                {t.id for t, _s in _subagent_snap if _s == "done"})
         if mode == "async":
             ids = ", ".join(t.id for t in _tasks)
             names = ", ".join(f"「{t.name}」" for t in _tasks)
@@ -3845,11 +3966,18 @@ def _exec_agent(description: str, prompt: str, name: str = "",
                 f"✅ 已异步启动 {len(_tasks)} 个{_label}子代理 {names}（任务ID: {ids}）。\n"
                 f"主 AI 可继续其他工作；子代理完成总结后会自动注入本会话上下文，届时再整合结论。"
             )
-        # 同步：汇总全部总结
+        # 同步：汇总全部总结（基于快照 _subagent_snap，不再二次读状态）
+        # 超时仍运行的任务不算失败：后台继续跑，完成后由收集器注入本会话
         lines = []
-        for t in _tasks:
-            if t.status == "done" and t.summary:
+        for t, _snap_status in _subagent_snap:
+            if _snap_status == "done" and t.summary:
                 lines.append(f"【{_label}子代理「{t.name}」总结】\n{t.summary}")
+            elif _snap_status in ("pending", "running"):
+                lines.append(
+                    f"【{_label}子代理「{t.name}」仍在运行】"
+                    f"等待超过 {_subagent_mod.SYNC_TIMEOUT} 秒，主 AI 可继续其他工作；"
+                    f"该子代理完成后总结会自动注入本会话上下文。"
+                )
             else:
                 lines.append(f"【{_label}子代理「{t.name}」失败】{t.error or t.status}")
         if len(lines) == 1:
@@ -3859,91 +3987,1001 @@ def _exec_agent(description: str, prompt: str, name: str = "",
         return f"❌ Agent 执行失败: {e}"
 
 
-def _exec_web_fetch(url: str, prompt: str) -> str:
-    """获取 URL 内容。"""
+def _is_private_ip(ip) -> bool:
+    """判断 IP 是否为内网/回环/链路本地/保留地址（SSRF 防护）。"""
+    return (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def _ssrf_block_reason(url: str) -> Optional[str]:
+    """2026-09 加固（M3）：检查 URL 是否指向内网/保留地址。
+
+    返回拒绝原因字符串；放行返回 None。域名会解析全部 A 记录，
+    任一记录指向内网即拒绝（防 DNS rebinding 的常见变体）。
+    """
+    from urllib.parse import urlparse as _urlparse
+    import ipaddress as _ipaddr
+    import socket as _sock
     try:
-        # 尝试使用 requests 获取
+        _u = _urlparse(url)
+        if _u.scheme not in ("http", "https"):
+            return "仅支持 http/https 协议"
+        _host = _u.hostname
+        if not _host:
+            return "URL 缺少主机名"
+        try:
+            _ip = _ipaddr.ip_address(_host)
+        except ValueError:
+            try:
+                _infos = _sock.getaddrinfo(_host, None)
+            except Exception:
+                return f"无法解析主机: {_host}"
+            for _info in _infos:
+                _ip_str = _info[4][0].split("%")[0]
+                try:
+                    _ip = _ipaddr.ip_address(_ip_str)
+                except ValueError:
+                    continue
+                if _is_private_ip(_ip):
+                    return f"域名 {_host} 解析到内网地址 {_ip_str}"
+            return None
+        if _is_private_ip(_ip):
+            return f"目标地址是内网/保留地址: {_host}"
+        return None
+    except Exception as _e:
+        return f"URL 校验失败: {_e}"
+
+
+def _http_get_text(url: str, timeout: int, headers: dict) -> Tuple[Optional[str], str]:
+    """GET 并返回页面文本：requests 优先（跟随重定向），requests 缺失时回退 curl。
+
+    返回 (text, "") 成功；(None, 错误信息) 失败。供搜索引擎页面与抓取共用，
+    保证 requests 库不可用时 web_search 依然可用（需系统有 curl）。
+    """
+    try:
         import requests as _req
-        resp = _req.get(url, timeout=15, headers={"User-Agent": "Onyx-AI/1.0"})
-        text = resp.text[:5000]
-        return f"✅ 已获取 {url} ({len(resp.text)} bytes)\n\n{text[:3000]}"
     except ImportError:
         pass
-    except Exception as e:
-        return f"❌ WebFetch '{url}' 失败: {e}"
-
-    # 回退：通过 shell curl
+    else:
+        try:
+            _resp = _req.get(url, timeout=timeout, headers=headers)
+            return _resp.text, ""
+        except Exception as _e:
+            return None, f"requests 失败: {_e}"
     try:
         import subprocess as _sp
-        result = _sp.run(["curl", "-sL", "--max-time", "10", url], capture_output=True, text=True, timeout=15)
-        if result.stdout:
-            text = result.stdout[:5000]
-            return f"✅ 已获取 {url}\n\n{text[:3000]}"
-        return f"⚠️ curl 返回空: {result.stderr[:200]}"
-    except Exception as e:
-        return f"❌ WebFetch '{url}' 全部方法失败: {e}"
+        _result = _sp.run(["curl", "-sL", "--max-time", str(timeout), url],
+                          capture_output=True, text=True, timeout=timeout + 5)
+        if _result.stdout:
+            return _result.stdout, ""
+        return None, f"curl 返回空: {_result.stderr[:200]}"
+    except Exception as _e:
+        return None, f"curl 失败: {_e}"
 
 
-def _exec_web_search(query: str, allowed_domains: list = None) -> str:
-    """搜索网络。"""
+# ═══════════════════════════════════════════════════════════════
+# web_search — 多重混合搜索（多查询 × 多引擎，去重/过滤/抓页）
+# ═══════════════════════════════════════════════════════════════
+
+_WEB_ENGINES: Tuple[str, ...] = ("duckduckgo", "bing")
+
+# web_search 并行度：搜索阶段（查询 × 引擎任务池）与抓取阶段（页面池）。
+# 串行实现总耗时 = 任务数 × 单请求；并行后 ≈ 最慢单个请求（弱 AI 摘要随抓取并行）。
+_WEB_SEARCH_WORKERS = 6
+_WEB_FETCH_WORKERS = 4
+
+# 阶段总时间预算（秒）：到点收工，不等最慢任务（超时任务标注后跳过）。
+_WEB_SEARCH_BUDGET = 12.0
+_WEB_FETCH_BUDGET = 20.0
+
+# topics 批量主题：单次调用并行查询多个独立主题（每主题独立搜索+抓页+分栏输出）
+_WEB_TOPICS_MAX = 5
+_WEB_TOPICS_WORKERS = 5
+_WEB_TOPIC_OVERRIDES = ("query", "engines", "max_results", "fetch_pages", "fetch_limit",
+                        "max_chars_per_page", "ai_assist", "allowed_domains", "exclude_domains",
+                        "language", "region", "time_range", "safe_search", "output_format",
+                        "timeout")
+
+# ── 查询增强（无外部依赖的精度提升）──
+# 英文长句去停用词生成关键词变体；中文含 ASCII 技术词时附加英文变体（技术文档英文更全）。
+_WEB_STOPWORDS_EN = frozenset({
+    "how", "to", "the", "a", "an", "is", "are", "was", "were", "what", "which", "why",
+    "when", "where", "who", "do", "does", "did", "for", "with", "of", "in", "on",
+    "at", "and", "or", "vs", "versus", "use", "using", "can", "should", "best",
+})
+
+# ── 结果重排信号（软加权，不埋没好结果）──
+_WEB_AUTHORITY_DOMAINS = frozenset({
+    "github.com", "gitlab.com", "readthedocs.io", "w3.org", "developer.mozilla.org",
+    "python.org", "nodejs.org", "nginx.org", "apache.org", "kubernetes.io", "docker.com",
+    "react.dev", "vuejs.org", "stackoverflow.com", "docs.python.org", "pypi.org",
+    "npmjs.com", "crates.io", "docs.rs", "openai.com", "anthropic.com", "microsoft.com",
+    "google.com", "apple.com", "ibm.com", "oracle.com", "cloudflare.com",
+    "deepseek.com", "aliyun.com", "tencent.com", "baidu.com", "bytedance.com",
+    "aws.amazon.com", "azure.microsoft.com", "developer.android.com",
+    "zhihu.com", "segmentfault.com", "juejin.cn", "ruanyifeng.com", "cnblogs.com",
+})
+_WEB_JUNK_DOMAIN_HINTS = ("top10", "top-10", "best10", "rank", "coupon", "deals",
+                          "vip", "free-", "-free", "download", "list")
+_WEB_JUNK_TITLE_HINTS = ("top 10", "top10", "best 10", "coupon", "discount",
+                         "免费下载", "优惠券", "福利")
+
+# ── SERP 结果缓存（进程内 LRU）：同键查询 15 分钟内直接命中，零网络请求；
+#    失败结果缓存 30 秒（防抖，避免反复打刚挂掉的引擎）。 ──
+_WEB_CACHE_TTL = 900
+_WEB_CACHE_FAIL_TTL = 30
+_WEB_CACHE_MAX = 200
+_WEB_CACHE: Dict[str, Tuple[float, float, Tuple[List[Dict], str]]] = {}  # key -> (ts, ttl, (items, err))
+_WEB_CACHE_LOCK = threading.Lock()
+
+# ── 引擎健康滑动窗口：连续 _ENGINE_DEGRADE_AFTER 次失败 → 降级 _ENGINE_DEGRADE_SECONDS
+#    （降级期跳过请求；到期自动恢复试探）。 ──
+_ENGINE_STATS_WINDOW = 10
+_ENGINE_DEGRADE_AFTER = 3
+_ENGINE_DEGRADE_SECONDS = 1800
+_WEB_ENGINE_STATS: Dict[str, List[Tuple[float, bool]]] = {}   # engine -> [(ts, ok), ...]
+_WEB_ENGINE_DEGRADED_UNTIL: Dict[str, float] = {}
+_WEB_ENGINE_LOCK = threading.Lock()
+
+
+def _ddg_url_normalize(href: str) -> str:
+    """DuckDuckGo HTML 结果链接是 /l/?uddg=<目标> 跳转，解出真实 URL。"""
+    if "uddg=" in href:
+        from urllib.parse import unquote as _unquote
+        m = re.search(r"[?&]uddg=([^&]+)", href)
+        if m:
+            return _unquote(m.group(1))
+    if href.startswith("//"):
+        href = "https:" + href
+    return href
+
+
+def _extract_ddg_results(html: str) -> List[Dict]:
+    """解析 DuckDuckGo HTML 结果页（result__a 链接 + result__snippet 摘要）。"""
+    import html as _htm
+    results = []
+    for m in re.finditer(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                         html, re.DOTALL):
+        title = _htm.unescape(re.sub(r"<[^>]+>", "", m.group(2)).strip())
+        if title:
+            results.append({"title": title, "url": _ddg_url_normalize(m.group(1)), "snippet": ""})
+    snips = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
+    for i, s in enumerate(snips[: len(results)]):
+        results[i]["snippet"] = _htm.unescape(re.sub(r"<[^>]+>", "", s).strip())
+    return results
+
+
+def _extract_lite_results(html: str) -> List[Dict]:
+    """解析 DuckDuckGo lite 端点结果页（rel=nofollow 链接 + result-snippet 摘要）。"""
+    import html as _htm
+    results = []
+    for m in re.finditer(r'<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                         html, re.DOTALL):
+        href = m.group(1)
+        if href.startswith("javascript") or "lite.duckduckgo.com" in href:
+            continue
+        title = _htm.unescape(re.sub(r"<[^>]+>", "", m.group(2)).strip())
+        if title:
+            results.append({"title": title, "url": _ddg_url_normalize(href), "snippet": ""})
+    snips = re.findall(r'class="result-snippet"[^>]*>(.*?)</td>', html, re.DOTALL)
+    for i, s in enumerate(snips[: len(results)]):
+        results[i]["snippet"] = _htm.unescape(re.sub(r"<[^>]+>", "", s).strip())
+    return results
+
+
+def _extract_bing_results(html: str) -> List[Dict]:
+    """解析 Bing 结果页（li.b_algo 内 h2>a 链接 + p 摘要）。"""
+    import html as _htm
+    results = []
+    for m in re.finditer(r'<li class="b_algo".*?</li>', html, re.DOTALL):
+        block = m.group(0)
+        am = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, re.DOTALL)
+        if not am:
+            continue
+        url = am.group(1)
+        title = _htm.unescape(re.sub(r"<[^>]+>", "", am.group(2)).strip())
+        pm = re.search(r"<p[^>]*>(.*?)</p>", block, re.DOTALL)
+        snippet = _htm.unescape(re.sub(r"<[^>]+>", "", pm.group(1)).strip()) if pm else ""
+        if url:
+            results.append({"title": title, "url": url, "snippet": snippet})
+    return results
+
+
+def _web_parallel(fn, tasks: list, workers: int, budget: float = 0.0) -> list:
+    """按输入顺序并行执行 fn(task)（线程池），返回与 tasks 同序的结果列表。
+
+    - 任务 ≤ 1 时直接串行（避免无谓线程开销）；
+    - budget > 0：总时间预算（秒），到点收工——未完成任务在结果中占位 None；
+    - 中断/异常时不阻塞等待未完成请求（残留线程随各自请求超时自然结束）。
+    """
+    if len(tasks) <= 1:
+        return [fn(t) for t in tasks]
+    import concurrent.futures as _cf
+    _ex = _cf.ThreadPoolExecutor(max_workers=max(1, min(workers, len(tasks))))
     try:
-        # 尝试通过 requests + DuckDuckGo 轻搜索
-        import requests as _req
-        import re as _re
-        search_url = f"https://html.duckduckgo.com/html/?q={_req.utils.quote(query)}"
-        resp = _req.get(search_url, timeout=15, headers={"User-Agent": "Onyx-AI/1.0"})
-        # 简单提取结果
-        snippets = _re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', resp.text, _re.DOTALL)
-        if snippets:
-            results = []
-            for s in snippets[:5]:
-                clean = _re.sub(r'<[^>]+>', '', s).strip()
-                results.append(f"- {clean}")
-            return "搜索结果:\n" + "\n".join(results)
-        return f"WebSearch 返回 {len(resp.text)} bytes，请使用更精确的查询"
-    except ImportError:
-        pass
-    except Exception as e:
-        return f"❌ WebSearch '{query}' 失败: {e}"
+        _futs = {_ex.submit(fn, t): i for i, t in enumerate(tasks)}
+        _out = [None] * len(tasks)
+        if budget <= 0:
+            for _f, _i in _futs.items():
+                _out[_i] = _f.result()
+            return _out
+        _deadline = time.time() + budget
+        for _f in _cf.as_completed(_futs):
+            if time.time() >= _deadline:
+                break
+            _i = _futs[_f]
+            try:
+                _out[_i] = _f.result()
+            except Exception:
+                _out[_i] = None
+        return _out
+    finally:
+        _ex.shutdown(wait=False, cancel_futures=True)
 
-    return "⚠️ WebSearch 不可用（需要安装 requests 库）"
+
+def _web_cache_key(engine: str, query: str, region: str, lang: str,
+                   time_range: str, safe: bool) -> str:
+    """SERP 缓存键：引擎 + 规范化查询 + 偏好参数。"""
+    _q = " ".join((query or "").lower().split())
+    return "|".join([engine, _q, region, lang, time_range, "1" if safe else "0"])
+
+
+def _web_cache_get(key: str) -> Optional[Tuple[List[Dict], str]]:
+    """读 SERP 缓存：命中且未过期 → (items, err)；否则 None（过期条目清除）。"""
+    with _WEB_CACHE_LOCK:
+        _hit = _WEB_CACHE.get(key)
+        if not _hit:
+            return None
+        _ts, _ttl, _payload = _hit
+        if time.time() - _ts > _ttl:
+            _WEB_CACHE.pop(key, None)
+            return None
+        _items, _err = _payload
+        return ([dict(i) for i in _items], _err)
+
+
+def _web_cache_put(key: str, items: List[Dict], err: str, ttl: float) -> None:
+    """写 SERP 缓存（浅拷贝防外部修改污染）；超上限淘汰最旧条目。"""
+    with _WEB_CACHE_LOCK:
+        if len(_WEB_CACHE) >= _WEB_CACHE_MAX and key not in _WEB_CACHE:
+            try:
+                _old = min(_WEB_CACHE, key=lambda _k: _WEB_CACHE[_k][0])
+                del _WEB_CACHE[_old]
+            except Exception:
+                pass
+        _WEB_CACHE[key] = (time.time(), ttl, ([dict(i) for i in items], err))
+
+
+def _web_engine_report(engine: str, ok: bool) -> None:
+    """更新引擎健康滑动窗口；最近连续 _ENGINE_DEGRADE_AFTER 次失败 → 降级。"""
+    with _WEB_ENGINE_LOCK:
+        _now = time.time()
+        _win = _WEB_ENGINE_STATS.setdefault(engine, [])
+        _win.append((_now, ok))
+        while len(_win) > _ENGINE_STATS_WINDOW:
+            _win.pop(0)
+        _tail = _win[-_ENGINE_DEGRADE_AFTER:]
+        if len(_tail) >= _ENGINE_DEGRADE_AFTER and not any(_o for _, _o in _tail):
+            _WEB_ENGINE_DEGRADED_UNTIL[engine] = _now + _ENGINE_DEGRADE_SECONDS
+
+
+def _web_engine_degraded(engine: str) -> bool:
+    """引擎是否处于降级期（调用方跳过其请求）；过期自动恢复。"""
+    with _WEB_ENGINE_LOCK:
+        _until = _WEB_ENGINE_DEGRADED_UNTIL.get(engine, 0.0)
+        if time.time() >= _until:
+            _WEB_ENGINE_DEGRADED_UNTIL.pop(engine, None)
+            return False
+        return True
+
+
+def _web_result_relevant(query: str, title: str, url: str, snippet: str = "") -> bool:
+    """抓页前相关性预筛（保守：只拦「明显不相关」的 SERP 结果）。
+
+    - snippet 是引擎按查询返回的摘要，最可靠信号：命中查询词即相关；
+    - 标题命中查询词 → 相关；URL 含核心词（≥4 字符）→ 相关；
+    - 标题过短且无摘要（如纯编号/单字母）→ 信息不足，宁抓勿漏；
+    - 仅当标题、摘要、URL 均无任何查询词痕迹时判为低相关（跳过自动抓取；
+      不影响手动指定 urls）。中文等无空白语言整句参与匹配。
+    """
+    if not query:
+        return True
+    _words = [w for w in re.split(r"[^\w]+", query.lower()) if len(w) >= 2]
+    if not _words:
+        return True
+    _title = (title or "").lower().strip()
+    _snip = (snippet or "").lower()
+    if any(w in _snip for w in _words):
+        return True
+    if any(w in _title for w in _words):
+        return True
+    _core = [w for w in _words if len(w) >= 4]
+    if _core and any(w in (url or "").lower() for w in _core):
+        return True
+    if len(_title) < 8 and not _snip:
+        return True
+    return False
+
+
+def _web_query_enhance(query: str) -> List[str]:
+    """查询规范化与扩展：返回候选查询列表（原查询 + 变体，最多 3 个）。
+
+    - 英文长句（≥4 词且停用词占比高）→ 去停用词的关键词短语变体；
+    - 中文查询含 ASCII 技术词 → 附加纯英文变体（技术文档英文更全更准）；
+    - 简单短查询不扩展（请求量不变）；变体去重、去空。
+    """
+    _q = (query or "").strip()
+    if not _q:
+        return []
+    _cands = [_q]
+    _ascii_words = [w for w in re.split(r"[^\w]+", _q)
+                    if re.search(r"[A-Za-z0-9]", w)]
+    # 1) 英文长句：去停用词生成关键词短语
+    if len(_ascii_words) >= 4:
+        _kept = [w for w in _ascii_words if w.lower() not in _WEB_STOPWORDS_EN]
+        if 2 <= len(_kept) < len(_ascii_words):
+            _cands.append(" ".join(_kept))
+    # 2) 中文含 ASCII 技术词 → 英文变体
+    _has_cjk = any("\u4e00" <= c <= "\u9fff" for c in _q)
+    if _has_cjk and _ascii_words:
+        _en = " ".join(w for w in _ascii_words if len(w) >= 2)[:100]
+        if _en:
+            _cands.append(_en)
+    # 去重去空
+    _seen: set = set()
+    _out: List[str] = []
+    for _c in _cands:
+        _cc = re.sub(r"\s+", " ", _c).strip()
+        if _cc and _cc.lower() not in _seen:
+            _seen.add(_cc.lower())
+            _out.append(_cc)
+    return _out[:3]
+
+
+def _web_rerank(results: List[Dict]) -> List[Dict]:
+    """结果重排（按查询分组，组内打分降序；查询主序保留）。
+
+    信号（软加权，稳定排序不埋没好结果）：
+      - 标题命中查询词 +2/词、摘要命中 +1/词；
+      - 权威域（官方文档/知名社区）+4；
+      - SEO 垃圾域（top10/best/free 等）−3、垃圾标题词 −2。
+    """
+    from urllib.parse import urlparse as _urlparse
+    _groups: Dict[str, List[Dict]] = {}
+    _order: List[str] = []
+    for _r in results:
+        _q = _r.get("query", "")
+        if _q not in _groups:
+            _groups[_q] = []
+            _order.append(_q)
+        _groups[_q].append(_r)
+    _out: List[Dict] = []
+    for _q in _order:
+        _words = [w for w in re.split(r"[^\w]+", _q.lower()) if len(w) >= 2]
+        _scored = []
+        for _r in _groups[_q]:
+            _s = 0.0
+            _title = (_r.get("title") or "").lower()
+            _snip = (_r.get("snippet") or "").lower()
+            _host = (_urlparse(_r.get("url", "")).netloc or "").lower().split(":")[0]
+            for _w in _words:
+                if _w in _title:
+                    _s += 2.0
+                elif _w in _snip:
+                    _s += 1.0
+            if any(_host == d or _host.endswith("." + d) for d in _WEB_AUTHORITY_DOMAINS):
+                _s += 4.0
+            elif any(_h in _host for _h in _WEB_JUNK_DOMAIN_HINTS):
+                _s -= 3.0
+            if any(_t in _title for _t in _WEB_JUNK_TITLE_HINTS):
+                _s -= 2.0
+            _scored.append((_s, _r))
+        _scored.sort(key=lambda _x: -_x[0])  # 稳定排序：同分保持引擎原序
+        _out.extend(_r for _s, _r in _scored)
+    return _out
+
+
+def _web_search_one(query: str, engine: str, timeout: int, region: str, lang: str,
+                    time_range: str, safe: bool, max_results: int) -> Tuple[List[Dict], str]:
+    """单查询 × 单引擎搜索：缓存优先，失败/空结果自动重试，健康上报。
+
+    - 缓存：同键（引擎+规范化查询+偏好）15 分钟内直接返回上次结果，零网络请求；
+      失败结果缓存 30 秒（防抖，避免反复打刚挂掉的引擎）。
+    - DDG：html 端点请求成功但零结果/反爬空页时回退 lite 端点（更轻、更容忍 bot）；
+      传输层失败（域名不可达/DNS 超时）不回退——同一域名的 lite 几乎必然同样不可达，
+      避免双倍超时等待。检测 anomaly/challenge 拦截页并给出明确错误。
+    - Bing：请求成功但零结果（空白/consent 页）重试一次；传输层失败不重试。
+    - 健康上报：传输失败/反爬拦截计为引擎故障；正常响应（含零结果）计为可用，
+      连续故障触发降级（见 _web_engine_degraded）。
+    返回 (结果列表, 错误信息)；错误为空表示成功（结果可为空列表）。
+    """
+    _key = _web_cache_key(engine, query, region, lang, time_range, safe)
+    _hit = _web_cache_get(_key)
+    if _hit is not None:
+        return _hit
+    _items: List[Dict] = []
+    _err = ""
+    try:
+        from urllib.parse import quote as _quote
+        _UA = "Mozilla/5.0 (X11; Linux x86_64) Onyx-AI/1.0"
+        _headers = {"User-Agent": _UA}
+        if lang:
+            _headers["Accept-Language"] = f"{lang};q=0.9,en;q=0.6"
+        if engine == "duckduckgo":
+            _headers["Referer"] = "https://duckduckgo.com/"
+            _url = f"https://html.duckduckgo.com/html/?q={_quote(query)}"
+            if region:
+                _url += f"&kl={_quote(region)}"
+            if lang:
+                _url += f"&l={_quote(lang)}"
+            if time_range in ("day", "week", "month", "year"):
+                _url += f"&df={time_range[0]}"
+            if safe:
+                _url += "&kp=1"
+            _html, _err = _http_get_text(_url, timeout, _headers)
+            _items = _extract_ddg_results(_html) if _html is not None else []
+            if not _items and _html is not None:
+                # 请求成功但零结果/反爬空页 → 回退 lite 端点（更轻、更容忍 bot）；
+                # 传输层失败不回退（同一域名几乎必然同样不可达，避免双倍超时）
+                _lite = f"https://lite.duckduckgo.com/lite/?q={_quote(query)}"
+                if region:
+                    _lite += f"&kl={_quote(region)}"
+                if safe:
+                    _lite += "&kp=1"
+                _html2, _err2 = _http_get_text(_lite, timeout, _headers)
+                _items = _extract_lite_results(_html2) if _html2 is not None else []
+            if not _items:
+                if _html and ("anomaly" in _html.lower() or "challenge" in _html.lower()):
+                    _err = f"duckduckgo:{query[:30]} → 反爬拦截（anomaly/challenge 页）"
+                else:
+                    _err = f"duckduckgo:{query[:30]} → {_err or _err2 or '无结果'}"
+            else:
+                _err = ""
+        elif engine == "bing":
+            # 瞬时失败/空白/consent 页 → 重试一次；传输层失败不重试
+            _url = f"https://www.bing.com/search?q={_quote(query)}"
+            if lang:
+                _url += f"&setlang={_quote(lang)}"
+            if region:
+                _url += f"&cc={_quote(region)}"
+            if safe:
+                _url += "&adlt=strict"
+            _html, _err = _http_get_text(_url, timeout, _headers)
+            _items = _extract_bing_results(_html) if _html is not None else []
+            if not _items and _html is not None:
+                _html2, _err2 = _http_get_text(_url, timeout, _headers)
+                _items = _extract_bing_results(_html2) if _html2 is not None else []
+            if not _items:
+                _err = f"bing:{query[:30]} → {_err or _err2 or '无结果'}"
+            else:
+                _err = ""
+        else:
+            _err = f"{engine}:{query[:30]} → 未知引擎"
+    except Exception as _e:
+        _err = f"{engine}:{query[:30]} → {_e}"
+    if _err:
+        _web_cache_put(_key, [], _err, _WEB_CACHE_FAIL_TTL)
+        _web_engine_report(engine, False)
+        return [], _err
+    _web_cache_put(_key, _items, "", _WEB_CACHE_TTL)
+    _web_engine_report(engine, True)
+    return _items[:max_results], ""
+
+
+def _extract_page_title(html: str) -> str:
+    """提取 <title> 标签文本（用于正文前标注页面标题）。"""
+    import html as _htm
+    m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
+    if not m:
+        return ""
+    return _htm.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", m.group(1))).strip())
+
+
+def _extract_page_text(html: str, max_chars: int) -> str:
+    """粗抽取正文：优先 article/main 区块，去 script/style/nav 等噪音 → 去标签 → 折叠空白。
+
+    优先取 <article>/<main> 内容可跳过大量站点级导航/侧栏/页脚噪音；
+    再整体剔除脚本、样式、表单、悬浮层等无正文价值标签与 HTML 注释。
+    """
+    _m = re.search(r"(?is)<(article|main)[^>]*>(.*?)</\1>", html)
+    if _m:
+        html = _m.group(2)
+    _text = re.sub(r"(?is)<!--.*?-->", " ", html)
+    _text = re.sub(
+        r"(?is)<(script|style|nav|footer|header|aside|form|noscript|iframe|svg|canvas"
+        r"|template|figure|select|button|input|textarea|dialog|menu)[^>]*>.*?</\1>",
+        " ", _text)
+    _text = re.sub(r"<[^>]+>", " ", _text)
+    _text = re.sub(r"\s+", " ", _text).strip()
+    return _text[:max_chars]
+
+
+def _fetch_page_text(url: str, timeout: int, max_chars: int = 3000) -> Tuple[bool, str]:
+    """抓取页面并抽取正文（SSRF 防护 + 逐跳校验重定向 + title 提取 + curl 回退）。"""
+    try:
+        from urllib.parse import urlparse as _urlparse
+        _scheme = (_urlparse(url).scheme or "").lower()
+        if _scheme not in ("http", "https"):
+            return False, f"非 http/https 协议: {url}"
+        try:
+            import requests as _req
+        except ImportError:
+            _req = None
+        _html = None
+        if _req is not None:
+            _target = url
+            _resp = None
+            for _hop in range(6):
+                _reason = _ssrf_block_reason(_target)
+                if _reason:
+                    return False, f"已拒绝 {_target}（{_reason}）"
+                try:
+                    _resp = _req.get(
+                        _target, timeout=timeout,
+                        headers={"User-Agent": "Mozilla/5.0 Onyx-AI/1.0"},
+                        allow_redirects=False,
+                    )
+                except Exception as _e:
+                    return False, f"抓取失败: {_e}"
+                if _resp.status_code in (301, 302, 303, 307, 308):
+                    _loc = _resp.headers.get("Location")
+                    if not _loc:
+                        break
+                    _target = _req.compat.urljoin(_target, _loc)
+                    continue
+                break
+            if _resp is not None:
+                _html = _resp.text
+        if _html is None:
+            # 回退：curl（同样过 SSRF 检查；不跟随重定向）
+            _reason = _ssrf_block_reason(url)
+            if _reason:
+                return False, f"已拒绝 {url}（{_reason}）"
+            import subprocess as _sp
+            _result = _sp.run(["curl", "-s", "--max-redirs", "0",
+                               "--max-time", str(timeout), url],
+                              capture_output=True, text=True, timeout=timeout + 5)
+            _html = _result.stdout or ""
+        _title = _extract_page_title(_html)
+        _text = _extract_page_text(_html, max_chars)
+        if not _text:
+            return False, f"页面无正文: {url}"
+        if _title:
+            _text = f"📄 {_title}\n{_text}"
+        return True, _text
+    except Exception as _e:
+        return False, f"抓取失败: {_e}"
+
+
+# ── 弱 AI 长文摘要 + 关键行压缩（web_search ai_assist 模式）──
+_WEB_ASSIST_CONFIG_KEY = "web_ai_assist"   # 全局开关：~/.config/onyx/config.json（Config 工具可读写）
+_WEB_ASSIST_MIN_CHARS = 1200              # 正文超过该长度才触发辅助 AI 摘要
+_WEB_ASSIST_FETCH_CAP = 12000             # 辅助 AI 模式单页抓取上限（喂给弱 AI 的完整正文）
+_WEB_ASSIST_SUMMARY_MAX = 1200            # 摘要输出防御性截断
+
+
+def _load_web_ai_assist_flag() -> bool:
+    """读取全局 AI 辅助开关（web_ai_assist，缺省关闭）。"""
+    try:
+        import json as _json
+        _p = os.path.join(os.path.expanduser("~"), ".config", "onyx", "config.json")
+        with open(_p, "r", encoding="utf-8") as _f:
+            _cfg = _json.load(_f)
+        return bool(_cfg.get(_WEB_ASSIST_CONFIG_KEY, False))
+    except Exception:
+        return False
+
+
+def _web_assist_model(platform: str, current: str) -> str:
+    """辅助 AI 用当前平台最便宜的模型（弱 AI = 低单价）：价格表取最低 input 价，
+    无价格表时 deepseek 回退 flash，其余回退当前模型。"""
+    _info = _SUPPORTED_PLATFORMS.get(platform or "")
+    if not _info:
+        return current or ""
+    _models = _info.get("models") or []
+    _prices = _info.get("price_per_million_tokens") or {}
+    _cheapest, _best = None, None
+    for _m in _models:
+        _in_p = (_prices.get(_m) or {}).get("input")
+        if _in_p is None:
+            continue
+        if _best is None or _in_p < _best:
+            _best, _cheapest = _in_p, _m
+    if _cheapest:
+        return _cheapest
+    if platform == "deepseek" and "deepseek-v4-flash" in _models:
+        return "deepseek-v4-flash"
+    return current or ""
+
+
+def _web_assist_summarize(text: str, query: str) -> Optional[str]:
+    """弱 AI 长文摘要：把完整正文交给当前平台最便宜模型总结，返回摘要。
+
+    失败 / 中断 / 无密钥返回 None（调用方回退关键行压缩，工具不阻塞）；
+    成功时同步把本次调用写入 cost.json（与压缩/子代理成本入账一致）。
+    """
+    try:
+        from .ai_lib.api import call_ai_api_sse
+        from .ai_lib.config import load_key_conf
+        from .ai_lib.cost import append_cost_record
+        import hashlib as _hl
+        _conf = load_key_conf() or {}
+        _plat = _conf.get("platform", "deepseek")
+        _model = _web_assist_model(_plat, _conf.get("model", ""))
+        _sys = (
+            "You are a web article summarizer. Given a fetched page (title + body), "
+            "output a concise summary in the SAME language as the article (Chinese stays Chinese). "
+            "Keep key facts: names, numbers, dates, versions, URLs, conclusions, comparisons. "
+            "Aim under 500 characters. No preamble, no bracket markers, no label. "
+            "If the body is mostly navigation/ads noise, say in one sentence what the page is about."
+        )
+        _result = call_ai_api_sse(
+            question="",
+            messages=[
+                {"role": "system", "content": _sys},
+                {"role": "user", "content": f"查询主题: {query}\n\n页面正文:\n{text}"},
+            ],
+            tools=[],
+            ai_tools_prompt="",
+            user_home_dir=None,
+            memory_block="",
+            session_id="webassist_" + _hl.md5((query + text[:500]).encode("utf-8", "ignore")).hexdigest()[:12],
+            model_override=_model,
+            platform_override=_plat,
+        )
+        if _result.get("_interrupted") or _result.get("error"):
+            return None
+        _txt = (_result.get("txt") or "").strip()
+        if not _txt:
+            return None
+        try:
+            _u = _result.get("_usage") or {}
+            _pt, _ct = _u.get("prompt_tokens") or 0, _u.get("completion_tokens") or 0
+            if _pt or _ct:
+                append_cost_record(os.path.expanduser("~"), _plat, _model, _pt, _ct)
+        except Exception:
+            pass
+        return _txt[:_WEB_ASSIST_SUMMARY_MAX]
+    except Exception:
+        return None
+
+
+def _compress_text_key_lines(text: str, terms: List[str], max_chars: int) -> str:
+    """关键行压缩：按句子切分 → 查询词命中/位置打分 → 取高分句至预算上限。
+
+    有查询词命中时优先保留命中句（解决"只抓开头/首页噪音"导致的失真）；
+    无命中时按原文顺序取前部句子（标题自然保留）。输出保证 ≤ max_chars。
+    """
+    _clean = re.sub(r"\s+", " ", text).strip()
+    if not _clean or len(_clean) <= max_chars:
+        return _clean
+    _sents = [s.strip() for s in re.split(r"(?<=[。！？；.!?])\s*|\n", _clean) if s.strip()]
+    _kw = [t.lower() for t in terms if t and len(t) >= 2]
+    _scored = []
+    for _i, _s in enumerate(_sents):
+        _score = 0.0
+        _low = _s.lower()
+        for _k in _kw:
+            if _k in _low:
+                _score += 3.0
+        if _i == 0:
+            _score += 1.5
+        if len(_s) < 10:
+            _score -= 1.0
+        if len(_s) > 400:
+            _score -= 0.5
+        _scored.append((_score, _i, _s))
+    if any(_sc[0] > 0 for _sc in _scored):
+        _scored.sort(key=lambda _x: (-_x[0], _x[1]))
+    else:
+        _scored.sort(key=lambda _x: _x[1])
+    _out: List[str] = []
+    _used = 0
+    for _sc in _scored:
+        _s = _sc[2]
+        if _used + len(_s) + 1 > max_chars:
+            if _out:
+                break
+            _s = _s[:max_chars]
+        _out.append(_s)
+        _used += len(_s) + 1
+    return " ".join(_out)[:max_chars]
+
+
+def _web_fetch_one(url: str, timeout: int, fetch_cap: int, assist_on: bool,
+                   max_chars: int, queries: List[str], query: str) -> Dict:
+    """抓取单页（worker 线程内完成正文抽取 / 弱 AI 摘要 / 关键行压缩）。
+
+    SSRF/协议/超时防线复用 _fetch_page_text；摘要与压缩逻辑与主循环一致，
+    但移入 worker → 多页抓取与弱 AI 摘要并行，总耗时 ≈ 最慢单页。
+    """
+    _ok, _txt = _fetch_page_text(url, timeout, fetch_cap)
+    if _ok and assist_on and len(_txt) > _WEB_ASSIST_MIN_CHARS:
+        # 长文 + 辅助 AI 开启：完整正文交弱 AI 总结（失败回退关键行压缩）
+        _sum = _web_assist_summarize(_txt, query or "web")
+        if _sum:
+            return {"url": url, "ok": True, "text": _sum, "mode": "summary"}
+    if _ok and len(_txt) > max_chars:
+        # 关键行压缩：查询词命中句优先，替代机械截取前 N 字符
+        return {"url": url, "ok": True,
+                "text": _compress_text_key_lines(_txt, queries, max_chars),
+                "mode": "compress"}
+    return {"url": url, "ok": _ok, "text": _txt, "mode": "raw"}
+
+
+def _exec_web_search_multi(params: dict) -> str:
+    """web_search 入口分发器。
+
+    - 无 topics → 单主题完整链路（_exec_web_search_one_topic，原有行为不变）；
+    - 有 topics[] → 批量独立主题：每个主题继承顶层参数、可覆盖，全部并行执行，
+      输出按主题分栏（text）或结构化数组（json）。空 query 主题忽略，最多 5 个。
+    """
+    _p = params or {}
+    _topics = [t for t in (_p.get("topics") or [])
+               if isinstance(t, dict) and str(t.get("query") or "").strip()]
+    _topics = _topics[:_WEB_TOPICS_MAX]
+    if not _topics:
+        return _exec_web_search_one_topic(_p)
+    _merged = []
+    for _t in _topics:
+        _tp = {k: v for k, v in _p.items() if k != "topics"}
+        for _k in _WEB_TOPIC_OVERRIDES:
+            if _k in _t and _t[_k] is not None:
+                _tp[_k] = _t[_k]
+        _merged.append(_tp)
+    _fmt = str(_p.get("output_format") or "text").lower()
+    _outs = _web_parallel(lambda _tp: _exec_web_search_one_topic(_tp), _merged,
+                          _WEB_TOPICS_WORKERS, budget=_WEB_SEARCH_BUDGET * 2)
+    if _fmt == "json":
+        return json.dumps({
+            "action": "topics", "topic_count": len(_merged),
+            "topics": [
+                {"query": _t.get("query", ""),
+                 "output": _o or "❌ 主题超时未完成（预算内未返回）"}
+                for _t, _o in zip(_merged, _outs)
+            ],
+        }, ensure_ascii=False, indent=1)
+    _lines = [f"🔎 web_search(topics): {len(_merged)} 个独立主题并行查询"]
+    for _i, (_t, _o) in enumerate(zip(_merged, _outs), 1):
+        _lines.append("")
+        _lines.append("─" * 24)
+        _lines.append(f"## 主题 {_i}: {str(_t.get('query', ''))[:60]}")
+        _lines.append(_o or "❌ 主题超时未完成（预算内未返回）")
+    return "\n".join(_lines)
+
+
+def _exec_web_search_one_topic(params: dict) -> str:
+    """web_search 单主题完整链路（search / fetch / mixed 三模式）。
+
+    第一性原则设计，覆盖完整调研链路（旧 WebSearch/WebFetch 能力已合并）：
+      action: search=仅搜索；fetch=仅抓取 urls 指定页面；mixed=搜索+自动抓页（默认）
+      query / queries[]: 主查询 + 附加查询（最多 10 个，一次覆盖多个角度）
+      urls[]: 指定 URL 直接抓正文（fetch 必填 / mixed 追加；同样过域名过滤与 SSRF 防护）
+      engines[]: duckduckgo / bing；max_results: 每查询每引擎条数
+      allowed_domains[] / exclude_domains[]: 域名双向过滤（对结果与 urls 都生效）
+      language / region / time_range / safe_search: 搜索偏好（best-effort）
+      fetch_pages / fetch_limit: 搜索后自动抓取排名靠前页
+      max_chars_per_page: 单页正文截断；output_format: text / json；timeout: 单请求超时
+    """
+    try:
+        from urllib.parse import urlparse as _urlparse, quote as _quote
+
+        _p = params or {}
+        _action = str(_p.get("action") or "mixed").lower()
+        if _action not in ("search", "fetch", "mixed"):
+            _action = "mixed"
+        _query = str(_p.get("query", "") or "").strip()
+        _urls = [str(u).strip() for u in (_p.get("urls") or []) if str(u).strip()]
+        if _action in ("search", "mixed") and not _query:
+            return "❌ web_search: action=search/mixed 需要 query 参数"
+        if _action == "fetch" and not _urls:
+            return "❌ web_search: action=fetch 需要 urls 参数（要抓取的 URL 列表）"
+        _queries = [_query] if _query else []
+        for _q in (_p.get("queries") or [])[:10]:
+            _q = str(_q or "").strip()
+            if _q and _q not in _queries:
+                _queries.append(_q)
+        _queries = _queries[:10]
+        _engines = [str(e).lower() for e in (_p.get("engines") or _WEB_ENGINES)]
+        _engines = [e for e in _engines if e in _WEB_ENGINES] or list(_WEB_ENGINES)
+        try:
+            _max_results = max(1, min(int(_p.get("max_results") or 8), 15))
+        except Exception:
+            _max_results = 8
+        _allowed = [str(d).lower() for d in (_p.get("allowed_domains") or []) if str(d).strip()]
+        _excluded = [str(d).lower() for d in (_p.get("exclude_domains") or []) if str(d).strip()]
+        _lang = str(_p.get("language") or "").strip()
+        _region = str(_p.get("region") or "").strip()
+        _time = str(_p.get("time_range") or "").strip().lower()
+        _safe = bool(_p.get("safe_search", False))
+        _fetch_pages = bool(_p.get("fetch_pages", False))
+        try:
+            _fetch_limit = max(1, min(int(_p.get("fetch_limit") or 3), 5))
+        except Exception:
+            _fetch_limit = 3
+        try:
+            _max_chars = max(500, min(int(_p.get("max_chars_per_page") or 3000), 8000))
+        except Exception:
+            _max_chars = 3000
+        _fmt = str(_p.get("output_format") or "text").lower()
+        try:
+            _timeout = max(5, min(int(_p.get("timeout") or 15), 60))
+        except Exception:
+            _timeout = 15
+        # ── 弱 AI 长文摘要：per-call ai_assist 覆盖全局开关（web_ai_assist）──
+        _assist_flag = _p.get("ai_assist")
+        if isinstance(_assist_flag, bool):
+            _assist_on = _assist_flag
+        elif str(_assist_flag).lower() in ("true", "1", "yes", "on"):
+            _assist_on = True
+        elif str(_assist_flag).lower() in ("false", "0", "no", "off"):
+            _assist_on = False
+        else:
+            _assist_on = _load_web_ai_assist_flag()
+        # 抓取上限无条件放大：max_chars_per_page 作为输出预算，关键行压缩/弱 AI 摘要
+        # 需要读到比输出更多的正文才有筛选余地（解决"只抓开头/首页噪音"失真）
+        _fetch_cap = max(_max_chars, _WEB_ASSIST_FETCH_CAP)
+
+        _results: List[Dict] = []
+        _errors: List[str] = []
+
+        # ── 1. 搜索阶段（search/mixed）——多查询 × 多引擎并行（线程池）──
+        # 原串行实现总耗时 = 查询数 × 引擎数 × 单请求；并行后 ≈ 最慢单个请求
+        # （含失败重试）。结果按「查询 → 引擎」原顺序收集，输出确定性不变。
+        if _action in ("search", "mixed") and _queries:
+            # 引擎健康降级：连续失败的引擎跳过请求（到期自动恢复）
+            _engines_active = [e for e in _engines if not _web_engine_degraded(e)]
+            if len(_engines_active) < len(_engines):
+                _errors.append("引擎降级跳过: " + ", ".join(
+                    sorted(set(_engines) - set(_engines_active))))
+            if not _engines_active:
+                _errors.append("所有引擎均处于降级状态，本次搜索跳过")
+            else:
+                # 查询增强：英文长句去停用词、中文技术查询加英文变体 → 多候选并行
+                # （简单短查询不扩展，请求量基本不变；候选结果统一按原查询标注）
+                _query_cands = [_web_query_enhance(_q) for _q in _queries]
+                _tasks = [(qi, ci, ei)
+                          for qi, _cands in enumerate(_query_cands)
+                          for ci, _cand in enumerate(_cands)
+                          for ei, _eng in enumerate(_engines_active)]
+                # 总时间预算：到点收工，不等最慢引擎（超时任务标注后跳过）
+                _outs = _web_parallel(
+                    lambda _t: _web_search_one(_query_cands[_t[0]][_t[1]], _engines_active[_t[2]],
+                                               _timeout, _region, _lang, _time,
+                                               _safe, _max_results),
+                    _tasks, _WEB_SEARCH_WORKERS, budget=_WEB_SEARCH_BUDGET)
+                for (_qi, _ci, _ei), _res in zip(_tasks, _outs):
+                    if _res is None:
+                        _errors.append(f"{_engines_active[_ei]}:{_queries[_qi][:30]} → 超时未完成")
+                        continue
+                    _items, _werr = _res
+                    if _werr:
+                        _errors.append(_werr)
+                        continue
+                    _q, _eng = _queries[_qi], _engines_active[_ei]
+                    for _it in _items:
+                        _it["query"] = _q
+                        _it["engine"] = _eng
+                        _results.append(_it)
+
+            # ── 去重（URL 规范化） + 域名过滤 ──
+            _seen: set = set()
+            _deduped: List[Dict] = []
+            for _r in _results:
+                _host = (_urlparse(_r["url"]).netloc or "").lower().split(":")[0]
+                if not _host:
+                    continue
+                if _allowed and not any(_host == d or _host.endswith("." + d) for d in _allowed):
+                    continue
+                if any(_host == d or _host.endswith("." + d) for d in _excluded):
+                    continue
+                _key = _r["url"].lower().rstrip("/")
+                if _key in _seen:
+                    continue
+                _seen.add(_key)
+                _deduped.append(_r)
+            # 组内重排（按查询分组）：权威域/词命中前置、SEO 垃圾信号降权，
+            # 查询主序保留——展示顺序与预筛抓页（取前 N）都受益
+            _results = _web_rerank(_deduped)
+
+        # ── 2. 抓取阶段（fetch/mixed）：指定 urls + 搜索排名靠前页（同样过域名过滤与 SSRF）──
+        _pages: List[Dict] = []
+        _fetch_targets: List[str] = []
+        _skipped: List[str] = []   # 相关性预筛跳过的 SERP 页（避免浪费抓取名额在无关页）
+        if _action == "fetch":
+            _fetch_targets = list(_urls)
+        elif _action == "mixed":
+            if _fetch_pages and _results:
+                _picked = 0
+                for _r in _results:
+                    if _picked >= _fetch_limit:
+                        break
+                    if _web_result_relevant(_query, _r.get("title", ""), _r["url"],
+                                             _r.get("snippet", "")):
+                        _fetch_targets.append(_r["url"])
+                        _picked += 1
+                    else:
+                        _skipped.append(_r["url"])
+            _fetch_targets += _urls
+        if _fetch_targets:
+            _seen_urls: set = set()
+            _entries: List[Dict] = []          # 按输入顺序占位；None = 待抓取（并行任务）
+            _jobs: List[Tuple[int, str]] = []
+            for _u in _fetch_targets:
+                _host = (_urlparse(_u).netloc or "").lower().split(":")[0]
+                if not _host:
+                    _entries.append({"url": _u, "ok": False, "text": "无效 URL"})
+                    continue
+                if _allowed and not any(_host == d or _host.endswith("." + d) for d in _allowed):
+                    _entries.append({"url": _u, "ok": False, "text": "被 allowed_domains 过滤"})
+                    continue
+                if any(_host == d or _host.endswith("." + d) for d in _excluded):
+                    _entries.append({"url": _u, "ok": False, "text": "被 exclude_domains 过滤"})
+                    continue
+                _key = _u.lower().rstrip("/")
+                if _key in _seen_urls:
+                    continue
+                _seen_urls.add(_key)
+                _entries.append(None)
+                _jobs.append((len(_entries) - 1, _u))
+            if _jobs:
+                # 并行抓取：正文抽取 / 长文摘要 / 关键行压缩均在 worker 内完成
+                _outs = _web_parallel(
+                    lambda _t: _web_fetch_one(_t[1], _timeout, _fetch_cap, _assist_on,
+                                              _max_chars, _queries, _query),
+                    _jobs, _WEB_FETCH_WORKERS, budget=_WEB_FETCH_BUDGET)
+                for (_i, _u), _pg in zip(_jobs, _outs):
+                    if _pg is None:
+                        _pg = {"url": _u, "ok": False, "text": "超时未完成（预算内未返回）"}
+                    _entries[_i] = _pg
+            _pages = [e for e in _entries if e is not None]
+
+        # ── 3. 输出 ──
+        if _fmt == "json":
+            return json.dumps({
+                "action": _action, "query": _query, "queries": _queries, "engines": _engines,
+                "ai_assist": _assist_on, "result_count": len(_results),
+                "results": _results, "pages": _pages, "errors": _errors, "skipped": _skipped,
+            }, ensure_ascii=False, indent=1)
+
+        _lines: List[str] = []
+        if _action == "fetch":
+            _lines.append(f"📄 web_search(fetch): 抓取 {len(_pages)} 个指定 URL")
+        else:
+            _lines.append(f"🔎 web_search({_action}): {len(_queries)} 个查询 × {len(_engines)} 个引擎，"
+                          f"共 {len(_results)} 个唯一结果")
+        if _errors:
+            _lines.append("⚠️ 部分请求失败: " + "；".join(_errors[:3]))
+        if _skipped:
+            _lines.append("⏭️ 低相关跳过（未命中查询词）: " + "；".join(_skipped[:3]))
+        for _i, _r in enumerate(_results, 1):
+            _lines.append(f"{_i}. {_r['title'] or '(无标题)'}")
+            _lines.append(f"   URL: {_r['url']}  （{_r['engine']}，查询: {_r['query'][:40]}）")
+            if _r.get("snippet"):
+                _lines.append(f"   {_r['snippet'][:400]}")
+        if _pages:
+            if _action != "fetch" and _results:
+                _lines.append("")
+            _lines.append(f"📄 已抓取 {len(_pages)} 个页面正文：")
+            for _pg in _pages:
+                _lines.append(f"--- {_pg['url']}")
+                if not _pg["ok"]:
+                    _lines.append("❌ " + _pg["text"])
+                elif _pg.get("mode") == "summary":
+                    _lines.append("🤖 AI 摘要: " + _pg["text"])
+                elif _pg.get("mode") == "compress":
+                    _lines.append("🔑 关键行: " + _pg["text"])
+                else:
+                    _lines.append("✅ " + _pg["text"])
+        if _action != "fetch" and not _results:
+            _lines.append("(无结果；可换关键词、减少 allowed_domains 限制或换引擎)")
+        return "\n".join(_lines)
+    except Exception as _e:
+        return f"❌ web_search 执行失败: {_e}"
 
 
 # 计划系统已简化为纯引导模式（不再跟踪步骤状态）
 _PLAN_MODE_ACTIVE = False  # 全局 plan 模式标记
-
-# ── 硬性规划门禁：修改类工具执行前必须先 submit_plan 并经用户确认 ──
-# 每次用户新输入（handle_ai 调用）重置为 False；用户在 submit_plan 弹窗确认后置 True。
-_PLAN_APPROVED = False
-PLAN_GATE_TOOLS = frozenset({
-    "write_file", "edit_file", "UndoLastEdit",
-    "delete_file", "delete_directory", "move_file", "copy_file", "create_directory",
-})
-
-
-def set_plan_approved(approved: bool) -> None:
-    """设置当前任务计划是否已获用户确认（确认后放行修改类工具）。"""
-    global _PLAN_APPROVED
-    _PLAN_APPROVED = approved
-
-
-def is_plan_approved() -> bool:
-    """当前任务计划是否已获用户确认。"""
-    return _PLAN_APPROVED
-
-# ── 规划子代理门禁：写类工具放行前必须先经 Agent(type="plan") 完成规划 ──
-_PLAN_PREPARED = False
-
-
-def set_plan_prepared(prepared: bool) -> None:
-    """设置当前任务是否已由 Agent(type="plan") 规划子代理产出计划。"""
-    global _PLAN_PREPARED
-    _PLAN_PREPARED = prepared
-
-
-def is_plan_prepared() -> bool:
-    """当前任务是否已完成规划子代理规划。"""
-    return _PLAN_PREPARED
 
 # ── 任务管理系统全局注册表 ──
 _TASK_STORAGE_DIR = os.path.join(os.path.expanduser("~"), ".ai_s", "tasks")
@@ -3960,6 +4998,84 @@ _APPROVAL_LEDGER = ApprovalTokenLedger()
 
 # 线程局部存储（使用 mcp_state 统一实例，保证 /tokens 等命令可读）
 # _thread_locals 已在文件顶部从 mcp_state 导入，此处不再重新定义
+
+
+# ── 大小感知规划门禁（正式任务必须先规划；小型修改直接放行）──
+# 破坏性操作（删除/移动/复制/建目录）始终要求计划确认；
+# write_file/edit_file 单次 > 4KB 或 本轮累计 ≥ 8KB 时要求计划确认。
+_PLAN_GATE_DESTRUCTIVE = frozenset({
+    "delete_file", "delete_directory", "move_file", "copy_file",
+    "create_directory", "delete_files", "rename", "replace_in_file",
+})
+_PLAN_GATE_SINGLE_WRITE_BYTES = 4 * 1024
+_PLAN_GATE_CUMULATIVE_BYTES = 8 * 1024
+
+
+def plan_gate_blocked(tool_name: str, params: Dict, plan_confirmed: bool,
+                      write_budget: int, mode: str = "normal") -> Tuple[bool, int]:
+    """大小感知规划门禁判定（纯函数，可单测）。
+
+    返回 (是否拦截, 更新后的累计写入字节)。
+    拦截条件（未确认计划且非 plan 模式时）：
+      - 破坏性工具 → 始终拦截；
+      - write_file/edit_file → 单次 > 4KB 或 累计 ≥ 8KB 拦截。
+    UndoLastEdit / RunCommand 豁免（撤销与危险命令已有自身确认机制）。
+    """
+    if plan_confirmed or mode == "plan":
+        return False, write_budget
+    if tool_name in _PLAN_GATE_DESTRUCTIVE:
+        return True, write_budget
+    if tool_name in ("write_file", "edit_file"):
+        if tool_name == "write_file":
+            _size = len(str(params.get("content") or ""))
+        else:
+            _size = len(str(params.get("new_string") or "")) + len(str(params.get("old_string") or ""))
+        if _size > _PLAN_GATE_SINGLE_WRITE_BYTES:
+            return True, write_budget
+        write_budget += _size
+        if write_budget >= _PLAN_GATE_CUMULATIVE_BYTES:
+            return True, write_budget
+    return False, write_budget
+
+
+def _unescape_json_fragment(s: str) -> str:
+    """单遍左到右反转义 JSON 字符串片段（破损 JSON 容错路径用）。
+
+    正确处理字面量 \\n（JSON 中编码为 \\\\n）与真实换行 \\n 的区别；
+    未知转义保留原样，\\uXXXX 按码点解码。
+    """
+    out = []
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\" and i + 1 < n:
+            nxt = s[i + 1]
+            if nxt == "n":
+                out.append("\n"); i += 2; continue
+            if nxt == "t":
+                out.append("\t"); i += 2; continue
+            if nxt == "r":
+                out.append("\r"); i += 2; continue
+            if nxt == '"':
+                out.append('"'); i += 2; continue
+            if nxt == "\\":
+                out.append("\\"); i += 2; continue
+            if nxt == "/":
+                out.append("/"); i += 2; continue
+            if nxt == "u" and i + 5 < n:
+                try:
+                    out.append(chr(int(s[i + 2:i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            out.append(nxt)
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
@@ -4050,8 +5166,7 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "StructuredOutput": lambda p: _exec_structured_output(p.get("format", "json"), p.get("data", "")),
         "Sleep":        lambda p: _exec_sleep(int(p.get("seconds", 1))),
         # ── Web ──
-        "WebFetch":     lambda p: _exec_web_fetch(p.get("url", ""), p.get("prompt", "")),
-        "WebSearch":    lambda p: _exec_web_search(p.get("query", ""), p.get("allowed_domains", None)),
+        "web_search":   lambda p: _exec_web_search_multi(p),
         # ── 任务系统 ──
         "TaskCreate":   lambda p: _exec_task_create(
             p.get("prompt", ""), p.get("description"),
@@ -4083,6 +5198,15 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "py_symbols":     lambda p: code_analysis.exec_py_symbols(p.get("path", "")),
         "LspDiagnostics": lambda p: code_analysis.exec_lsp_diagnostics(p.get("path", "")),
         "LspSymbols":     lambda p: code_analysis.exec_lsp_symbols(p.get("path", "")),
+        "LspHover":       lambda p: code_analysis.exec_lsp_hover(
+            p.get("path", ""), p.get("line", 0), p.get("character", 0)),
+        "LspDefinition":  lambda p: code_analysis.exec_lsp_definition(
+            p.get("path", ""), p.get("line", 0), p.get("character", 0)),
+        "LspReferences":  lambda p: code_analysis.exec_lsp_references(
+            p.get("path", ""), p.get("line", 0), p.get("character", 0)),
+        "LspCompletion":  lambda p: code_analysis.exec_lsp_completion(
+            p.get("path", ""), p.get("line", 0), p.get("character", 0)),
+        "LspFormat":      lambda p: code_analysis.exec_lsp_format(p.get("path", "")),
 
         # ── 记忆查询 ──
         "MemoryRead":     lambda p: _exec_memory_read(p.get("path", ""), p.get("range")),
@@ -4103,17 +5227,9 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         # ── Shell 命令执行（function calling）──
         "RunCommand": lambda p: _exec_run_command(p.get("command", "")),
     }
-    if raw_tool in _BUILTIN_HANDLERS:
-        try:
-            result = _BUILTIN_HANDLERS[raw_tool](params or {})
-            # AI 虚拟沙盒：文件类工具输出中的物理路径 → 虚拟路径（隐藏真实 cwd）
-            if raw_tool in AI_FILE_TOOLS and sandbox.is_active():
-                result = sandbox.display_text(result)
-            return True, result
-        except Exception as e:
-            return False, f"Builtin tool error: {e}"
 
     # ── write_file 容错：如果参数被 _parse_tool_params 回退成 range_str，尝试从原始 JSON 中抠出 path 和 content ──
+    # （位于统一门禁之前：write_file 是内置工具，容错必须在分发前修复参数）
     if raw_tool == "write_file" and "content" not in params and "range_str" in params:
         _raw = str(params.get("range_str", ""))
         if _raw.startswith("{"):
@@ -4128,43 +5244,50 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
                 _raw_content = _cm.group(1)
                 # 去掉末尾可能多出的 `"}` 残留
                 _raw_content = _raw_content.rstrip('"').rstrip('}').rstrip('"').rstrip('}')
-                # 反转义
-                _raw_content = _raw_content.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+                # 反转义（单遍左到右，正确处理字面量 \\n）
+                _raw_content = _unescape_json_fragment(_raw_content)
                 params["content"] = _raw_content
                 params.pop("range_str", None)
                 if _pm and not _raw_content.endswith("\n"):
                     params["content"] += "\n"
                 _mcp_debug(f"write_file 容错: path={params.get('path', '?')}, content_len={len(params.get('content', ''))}")
 
-    # ── 权限门控：根据 x_permission 级别决定是否需要用户确认 ──
+    # ── 统一权限门控（前置：内置与 MCP 工具一视同仁，杜绝内置 handler 绕过）──
     # 从 build_native_tools() 查找当前工具的权限级别
+    # 2026-09 修复：MCP 工具在工具表中注册为 mcp_<name>（见 build_native_tools），
+    # 而 raw_tool 已剥离 mcp_ 前缀——此前用裸名查表永远 miss → 全部落 PERM_READONLY，
+    # DangerFullAccess 形同虚设。现同时匹配裸名与 mcp_ 前缀名。
     _tool_permission = PERM_READONLY  # 默认只读安全
     try:
-        _all_tools = build_native_tools()
-        for _t in _all_tools:
-            if _t.get("function", {}).get("name", "") == raw_tool:
-                _tool_permission = _t.get("x_permission", PERM_READONLY)
-                break
+        _tool_permission = _get_tool_permission(raw_tool)
+        if _tool_permission == PERM_READONLY:
+            # MCP 工具注册为 mcp_<name>，裸名 miss 时再查前缀名
+            _tool_permission = _get_tool_permission(f"mcp_{raw_tool}")
     except Exception:
         pass
 
     # ── Agent 工具分级：explore/plan 完全只读 → 自动放行（等同 ReadOnly）──
-    # lint/test 可经安全管线跑命令 → 保持 DangerFullAccess（显式批准）
+    # lint/test/web_search_agent 可经安全管线跑命令/联网 → 保持 DangerFullAccess（显式批准）
     if raw_tool == "Agent":
         _agent_type = str((params or {}).get("type", "explore")).lower()
         if _agent_type in ("explore", "plan"):
             _tool_permission = PERM_READONLY
 
-    if _tool_permission == PERM_DANGER_FULL:
-        # DangerFullAccess：显式用户批准 + 审批令牌
+    if _tool_permission == PERM_DANGER_FULL and user_mode != "adv":
+        # DangerFullAccess：显式用户批准 + 审批令牌。
+        # 跟随用户当前模式：low/mid 需确认，adv 自动放行（user_mode 由调用方
+        # 传 handle_ai 的 _current_user_mode = user_mode.current_mode 实时值）。
         _lang = get_current_lang()
         _prompt = (_lang == "chinese" and "🔴 工具 '{tool}' 需要危险权限，确认执行？(y/N): " or
                    "🔴 Tool '{tool}' requires dangerous access, confirm? (y/N): ").format(tool=raw_tool)
-        try:
-            _confirm = input(f"  {_prompt}").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            console.print()
-            return False, "⛔ 用户取消了危险操作"
+        # 确认框走真实终端（防 stdout 被捕获流替换导致提示不可见）
+        from .ai_lib.ui import real_terminal_io as _rtio
+        with _rtio():
+            try:
+                _confirm = input(f"  {_prompt}").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                console.print()
+                return False, "⛔ 用户取消了危险操作"
         if _confirm not in ("y", "yes"):
             return False, "⛔ 用户拒绝了危险操作"
         # 创建审批令牌
@@ -4174,38 +5297,10 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
             approved_executor="ai", max_uses=1, ttl_seconds=60,
         )
         console.print(f"  [dim]✓ 已授权（令牌: {_token_grant.token[:12]}...）[/]")
+    # WorkspaceWrite / ReadOnly：全模式自动放行
+    # （可逆操作：UndoLastEdit + git + 终端实时可见性提供安全；确认弹窗留给不可逆动作）
 
-    elif _tool_permission == PERM_WORKSPACE_WRITE and user_mode == "low":
-        # WorkspaceWrite + low 模式：轻确认
-        _lang = get_current_lang()
-        _prompt = (_lang == "chinese" and "✏️ 工具 '{tool}' 将修改工作区，确认？(Y/n): " or
-                   "✏️ Tool '{tool}' will modify workspace, confirm? (Y/n): ").format(tool=raw_tool)
-        try:
-            _confirm = input(f"  {_prompt}").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            console.print()
-            return False, "⛔ 用户取消了操作"
-        if _confirm == "n":
-            return False, "⛔ 用户拒绝了修改操作"
-        console.print(f"  [dim]✓ 已授权[/]")
-    # ReadOnly & WorkspaceWrite+mid/adv → 自动放行
-
-    # ---- 安全限制：写入类工具仅 mid 及以上模式可用（low 禁止） ----
-    write_tools = {"edit_file", "write_file", "create_file", "delete_file",
-                   "delete_files", "move_file", "rename", "replace_in_file"}
-    if raw_tool.lower() in write_tools and user_mode == "low":
-        lang = get_current_lang()
-        if lang == "chinese":
-            return False, (
-                f"⛔ 权限不足：'{raw_tool}' 需要 mid 模式才能执行。\n"
-                f"请先执行 activite -m mid 提升权限后再重试。"
-            )
-        return False, (
-            f"⛔ Permission denied: '{raw_tool}' requires mid mode.\n"
-            f"Run: activite -m mid"
-        )
-
-    # ---- 路径安全校验（MCP 工具执行前必须经过 Onyx 沙箱检查） ----
+    # ---- 路径安全校验（所有工具执行前必须经过 Onyx 沙箱检查） ----
     if path_validator is not None:
         arguments = dict(params) if params else {}
         file_tool_paths = _extract_paths_from_tool(raw_tool, arguments)
@@ -4213,6 +5308,37 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
             ok, err_msg = path_validator(raw_tool, p)
             if not ok:
                 return False, err_msg
+
+    # ── 内置分析工具（不经过 MCP，直接 Python 执行；已通过上述统一门禁）──
+    if raw_tool in _BUILTIN_HANDLERS:
+        try:
+            result = _BUILTIN_HANDLERS[raw_tool](params or {})
+            # AI 虚拟沙盒：文件类工具输出中的物理路径 → 虚拟路径（隐藏真实 cwd）
+            if raw_tool in AI_FILE_TOOLS and sandbox.is_active():
+                result = sandbox.display_text(result)
+            return True, result
+        except Exception as e:
+            return False, f"Builtin tool error: {e}"
+
+    # ── 未知名兜底路由闸门（2026-09 修复 C3）──
+    # 裸名既不在内置 handler、也不在注册表 MCP 工具、又不在只读白名单时，
+    # 拒绝直达 filesystem——防模型幻觉输出 delete_file 等被剔除的破坏性名字
+    # 直接落 MCP 执行（此前无任何确认）。
+    if raw_tool not in _BUILTIN_HANDLERS:
+        _known_mcp_tool = False
+        try:
+            _reg = get_registry()
+            for _srv in _reg.server_names():
+                if _reg.get(f"mcp__{_srv}__{raw_tool}"):
+                    _known_mcp_tool = True
+                    break
+        except Exception:
+            pass
+        if not _known_mcp_tool and raw_tool not in _MCP_BARE_READONLY_TOOLS:
+            return False, (
+                f"未知工具 `{tool_name}`：工具表中不存在该名称，已拒绝路由到 MCP。"
+                f"破坏性文件操作请使用工具列表中注册的 mcp_ 前缀工具名。"
+            )
 
     proc = connect_mcp_server(name, user_home_dir)
     if proc is None:
@@ -4302,6 +5428,7 @@ AI_FILE_TOOLS = frozenset({
     "search_file", "ListDirectory", "DirectoryTree",
     # ── 代码分析工具（bin/ai_lib/tools/code_analysis.py）──
     "py_diagnostics", "py_symbols", "LspDiagnostics", "LspSymbols",
+    "LspHover", "LspDefinition", "LspReferences", "LspCompletion", "LspFormat",
     # ── Git 工具 ──
     "GitStatus", "GitDiff", "GitLog", "GitBranch",
     # ── MCP filesystem 工具（走外部 server，参数同样先转物理）──
@@ -4309,6 +5436,17 @@ AI_FILE_TOOLS = frozenset({
     "list_directory", "directory_tree", "list_directory_with_sizes",
     "search_files", "search_content", "create_directory",
     "move_file", "copy_file", "delete_file", "delete_directory",
+    "list_allowed_directories", "get_workspace_folders",
+})
+
+# ── 裸名直达 MCP filesystem 的只读白名单（2026-09 修复 C3）──
+# 破坏性 filesystem 工具（delete_file/move_file/copy_file/create_directory 等）
+# 已从可见工具表剔除，且不允许以裸名直达——模型幻觉输出这些名字时直接拒绝，
+# 必须走 mcp_ 前缀（挂有权限门禁 + 沙盒校验）才能调用。
+_MCP_BARE_READONLY_TOOLS = frozenset({
+    "read_text_file", "read_multiple_files", "read_media_file",
+    "list_directory", "directory_tree", "list_directory_with_sizes",
+    "search_files", "search_content",
     "list_allowed_directories", "get_workspace_folders",
 })
 
@@ -4526,8 +5664,23 @@ def _run_shell_cmd(cmd: str, timeout: int = 10) -> str:
 _AUTO_COMPACT_TOKEN_THRESHOLD = 300 * 1024
 
 # 工具 schema 的固定 token 开销：校准 tokPerChar 时从真实 prompt tokens 中扣除。
-# 约 55 个内置工具 + 描述，实测约 2 万余 token。
+# 回退值 22000（约 55 个内置工具 + 描述）；首次使用时按实际工具 JSON 字节实测。
 _TOOL_SCHEMA_TOKEN_OVERHEAD = 22_000
+_TOOL_SCHEMA_TOKEN_OVERHEAD_CACHE: Optional[int] = None
+
+
+def _measured_tool_schema_overhead() -> int:
+    """实测当前工具集的 schema 字节开销（估算 token），失败回退 22000。"""
+    global _TOOL_SCHEMA_TOKEN_OVERHEAD_CACHE
+    if _TOOL_SCHEMA_TOKEN_OVERHEAD_CACHE is not None:
+        return _TOOL_SCHEMA_TOKEN_OVERHEAD_CACHE
+    try:
+        _tools, _ = get_native_tools_cached(USER_HOME_DIR, True)
+        _bytes = len(json.dumps(_tools, ensure_ascii=False).encode("utf-8"))
+        _TOOL_SCHEMA_TOKEN_OVERHEAD_CACHE = max(int(_bytes / 3.2), 5000)
+    except Exception:
+        _TOOL_SCHEMA_TOKEN_OVERHEAD_CACHE = _TOOL_SCHEMA_TOKEN_OVERHEAD
+    return _TOOL_SCHEMA_TOKEN_OVERHEAD_CACHE
 
 # ── 分层压缩状态 ──
 # Layer 2 / TimeBased：闲置超过 60 分钟无交互 → 清理已被 AI 消费的旧工具结果
@@ -4714,11 +5867,15 @@ def _effective_compact_threshold(session_id: str = "") -> int:
     return max(_thr, 32 * 1024)
 
 
-def _estimate_conversation_tokens(conversation_history: List[Dict]) -> int:
+def _estimate_conversation_tokens(conversation_history: List[Dict], session_id: str = "") -> int:
     """估算整段对话历史（含 reasoning_content / tool_calls 参数）的 token 数。
 
     优先用上一轮真实 usage 校准 tokPerChar（扣除工具 schema 固定开销），
     无历史数据时回退 memory_compact 的 CJK 感知估算。
+
+    session_id: 校准字符数按会话隔离读取。子代理（explore_*）/压缩摘要
+                （compact_*）的请求在后台运行，若不隔离，主会话会拿它们的
+                字符数做分母 → tokPerChar 虚高 → AutoCompact 提前触发（缓存断裂）。
     """
     from .ai_lib.memory_compact import estimate_tokens
     _total = 0
@@ -4746,14 +5903,30 @@ def _estimate_conversation_tokens(conversation_history: List[Dict]) -> int:
         _last_prompt = getattr(_thread_locals, "last_prompt_tokens", 0) or 0
         if _last_prompt > 0 and _chars > 0:
             from .ai_lib.api import get_last_request_chars as _glrc
-            _last_chars = _glrc() or 0
+            _last_chars = _glrc(session_id) or 0
             if _last_chars > 0:
-                _ratio = (_last_prompt - _TOOL_SCHEMA_TOKEN_OVERHEAD) / _last_chars
+                _ratio = (_last_prompt - _measured_tool_schema_overhead()) / _last_chars
                 _ratio = min(max(_ratio, 0.10), 0.80)
                 return max(int(_chars * _ratio), _total)
     except Exception:
         pass
     return _total
+
+
+def _reset_ai_interrupt_flags() -> None:
+    """复位 AI 中断标志（ai_cmd 与 mcp_state 双份）。
+
+    Ctrl+C 在 SSE 阶段由 _interrupt_handler 置位的是 mcp_state 副本
+    （api.py 流式循环检查它），而旧复位点只清 ai_cmd 模块变量——
+    mcp_state 标志一旦置位永不复位 → 后续提问 API 一启动就中断。
+    """
+    global _AI_INTERRUPTED
+    _AI_INTERRUPTED = False
+    try:
+        from .ai_lib import mcp_state as _msp
+        _msp._AI_INTERRUPTED = False
+    except Exception:
+        pass
 
 
 def handle_ai(
@@ -4851,15 +6024,29 @@ def handle_ai(
     
     init_ai_dangerous_commands(user_home_dir, log_info)
     dangerous_commands = load_ai_dangerous_commands(user_home_dir, log_info)
+    # 特别高危清单（rm -rf / sudo rm / dd 等毁灭型命令）：任何上下文下都强制人工确认
+    init_ai_extra_dangerous_commands(user_home_dir, log_info)
+    extra_dangerous_commands = load_ai_extra_dangerous_commands(user_home_dir, log_info)
     
-    # ── lint/test 子代理命令执行器：经与主 AI 相同的安全管线（capture + parse_and_execute）──
+    # ── 子代理命令执行器：经与主 AI 相同的安全管线（capture + parse_and_execute）──
     # 危险命令直接拒绝（子代理无法弹用户确认框）；全端子代理命令串行化防共享 PTY 输出交错。
+    # 内置命令一律拒绝（见 build_subagent_blocked_commands）：子代理只许执行真实
+    # 系统/工具命令——Onyx 内置命令（exit/clear/ai/manage/sado/source 等）、
+    # other_terminal_cmd.json（export/sudo/...）、shell 内置 cd（会改共享 shell CWD
+    # 并同步回主会话），都不暴露给子代理。
+    _subagent_blocked_cmds = build_subagent_blocked_commands(BUILTIN_COMMANDS, ROOT_DIR)
+
     def _subagent_run_command(_cmd: str) -> str:
-        """子代理 RunCommand 执行：危险命令拒绝 + 串行化 + 输出捕获。"""
+        """子代理 RunCommand 执行：危险命令拒绝 + 内置命令拒绝 + 串行化 + 输出捕获。"""
         try:
             _is_danger, _cmd_name = is_dangerous_command(_cmd, dangerous_commands)
             if _is_danger:
                 return f"⛔ 命令被拒绝（危险命令 [{_cmd_name}]，子代理无权执行）"
+            # 内置命令拦截：取首行第一个词（忽略前导空白），防止子代理篡改 REPL 状态
+            _head = extract_subagent_command_head(_cmd)
+            if _head and _head in _subagent_blocked_cmds:
+                return (f"⛔ 命令被拒绝：`{_head}` 是 Onyx/终端内置命令，子代理不可用。"
+                        f"子代理只能执行真实系统/工具命令（git/python/pytest 等）。")
             with _SUBAGENT_CMD_LOCK:
                 _captured = ""
                 _rc = None
@@ -4885,6 +6072,21 @@ def handle_ai(
     except Exception:
         pass
 
+    # ── web_search_agent 子代理联网执行器：与主 AI 同一底层实现（web_search
+    # 三模式调研），但不逐次弹用户确认——批准发生在 Agent 派发时；
+    # 危险面一致：SSRF 防护、http/https 限制、超时与输出截断全部复用主实现。
+    def _subagent_web_tool(_name: str, _params: dict) -> str:
+        try:
+            if _name == "web_search":
+                return _exec_web_search_multi(_params or {})
+            return f"⛔ 未知联网工具: {_name}"
+        except Exception as _e:
+            return f"❌ {_name} 执行失败: {_e}"
+    try:
+        set_subagent_web_executor(_subagent_web_tool)
+    except Exception:
+        pass
+
     # ── 主 AI RunCommand 执行器：走同一安全管线 ──
     # 危险命令弹用户确认（confirm_dangerous_command）、adv_code 模式语法拦截、
     # capture_command_output 捕获 + parse_and_execute 执行。
@@ -4898,9 +6100,17 @@ def handle_ai(
                 return "⛔ 命令为空"
             _is_danger, _cmd_name = is_dangerous_command(_cmd, dangerous_commands)
             if _is_danger:
+                # 上下文分级 + 特别高危清单：决定强制确认 / 超时放行 / 直接放行
+                _extra_danger, _extra_pattern = is_extra_dangerous_command(_cmd, extra_dangerous_commands)
+                try:
+                    _ctx_tokens = _estimate_conversation_tokens(conversation_history, current_session_id)
+                except Exception:
+                    _ctx_tokens = 0
                 _confirmed, _u_resp, _refuse_reason = confirm_dangerous_command(
                     _cmd, _cmd_name, lang_text, current_session_id,
-                    initial_question, interaction_count, log_info
+                    initial_question, interaction_count, log_info,
+                    context_tokens=_ctx_tokens,
+                    extra_dangerous=_extra_danger,
                 )
                 if not _confirmed:
                     return (f"⛔ 用户拒绝了危险命令 [{_cmd_name}]：{_cmd}\n"
@@ -4934,6 +6144,8 @@ def handle_ai(
         pass
     
     # 提取当前用户模式字符串（用于安全限制）
+    # 兜底 "low" 仅在调用方未传 user_mode 时生效（安全方向）；
+    # 正常路径跟随 user_mode.current_mode 实时值（activite 切换原地生效）
     _current_user_mode = "low"
     if user_mode is not None:
         if hasattr(user_mode, 'current_mode'):
@@ -4941,13 +6153,20 @@ def handle_ai(
         else:
             _current_user_mode = str(user_mode).lower()
 
-    # 检查 MCP 是否启用（manage set mcp false/true）
-    _mcp_enabled = True
+    # ── 注入子代理：子代理工具权限决策跟随主会话当前模式 ──
+    try:
+        from .ai_lib import subagent as _subagent_mode_hook
+        _subagent_mode_hook.set_user_mode(_current_user_mode)
+    except Exception:
+        pass
+
+    # 检查 MCP 是否启用（manage set mcp true/false；默认关闭——零默认 MCP）
+    _mcp_enabled = False
     _mcp_enabled_path = os.path.join(user_home_dir, ".config", "onyx", "mcp_enabled")
     try:
         if os.path.exists(_mcp_enabled_path) and os.path.isfile(_mcp_enabled_path):
             with open(_mcp_enabled_path, "r") as f:
-                _mcp_enabled = f.read().strip().lower() != "false"
+                _mcp_enabled = f.read().strip().lower() in ("true", "1", "yes", "on")
     except Exception:
         pass
 
@@ -5329,13 +6548,12 @@ def handle_ai(
 
     _signal.signal(_signal.SIGINT, _on_interrupt)
 
-    # 重置中断标志（避免上次 Ctrl+C 残留导致本次立即中断）
+    # 重置中断标志（避免上次 Ctrl+C 残留导致本次立即中断；ai_cmd 与 mcp_state 双份）
+    # 重置中断标志（避免上次 Ctrl+C 残留导致本次立即中断；ai_cmd 与 mcp_state 双份）。
+    # ⚠️ 必须保留函数级 global 声明：7279 行工具中断分支会对 _AI_INTERRUPTED 赋值，
+    # 无声明时 Python 视其为函数局部变量 → 6338 读取处 UnboundLocalError。
     global _AI_INTERRUPTED
-    _AI_INTERRUPTED = False
-
-    # 硬性规划门禁：新用户输入 = 新任务 → 重置计划批准状态（需重新 submit_plan）
-    set_plan_approved(False)
-    set_plan_prepared(False)  # 规划子代理状态同样重置（需重新 Agent(type="plan") 规划）
+    _reset_ai_interrupt_flags()
 
     # _MANUAL_COMPACT_REQUESTED 通过 _mcp_shared 模块属性访问，无需 global
 
@@ -5744,44 +6962,6 @@ def handle_ai(
                 return False, f"⛔ 路径越界：MCP 工具 '{tool}' 尝试访问 '{path}'，超出用户主目录范围"
             return False, f"⛔ Path out of bounds: MCP tool '{tool}' attempted to access '{path}'"
 
-        def _execute_single_tool(tool_name: str, params_str: str = "") -> None:
-            """执行单个 MCP 工具并将结果追加到面板展示列表（每次重新执行，无缓存）"""
-            import json as _json
-
-            # Plan 模式未确认 → 跳过
-            if mode == "plan" and not plan_confirmed:
-                tool_results_display.append({
-                    "name": tool_name, "params": _display_tool_params(params_str),
-                    "ok": False, "output": _mcp_t("Plan 模式: 已跳过", "Plan mode: skipped"),
-                    "lines": []
-                })
-                return
-
-            try:
-                if params_str.strip():
-                    params = _json.loads(params_str)
-                else:
-                    params = {}
-            except _json.JSONDecodeError:
-                params = _parse_tool_params(params_str, "")
-
-            ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
-                                          path_validator=_mcp_path_validator)
-            # ── 采集工具结果（供 library 记录）──
-            if ok and tool_name in LIB_CAPTURE_TOOLS:
-                try:
-                    from .ai_lib.storage import capture_tool_result
-                    capture_tool_result(tool_name, params, output)
-                except Exception:
-                    pass
-            # 取前100字符用于面板展示
-            _preview = output[:100] + ("..." if len(output) > 100 else "")
-            tool_results_display.append({
-                "name": tool_name, "params": _display_tool_params(params_str),
-                "ok": ok, "output": output,
-                "preview": _preview
-            })
-
 
         def on_stream_content(chunk: str) -> None:
             """实时流式回调：纯 Markdown 直通累积 + 更新复合 Panel"""
@@ -5815,11 +6995,10 @@ def handle_ai(
             import sys as _sys
             _sys.stderr.write("\n⚠️ 强制中断中...\n")
             _sys.stderr.flush()
-            # 如果有活动的 HTTP 请求，关闭连接以减少响应延迟
+            # 如果有活动的 HTTP 请求，关闭连接以减少响应延迟（仅当前会话的）
             try:
-                from .ai_lib.api import _ACTIVE_RESPONSE
-                if _ACTIVE_RESPONSE is not None:
-                    _ACTIVE_RESPONSE.close()
+                from .ai_lib.api import abort_active_response
+                abort_active_response(current_session_id)
             except Exception:
                 pass
         _signal.signal(_signal.SIGINT, _interrupt_handler)
@@ -5865,7 +7044,7 @@ def handle_ai(
                     and not _COMPACT_BREAKER_DISABLED.get(current_session_id)):
                 try:
                     _eff_thr = _effective_compact_threshold(current_session_id)
-                    if _estimate_conversation_tokens(conversation_history) >= _eff_thr:
+                    if _estimate_conversation_tokens(conversation_history, current_session_id) >= _eff_thr:
                         _new_hist, _saved, _superseded, _old_len, _trident_stats = _compact_conversation_history(
                             conversation_history,
                             user_home_dir=_mem_home,
@@ -5882,7 +7061,7 @@ def handle_ai(
                                 f", {_trident_stats.get('clustered_msgs', 0)} 聚类)[/]"
                             )
                             # ── 熔断器：压缩后仍 ≥90% 阈值 → 计数；连续 3 次 → 本会话停用自动压缩 ──
-                            _after = _estimate_conversation_tokens(conversation_history)
+                            _after = _estimate_conversation_tokens(conversation_history, current_session_id)
                             if _after >= int(_eff_thr * 0.9):
                                 _COMPACT_BREAKER_COUNTS[current_session_id] = (
                                     _COMPACT_BREAKER_COUNTS.get(current_session_id, 0) + 1)
@@ -5902,6 +7081,9 @@ def handle_ai(
                 loading_flag[0] = False  # Live Panel 已接管展示
                 
                 # 使用SSE模式调用（带实时流式回调）
+                # 每轮 API 调用前复位中断标志：复位权已从 call_ai_api_sse 收归主循环，
+                # 防止并发子代理请求把用户 Ctrl+C 置位的标志清零导致中断失效。
+                _reset_ai_interrupt_flags()
                 _mcp_debug(f"调用 call_ai_api_sse(messages={len(conversation_history)}条)")
                 # ── debug 模式：把 AI 真实看到的 conversation 写入 deb/{session_id}/round_N.txt ──
                 if debug_mode:
@@ -6253,6 +7435,7 @@ def handle_ai(
 
             elif plan_choice == "confirm":
                 console.print(lang_text.get("plan_confirmed", "✅ 计划已确认，即将进入执行阶段"), style="bold green")
+                _write_budget = 0  # 计划已确认：写入预算清零，规划门禁放行
                 conversation_history.append({"role": "user", "content": "用户已确认计划，请按步骤开始执行"})
                 _user_input_round = True  # 用户确认了计划
                 # ── 不再截断 submit_plan 工具结果 ──
@@ -6262,7 +7445,6 @@ def handle_ai(
                 # 计划正文保留在历史中，每轮以缓存命中价（约 1/10）回传，前缀保持稳定。
                 _pending_plan = ""
                 plan_confirmed = True
-                set_plan_approved(True)  # 硬性规划门禁：用户确认计划 → 放行修改类工具
                 continue_asking = True
                 continue
 
@@ -6358,14 +7540,15 @@ def handle_ai(
         # 处理 AI 工具调用（原生 function calling）
         if tool_calls:
             try:
-                # ── Agent 并行预派发：同一轮多个 Agent 调用先全部丢进后台线程 ──
-                # 主 AI 常发多个独立的 Agent 工具调用（各自 sync），逐个执行会严格串行
-                # （第一个阻塞到完成，第二个才开始）。预派发后主循环 join 取结果，
-                # 总耗时 = max(各 Agent) 而非 sum；结果仍按 tool_calls 顺序回填。
+                # ── Agent / web_search 并行预派发：同一轮多个独立调用先全部丢进后台线程 ──
+                # 主 AI 常发多个独立的 Agent 或 web_search 调用（各自 sync），逐个执行会
+                # 严格串行（第一个阻塞到完成，第二个才开始）。预派发后主循环 join 取结果，
+                # 总耗时 = max(各调用) 而非 sum；结果仍按 tool_calls 顺序回填。
+                # web_search 为 ReadOnly（自动放行），后台线程执行无确认交互风险。
                 _agent_futures = {}
                 _agent_out = {}
                 for _ai, _atc in enumerate(tool_calls):
-                    if _atc.get("name") != "Agent":
+                    if _atc.get("name") not in ("Agent", "web_search"):
                         continue
                     _ap_str = _atc.get("params_str", "")
                     _ap = {}
@@ -6377,19 +7560,21 @@ def handle_ai(
                     except Exception:
                         _ap = {}
 
-                    def _agent_worker(_idx, _params):
+                    def _agent_worker(_idx, _name, _params):
                         try:
                             _a_ok, _a_out = execute_mcp_tool(
-                                "Agent", _params, "filesystem", _current_user_mode,
+                                _name, _params, "filesystem", _current_user_mode,
                                 path_validator=_mcp_path_validator)
                         except Exception as _e:
                             _a_ok, _a_out = False, f"tool execution error: {_e}"
                         _agent_out[_idx] = (_a_ok, _a_out)
 
-                    _t = threading.Thread(target=_agent_worker, args=(_ai, _ap), daemon=True)
+                    _t = threading.Thread(target=_agent_worker,
+                                          args=(_ai, _atc.get("name"), _ap), daemon=True)
                     _t.start()
                     _agent_futures[_ai] = _t
                 _tc_pending = list(tool_calls)
+                _write_budget = 0  # 规划门禁：本轮累计写入字节（plan 确认后清零）
                 while _tc_pending:
                     tc = _tc_pending.pop(0)
                     _tc_i = len(tool_calls) - len(_tc_pending) - 1
@@ -6478,26 +7663,26 @@ def handle_ai(
                         _status = _RichStatus(f"  [dim]⏳ {_tool_display_name} 运行中…[/]", spinner="dots", console=console)
                         _status.start()
                         _status_started = True
+
+                    # ── 规划门禁（大小感知）：未确认计划时拦截大型/破坏性操作，引导 submit_plan ──
+                    _gate_msg = ""
+                    if not plan_confirmed and mode != "plan":
+                        _gated_flag, _write_budget = plan_gate_blocked(
+                            tool_name, params, plan_confirmed, _write_budget, mode)
+                        if _gated_flag:
+                            _gate_msg = (
+                                "⛔ 规划门禁：该操作需要先提交计划并获用户确认"
+                                "（大型写操作或破坏性操作）。请调用 submit_plan 提交计划。"
+                            )
+                            console.print(f"  [bold yellow]🔒 {_gate_msg}[/]")
                     try:
                         # Agent 工具：挂载 Status 引用，供 _exec_agent 同步等待时刷新灰色活动尾行
                         if tool_name == "Agent":
                             global _SUBAGENT_STATUS
                             _SUBAGENT_STATUS = _status if _status_started else None
-                        # ── 硬性规划门禁：修改类工具必须先经规划子代理规划 + submit_plan 用户确认 ──
-                        if tool_name in PLAN_GATE_TOOLS and not (is_plan_prepared() and is_plan_approved()):
-                            if not is_plan_prepared():
-                                ok, output = False, (
-                                    f"⛔ 规划门禁：`{tool_name}` 是修改类工具，当前任务尚未完成规划。"
-                                    f"请先调用 `Agent(type=\"plan\", description=..., prompt=...)` 规划子代理"
-                                    f"（只读分析，自动使用同系列更强模型）产出实施计划，"
-                                    f"再用 `submit_plan` 提交给用户确认。确认前不要重试被拒绝的工具。"
-                                )
-                            else:
-                                ok, output = False, (
-                                    f"⛔ 规划门禁：计划已由规划子代理产出，但尚未获得用户确认。"
-                                    f"请调用 `submit_plan` 提交计划（目标/涉及文件/分步步骤/验证方式），"
-                                    f"等待用户确认后再执行 `{tool_name}`。"
-                                )
+                        if _gate_msg:
+                            # 规划门禁拦截：不执行，结果回传 AI 引导规划
+                            ok, output = False, _gate_msg
                         elif tool_name == "Agent" and _tc_i in _agent_futures:
                             # Agent：join 预派发线程取并行结果（顺序不变）
                             try:
@@ -6509,9 +7694,6 @@ def handle_ai(
                             # 先尝试内置 handler，走不通再走 MCP
                             ok, output = execute_mcp_tool(tool_name, params, "filesystem", _current_user_mode,
                                                           path_validator=_mcp_path_validator)
-                        # ── 规划子代理完成 → 记录已规划状态（写类工具放行条件之一）──
-                        if ok and tool_name == "Agent" and str(params.get("type", "")).lower() == "plan":
-                            set_plan_prepared(True)
                         # ── 采集工具结果 ──
                         if ok and tool_name in LIB_CAPTURE_TOOLS:
                             try:
@@ -6585,12 +7767,13 @@ def handle_ai(
                 # Ctrl+C 强制打断工具执行
                 _AI_INTERRUPTED = True
                 console.print("\n  [bold red]⏹ 用户中断工具执行[/]")
-                # 终止所有 MCP 子进程
-                for _proc in MCP_SERVER_PROCESSES.values():
+                # 终止所有 MCP 子进程并同步清理注册表（防 stale；健康检查下次直接重建）
+                for _name, _proc in list(MCP_SERVER_PROCESSES.items()):
                     try:
                         _proc.terminate()
                     except Exception:
                         pass
+                    MCP_SERVER_PROCESSES.pop(_name, None)
                 # 补齐 tool_results 长度，确保与 tool_calls 一一对应
                 # 避免 "assistant 有 tool_calls 但缺少 tool 消息" 的 API 错误
                 while len(tool_results) < len(tool_calls):
@@ -6620,7 +7803,9 @@ def handle_ai(
                 tc_ids = []
                 _tool_call_items = []
                 for i, tc in enumerate(tool_calls):
-                    _raw_id = tc.get("id") or f"call_{interaction_count}_{i}"
+                    # fallback id 用 uuid：interaction_count 在 REPL 跨 turn 会重置，
+                    # 固定前缀会生成重复 id（assistant tool_calls 与 tool 消息引用冲突）
+                    _raw_id = tc.get("id") or f"call_{uuid.uuid4().hex[:10]}"
                     tc_ids.append(_raw_id)
                     _raw_args = tc.get("raw_arguments")
                     if not _raw_args:
@@ -6731,7 +7916,60 @@ def handle_ai(
                             _log_lines.append(f"    {_l}")
                         _log_lines.append(f"    ```")
                         continue
+                    # web_search 结构化展示：查询参数一目了然（用户能看到 AI 查了什么）
+                    if _tn == "web_search":
+                        try:
+                            _tc_params = json.loads(tc.get("params_str") or "{}")
+                        except Exception:
+                            _tc_params = {}
+                        _parts = []
+                        _act = str(_tc_params.get("action") or "mixed")
+                        _q = str(_tc_params.get("query", "") or "").strip()
+                        if _q:
+                            _parts.append(f"查询: {_q}")
+                        _qs = [str(x) for x in (_tc_params.get("queries") or []) if str(x).strip()]
+                        if _qs:
+                            _parts.append(f"附加查询 {len(_qs)} 个")
+                        _urls = [str(u) for u in (_tc_params.get("urls") or []) if str(u).strip()]
+                        if _urls:
+                            _parts.append(f"抓取 URL {len(_urls)} 个")
+                        _eng = _tc_params.get("engines") or ["duckduckgo", "bing"]
+                        _parts.append(f"引擎: {','.join(str(e) for e in _eng)}")
+                        if _tc_params.get("allowed_domains"):
+                            _parts.append(f"仅限: {','.join(str(d) for d in _tc_params['allowed_domains'])}")
+                        if _tc_params.get("exclude_domains"):
+                            _parts.append(f"排除: {','.join(str(d) for d in _tc_params['exclude_domains'])}")
+                        if _tc_params.get("time_range"):
+                            _parts.append(f"时效: {_tc_params['time_range']}")
+                        if _tc_params.get("safe_search"):
+                            _parts.append("安全搜索")
+                        if _tc_params.get("fetch_pages"):
+                            _parts.append(f"抓页({_tc_params.get('fetch_limit', 3)})")
+                        if _tc_params.get("max_results"):
+                            _parts.append(f"每引擎{_tc_params['max_results']}条")
+                        _log_lines.append(f"- **工具**: `{_tn}`")
+                        if _parts:
+                            _log_lines.append(f"  - **参数**: " + "；".join(_parts))
+                        _log_lines.append(f"  - **执行结果**:")
+                        _log_lines.append(f"    ```")
+                        _res_body = _res if isinstance(_res, str) else str(_res or "(无结果)")
+                        for _l in _res_body.split("\n")[:60]:
+                            _log_lines.append(f"    {_l}")
+                        if len(_res_body.split("\n")) > 60:
+                            _log_lines.append(f"    …(结果过长，已截断)")
+                        _log_lines.append(f"    ```")
+                        continue
                     _log_lines.append(f"- **工具**: `{_tn}`")
+                    # 通用调用参数摘要（让用户看到 AI 调用的参数，避免"不知道查了什么"）
+                    _param_summary = ""
+                    try:
+                        _p_show = json.loads(tc.get("params_str") or "{}")
+                        if _p_show:
+                            _param_summary = json.dumps(_p_show, ensure_ascii=False)[:150]
+                    except Exception:
+                        _param_summary = ""
+                    if _param_summary:
+                        _log_lines.append(f"  - **调用参数**: `{_param_summary}`")
                     _log_lines.append(f"  ```")
                     _log_lines.append(f"  {_res}")
                     _log_lines.append(f"  ```")
@@ -6775,10 +8013,18 @@ def handle_ai(
             original_cmd_count = len(ai_commands)
             
             if dangerous_cmds_found:
+                # 上下文分级 + 特别高危清单（批量场景与单条 RunCommand 同一策略）
+                try:
+                    _batch_ctx_tokens = _estimate_conversation_tokens(conversation_history, current_session_id)
+                except Exception:
+                    _batch_ctx_tokens = 0
                 confirmed_commands = []
                 for cmd, cmd_name in dangerous_cmds_found:
+                    _extra_danger, _extra_pattern = is_extra_dangerous_command(cmd, extra_dangerous_commands)
                     confirmed, user_response, refuse_reason = confirm_dangerous_command(
-                        cmd, cmd_name, lang_text, current_session_id, initial_question, interaction_count, log_info
+                        cmd, cmd_name, lang_text, current_session_id, initial_question, interaction_count, log_info,
+                        context_tokens=_batch_ctx_tokens,
+                        extra_dangerous=_extra_danger,
                     )
                     if confirmed:
                         confirmed_commands.append(cmd)
@@ -6835,10 +8081,13 @@ def handle_ai(
                         f"⚠️ Possibly not a command (alphanum ratio {ratio:.0%}):\n  {cmd[:120]}"
                     )
                     console.print(warn, style="bold yellow")
-                    try:
-                        confirm = input(_mcp_t("  确认执行？(y/N): ", "  Execute anyway? (y/N): ")).strip().lower()
-                    except (KeyboardInterrupt, EOFError):
-                        confirm = 'n'
+                    # 提示词直达真实终端（防 stdout 被捕获流替换）
+                    from .ai_lib.ui import real_terminal_io as _rtio2
+                    with _rtio2():
+                        try:
+                            confirm = input(_mcp_t("  确认执行？(y/N): ", "  Execute anyway? (y/N): ")).strip().lower()
+                        except (KeyboardInterrupt, EOFError):
+                            confirm = 'n'
                     if confirm != 'y':
                         console.print(_mcp_t("  已跳过", "  Skipped"), style="dim")
                         continue
@@ -6866,22 +8115,25 @@ def handle_ai(
                     
                     captured_output = ""
                     _output_line_count = 0
-                    with capture_command_output() as (stdout_catcher, stderr_catcher):
-                        stdout_catcher._ai_triggered = True  # AI 执行 → 限制显示
-                        # 标记为 AI 执行模式（exe.py 据此启用超时弹窗）
-                        _exe_module = sys.modules.get('lib.terminal.exe')
-                        if _exe_module:
-                            _exe_module.AI_EXECUTION_MODE = True
-                        try:
-                            if parse_and_execute:
-                                parse_and_execute(cmd)
-                        finally:
+                    # 与子代理 RunCommand 共享串行锁：capture_command_output 全局替换
+                    # sys.stdout，并发执行会互相覆盖、恢复顺序颠倒（输出污染 AI 上下文）
+                    with _SUBAGENT_CMD_LOCK:
+                        with capture_command_output() as (stdout_catcher, stderr_catcher):
+                            stdout_catcher._ai_triggered = True  # AI 执行 → 限制显示
+                            # 标记为 AI 执行模式（exe.py 据此启用超时弹窗）
+                            _exe_module = sys.modules.get('lib.terminal.exe')
                             if _exe_module:
-                                _exe_module.AI_EXECUTION_MODE = False
-                        
-                        full_output = stdout_catcher.get_output() + "\n" + stderr_catcher.get_output()
-                        captured_output = full_output.strip()
-                        _output_line_count = stdout_catcher._line_count
+                                _exe_module.AI_EXECUTION_MODE = True
+                            try:
+                                if parse_and_execute:
+                                    parse_and_execute(cmd)
+                            finally:
+                                if _exe_module:
+                                    _exe_module.AI_EXECUTION_MODE = False
+                            
+                            full_output = stdout_catcher.get_output() + "\n" + stderr_catcher.get_output()
+                            captured_output = full_output.strip()
+                            _output_line_count = stdout_catcher._line_count
                     
                     # ── 在 capture 外面显示输出（capture 内 sys.stdout 被替换了）──
                     if captured_output:
@@ -7189,5 +8441,6 @@ def handle_ai(
     # 恢复原始 SIGINT 处理器
     import signal as _signal
     _signal.signal(_signal.SIGINT, _original_sigint)
+    _reset_ai_interrupt_flags()  # 兜底复位双份中断标志（防残留导致下次提问立即中断）
     cleanup_output_cache()
     _flush_pending_tool_logs()  # 兜底：确保工具结果记录落盘（中断/提前退出路径）

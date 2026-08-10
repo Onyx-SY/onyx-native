@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "cd": {
+      "Chinese": "用法：cd [选项] [路径]\n功能：切换工作目录\n特殊路径：\n  cd ~        切换到用户主目录\n  cd ..       切换到上级目录\n  cd -        切换到上一个目录\n  cd /        切换到根目录（Linux）/系统根目录（Windows）\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: cd [option] [path]\nFunction: Change working directory\nSpecial paths:\n  cd ~        Switch to user home directory\n  cd ..       Switch to parent directory\n  cd -        Switch to previous directory\n  cd /        Switch to root directory (Linux)/system root (Windows)\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

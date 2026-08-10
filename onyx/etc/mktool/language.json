@@ -1,0 +1,28 @@
+{
+  "supported_languages": [
+    {
+      "name": "python",
+      "label": "Python",
+      "extension": ".py",
+      "formwork_path": "onyx/etc/mktool/formwork.py",
+      "description": "Python语言（跨平台兼容，推荐新手）"
+    },
+    {
+      "name": "c",
+      "label": "C",
+      "extension": ".c",
+      "formwork_path": "onyx/etc/mktool/formwork.c",
+      "description": "C语言（性能高效，需编译运行）"
+    },
+    {
+      "name": "cpp",
+      "label": "C++",
+      "extension": ".cpp",
+      "formwork_path": "onyx/etc/mktool/formwork.cpp",
+      "description": "C++语言（面向对象，兼容C语法）"
+    }
+  ],
+  "default_language": "python",
+  "language_file_path": "USER_HOME_DIR/.config/onyx/language",
+  "storage_path_rule": "USER_HOME_DIR/.[toolname]/"
+}

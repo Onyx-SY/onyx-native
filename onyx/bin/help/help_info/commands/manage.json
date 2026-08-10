@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "manage": {
+      "Chinese": "用法：manage [-q/--quiet] [set/clean] [子选项] [值/子选项]\n功能：系统配置管理与缓存/日志清理（无配置文件时自动创建默认值）\n默认配置：\n  debug-times = false（默认关闭命令耗时输出）\n  debug-parsecmd = false（默认关闭命令解析调试）\n  language = Chinese（默认中文界面）\n  clean-log-time = 3（默认保留3天日志，自动清理过期）\n  adv_danger_cmd_prompt = true（默认启用adv危险命令二次确认）\n  mcp = true（默认启用MCP协议工具）\n  mood = true（默认启用AI情感模块）\n  spring-mode = true（默认启用启动问候语）\n子命令：\n  set  <选项> <值>    - 设置系统配置，支持：debug-times/debug-parsecmd/language/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/mood/spring-mode\n  clean <选项> [子选项] - 清理缓存/日志，缓存子选项：path/cmdmap/dircache/toolindex/all；日志子选项：all/other\n  -q/--quiet          - 静默模式，执行时不输出提示信息\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: manage [-q/--quiet] [set/clean] [sub-option] [value/sub-option]\nFunction: System configuration management and cache/log cleaning (auto-create default config if not exists)\nDefault Config:\n  debug-times = false (Disable command execution time output)\n  debug-parsecmd = false (Disable full-process debugging)\n  language = Chinese (Chinese interface by default)\n  clean-log-time = 3 (Retain logs for 3 days, auto-clean expired)\n  adv_danger_cmd_prompt = true (Enable adv dangerous cmd confirmation)\n  mcp = true (Enable MCP protocol tools)\n  mood = true (Enable AI mood module)\n  spring-mode = true (Enable startup greetings)\nSubcommands:\n  set  <option> <value>    - Set config, options: debug-times/debug-parsecmd/language/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/mood/spring-mode\n  clean <option> [sub-option] - Clean cache/log, cache: path/cmdmap/dircache/toolindex/all; log: all/other\n  -q/--quiet          - Silent mode, no prompt output\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

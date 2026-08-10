@@ -7,6 +7,7 @@ AI 独立交互会话 — 持久对话 REPL
 用法：由 ai_cmd.handle_ai 入口调用，或 Onyx.py 直接调用 ai_interactive_session()。
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -18,8 +19,11 @@ from typing import Dict, Any, Optional, Callable, List
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding.defaults import load_key_bindings
 from prompt_toolkit.styles import Style as PromptStyle
+from prompt_toolkit.filters import is_searching
 
 from rich.console import Console
 from rich.panel import Panel
@@ -101,6 +105,8 @@ _HELP_TEXT_CN = """\
 ### 提示
 - 按 `Esc` 两次可中断当前 AI 请求
 - 按 `Ctrl+C` 可中断等待中的命令
+- 按 `Alt+Enter` 换行输入，不会发送给 AI；按 `Enter` 发送
+- 支持常规命令行编辑：方向键 / `Ctrl+A` `Ctrl+E` / `Ctrl+U` `Ctrl+K` / `Tab` 补全 / `Ctrl+R` 搜索历史
 - 输入 `/exit` 返回正常 shell
 """
 
@@ -115,6 +121,8 @@ Type your question directly to chat with AI. Context is maintained within the se
 ### Tips
 - Press `Esc` twice to interrupt AI request
 - Press `Ctrl+C` to interrupt running commands
+- Press `Alt+Enter` for a newline without sending; press `Enter` to send
+- Full command-line editing: arrows / `Ctrl+A` `Ctrl+E` / `Ctrl+U` `Ctrl+K` / `Tab` completion / `Ctrl+R` history search
 - Type `/exit` to return to shell
 """
 
@@ -1150,6 +1158,58 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
 
 # ─────────────────────────────── 主入口 ───────────────────────────────
 
+_PASTE_ENTER_WINDOW = 0.3  # 秒：Enter 提交后等待"快速连续回车"（粘贴后续行）的窗口
+
+# 探测用哑输出：探测 prompt_async 不渲染任何内容——既不留残留行，
+# 也不会像手动 ANSI 清行那样干扰 prompt_toolkit 的光标位置跟踪
+# （Termux 上 CPR 不可靠时，外部序列会导致下一轮提示符渲染错位/消失）。
+from prompt_toolkit.output import DummyOutput as _DummyOutput
+_DUMMY_OUTPUT = _DummyOutput()
+
+
+def _collect_paste_lines(peek_session, first: str,
+                         window: float = _PASTE_ENTER_WINDOW) -> str:
+    """粘贴合并：检测快速连续回车（无括号粘贴终端的多行粘贴 = 突发按键流）。
+
+    - first 已含换行（Alt+Enter 多行 / 括号粘贴场景）或为斜杠命令 → 原样返回（零延迟）；
+    - 否则在 window 秒内探测后续行：有 → 合并（连发的 N 行粘贴一次提交）；无 → 原样返回。
+    - peek_session 是独立探测会话（共享主会话 input + DummyOutput 零渲染）：
+      PromptSession.app 构造时只建一次，若探测复用主会话的 app 会污染其渲染状态
+      → 下一轮提示符消失（双 pty 实测确认）。
+    """
+    if "\n" in first or first.lstrip().startswith("/"):
+        return first
+    parts = [first]
+    while True:
+        more = _probe_next_line(peek_session, window)
+        if more is None:
+            break
+        parts.append(more)
+    return "\n".join(parts)
+
+
+def _probe_next_line(peek_session, window: float) -> Optional[str]:
+    """子线程探测下一行：超时 / 中断 / 异常返回 None（调用方停止合并）。"""
+    import threading as _threading
+    result = []
+
+    def _run():
+        async def _probe():
+            return await asyncio.wait_for(
+                peek_session.prompt_async(message="", handle_sigint=False), window)
+        try:
+            result.append(asyncio.run(_probe()))
+        except asyncio.TimeoutError:
+            result.append(None)
+        except BaseException:
+            result.append(None)
+
+    _t = _threading.Thread(target=_run, daemon=True)
+    _t.start()
+    _t.join(window + 2.0)  # 兜底：wait_for 取消后线程必然退出，上限保护
+    return result[0] if result else None
+
+
 def ai_interactive_session(
     user_home_dir: str,
     onyx_module=None,
@@ -1212,6 +1272,47 @@ def ai_interactive_session(
     slash_cmds = sorted((_SLASH_COMMANDS_CN if current_lang == "chinese" else _SLASH_COMMANDS_EN).keys())
     completer = WordCompleter(slash_cmds, ignore_case=True, sentence=True)
 
+    # ── 输入历史（FileHistory 持久化到用户配置目录，跨会话保留）──
+    _hist_dir = os.path.join(user_home_dir, ".config", "onyx", "ai")
+    try:
+        os.makedirs(_hist_dir, exist_ok=True)
+    except OSError:
+        pass
+    _hist_path = os.path.join(_hist_dir, "history")
+    try:
+        _history = FileHistory(_hist_path)
+    except Exception:
+        _history = None
+
+    # ── 键绑定：Enter 提交发送；Alt+Enter 插入换行（不发送）──
+    # 注：Ctrl+Enter 在终端协议层面与 Enter 字节相同（都是 \r），prompt_toolkit 无法区分，
+    #     因此换行键只能选 Alt+Enter（escape-enter）。
+    # merge 默认绑定（保留全部 readline 编辑功能：方向键/Ctrl+A/E/U/K/Tab/Ctrl+R）
+    _kb = KeyBindings()
+
+    # eager=True 必须加：PromptSession 会把自定义绑定合并到默认绑定之后（prompt.py 的
+    # merge_key_bindings([prompt_bindings, self.key_bindings])），而 key_processor 命中的是
+    # 匹配列表的最后一个；不加 eager 时 multiline 默认的 "enter 换行" 绑定会排在 _submit
+    # 后面并抢先命中，导致 Enter 只换行不发送。eager 绑定无视顺序优先执行。
+    # filter=~is_searching：Ctrl+R 搜索时 Enter 应接受搜索（默认 accept_search 绑定），
+    # 让位给默认绑定。补全菜单状态由 _submit 自己处理（先应用选中项再提交），否则
+    # prompt_toolkit 默认（无 Enter 接受补全的绑定）会让 Enter 落回 multiline 换行。
+    @_kb.add('enter', eager=True, filter=~is_searching)
+    @_kb.add('c-j', eager=True, filter=~is_searching)
+    def _submit(event):
+        """Enter 提交（覆盖 multiline 默认换行行为）"""
+        b = event.current_buffer
+        if b.complete_state and b.complete_state.complete_index is not None:
+            b.apply_completion(b.complete_state.current_completion)
+        event.current_buffer.validate_and_handle()
+
+    @_kb.add('escape', 'enter', eager=True, filter=~is_searching)
+    def _newline(event):
+        """Alt+Enter 插入换行，不发送给 AI"""
+        event.current_buffer.insert_text('\n')
+
+    _key_bindings = merge_key_bindings([_kb, load_key_bindings()])
+
     # ── 对话循环 ──
     # ESC 不杀 AI，只设标记；AI 本轮完成后询问用户是否有补充
     esc_flag = [False]
@@ -1221,6 +1322,19 @@ def ai_interactive_session(
             _make_ai_prompt,
             style=_AI_PROMPT_STYLE,
             completer=completer,
+            history=_history,
+            multiline=True,
+            key_bindings=_key_bindings,
+        )
+
+        # ── 粘贴合并探测会话：独立 app（DummyOutput 零渲染），共享主会话 input ──
+        # PromptSession.app 构造时只建一次：若探测复用主会话的 app 会污染其渲染
+        # 状态 → 下一轮提示符消失（双 pty 实测确认），因此探测必须用独立会话。
+        _peek_session = PromptSession(
+            input=getattr(session, "_input", None),
+            output=_DUMMY_OUTPUT,
+            key_bindings=_key_bindings,
+            multiline=True,
         )
 
         while True:
@@ -1230,7 +1344,7 @@ def ai_interactive_session(
                 console.print(f"[dim]💬 {_t('ask_after_esc', current_lang)}[/]")
 
             try:
-                user_input = session.prompt().strip()
+                user_input = session.prompt()
             except KeyboardInterrupt:
                 # prompt 阶段的 ESC → 设标记，等 AI 结束后问
                 esc_flag[0] = True
@@ -1240,11 +1354,13 @@ def ai_interactive_session(
                 console.print(f"\n[dim]{_t('bye', current_lang)}[/]")
                 break
 
+            # 粘贴合并：快速连续回车（无括号粘贴终端的多行粘贴）→ 一次发给 AI
+            user_input = _collect_paste_lines(_peek_session, user_input).strip()
             if not user_input:
                 continue
 
-            # / 指令
-            if user_input.startswith("/"):
+            # / 指令（仅单行输入走指令分支；多行输入整体发给 AI）
+            if user_input.startswith("/") and "\n" not in user_input:
                 if not _dispatch_slash(user_input, ctx):
                     break
                 continue

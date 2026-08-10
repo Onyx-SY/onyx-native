@@ -130,6 +130,19 @@ def _is_in_virtual_root(path: str) -> bool:
     return target == root or target.startswith(root + os.sep)
 
 
+def _is_legal_path(path: str) -> bool:
+    """合法区域 = 虚拟根 ∪ USER_HOME_DIR（home 可能部署在虚拟根外，如 HOME 在根外）。
+    仅接受绝对路径——C 库的越界消息（如 "You can't cross /"）是相对路径，
+    经 realpath 后可能落在 home 前缀内被误判为合法。"""
+    if not path.startswith('/'):
+        return False
+    if _is_in_virtual_root(path):
+        return True
+    if USER_HOME_DIR and os.path.realpath(path).startswith(USER_HOME_DIR):
+        return True
+    return False
+
+
 def _match_perm_rule(path: str) -> Optional[str]:
     """在Python层匹配规则（作为fallback）"""
     if not PERM_RULES_JSON:
@@ -201,8 +214,10 @@ def _is_special_real_path(path: str) -> bool:
     return False
 
 
-# 非路径字符正则：保留 0-9 a-z A-Z _ / .  其余替换为空格
-_NON_PATH_RE = re.compile(r'[^a-zA-Z0-9_/.]')
+# 非路径字符正则：保留 Unicode 单词字符（含中文等非 ASCII）+ / .，其余替换为空格。
+# 修复：旧正则 [^a-zA-Z0-9_/.] 会把中文路径（如「工具」）替换成空格，导致含中文的
+# 完整路径被掐头成前缀再递归解析，前缀被误判为沙箱外真实路径而误伤（home/ROOT_DIR 全被拦）。
+_NON_PATH_RE = re.compile(r'[^\w/.]')
 
 
 def _extract_path_core(token: str) -> str:
@@ -270,6 +285,15 @@ def resolve_path(path: str) -> str:
     if _is_root_overlap():
         return path
 
+    # 真实存在的沙箱外绝对路径（如 /storage/emulated/0/...、/data/data/...）→ 越界拦截。
+    # 例外："/" 本身映射虚拟根；/dev/* 等特殊白名单路径；不存在的假路径（如 /api）；
+    # USER_HOME_DIR 及其内部路径（home 可能位于虚拟根外，如本部署 HOME 在根外）。
+    if (path.startswith('/') and path != '/'
+            and not _is_special_real_path(path)
+            and os.path.exists(path)
+            and not _is_legal_path(path)):
+        return FORBIDDEN_MSG
+
     # 先判断是否需要解析（不走缓存：不解析的路径即使旧缓存命中也不得映射，
     # 避免 /api 这类路径在 TTL 内被旧缓存条目错误解析到虚拟根）
     if not _should_resolve(path):
@@ -290,7 +314,21 @@ def resolve_path(path: str) -> str:
         _add_to_path_cache(path, resolved, time.time(), os.getcwd())
         return resolved
 
-    # 优先使用C库
+    # ~ / ~/ 直接走 Python fallback：C 库在 USER_HOME_DIR 位于虚拟根外时
+    # 会把 ~ 解析成越界消息（如 "You can't cross /"），而 ~ 应落在 home 内。
+    if path == "~" or path.startswith("~/"):
+        resolved = _resolve_path_python_fallback(path)
+        if not _is_legal_path(resolved) and resolved != FORBIDDEN_MSG:
+            return FORBIDDEN_MSG
+        _add_to_path_cache(path, resolved, time.time(), os.getcwd())
+        return resolved
+
+    # 优先使用C库（仅作加速，不参与安全决策）：
+    # C 库的 should_resolve 与 Python 层不一致（如不识别裸 `..`，会原样返回相对路径），
+    # 且只认「虚拟根内」合法——USER_HOME_DIR 位于虚拟根外时会对 home 内路径误报越界。
+    # 因此只有通过 Python 合法性校验（绝对路径且在 ROOT_DIR∪USER_HOME_DIR 内）的结果
+    # 才被采纳；FORBIDDEN_MSG 与相对路径原样返回一律回退 Python fallback 终审。
+    # C 库永远无法授予或否决任何权限——安全边界全部由本模块 Python 层保证。
     if C_LIB_AVAILABLE:
         try:
             res = C_LIB.resolve_path(
@@ -301,18 +339,17 @@ def resolve_path(path: str) -> str:
             )
             if res:
                 decoded = res.decode()
-                # C库已经做过权限检查，但为了安全再验证一次
-                if not _is_in_virtual_root(decoded) and decoded != FORBIDDEN_MSG:
-                    return FORBIDDEN_MSG
-                _add_to_path_cache(path, decoded, time.time(), os.getcwd())
-                return decoded
+                if decoded != FORBIDDEN_MSG and _is_legal_path(decoded):
+                    _add_to_path_cache(path, decoded, time.time(), os.getcwd())
+                    return decoded
+                # 其余情况（FORBIDDEN_MSG / 未解析的相对路径）→ 继续走 Python 终审
         except Exception as e:
             print(f"C library resolve failed: {e}")
 
     # Python fallback解析
     resolved = _resolve_path_python_fallback(path)
 
-    if not _is_in_virtual_root(resolved) and resolved != FORBIDDEN_MSG:
+    if not _is_legal_path(resolved) and resolved != FORBIDDEN_MSG:
         return FORBIDDEN_MSG
 
     _add_to_path_cache(path, resolved, time.time(), os.getcwd())
@@ -342,7 +379,7 @@ def _resolve_path_python_fallback(path: str) -> str:
     
     resolved = os.path.realpath(os.path.join(base, path))
     
-    if not _is_in_virtual_root(resolved):
+    if not _is_legal_path(resolved):
         return FORBIDDEN_MSG
     
     return resolved

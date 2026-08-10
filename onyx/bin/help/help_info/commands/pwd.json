@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "pwd": {
+      "Chinese": "用法：pwd\n功能：显示当前工作目录（Windows等效 cd 命令无参数）\n输出：同时显示虚拟路径和物理路径\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: pwd\nFunction: Print working directory (equivalent to cd without args on Windows)\nOutput: Shows both virtual path and physical path\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

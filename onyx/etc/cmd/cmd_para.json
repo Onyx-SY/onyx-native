@@ -1,0 +1,50 @@
+{
+  "cmd_para": [
+    {
+      "cmd": ["activite"],
+      "opts": ["-m", "-t", "--help", "--version"],
+      "params": ["low", "mid", "adv"],
+      "type": "string"
+    },
+    {
+      "cmd": ["manage"],
+      "opts": [],
+      "params": ["set", "clean"],
+      "type": "string"
+    },
+    {
+      "cmd": ["autocmd"],
+      "opts": [],
+      "params": ["add", "remove", "list"],
+      "type": "string"
+    },
+    {
+      "cmd": ["ls"],
+      "opts": ["-l", "-a", "-t", "-r", "-R", "-S", "-i", "-d", "-h", "-F", "--list", "--all", "--sort=time", "--reverse", "--recursive", "--sort=size", "--inode", "--directory", "--human-readable", "--classify", "--help", "--version"],
+      "params": [],
+      "type": "path",
+      "extra_cmds": ["nano"] 
+    },
+    {
+      "cmd": ["cd"],
+      "opts": ["-P", "-L", "--physical", "--logical", "--help", "--version"],
+      "params": [],
+      "type": "dir"
+    },
+  ],
+  "common_opts": ["--help", "--version", "-h", "-v"],
+  "param_types": {
+    "path": "file/directory path",
+    "dir": "directory path",
+    "file": "file path",
+    "string": "string param",
+    "number": "number param",
+    "pattern": "pattern string",
+    "perm": "permission number(1-777)",
+    "path+pattern": "path+pattern",
+    "file+file": "two file paths",
+    "file+string": "file path+string param",
+    "string+string": "string+string param",
+    "none": "no param"
+  }
+}

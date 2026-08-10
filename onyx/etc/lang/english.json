@@ -1,0 +1,144 @@
+{
+  "cd_handler": {
+    "usage": "Usage: cd [OPTION]... [DIR]",
+    "desc": "Change the shell working directory.",
+    "version": "cd (Onyx Toolbox) {version}",
+    "invalid_opt": "cd: invalid option -- '{opt}'",
+    "try_help": "Try 'cd --help' for more information.",
+    "oldpwd_not_set": "cd: OLDPWD not set",
+    "cannot_exit_root": "cd: {path}: Cannot exit root directory（/）",
+    "no_such_file": "cd: {path}: No such file or directory",
+    "not_a_dir": "cd: {path}: Not a directory",
+    "perm_denied": "cd: {path}: Permission denied",
+    "unexpected_error": "cd: unexpected error: {err}",
+    "log_cd_success": "cd from '{from_dir}' to '{to_dir}'",
+    "log_cd_fail": "cd command failed: {err}"
+  },
+  "adv_pwd_handler": {
+    "usage": "Usage：set-adv-pwd",
+    "desc": "Function：Modify advanced mode administrator password",
+    "only_adv_mode": "Password can only be modified in adv mode, switch first",
+    "input_current": "Please enter current administrator password：",
+    "pwd_incorrect": "Current password incorrect！",
+    "verify_fail": "Password verification failed：{err}",
+    "prompt_new": "Setting new administrator password（at least 6 characters）",
+    "input_new1": "Please enter new password：",
+    "input_new2": "Please confirm new password：",
+    "pwd_not_match": "The two passwords are inconsistent, please re-enter",
+    "pwd_too_short": "Password length less than 6 characters, please re-enter",
+    "backup_old": "Old password file backed up（.onyx_admin_pass.bak）",
+    "set_ok": "✓ Administrator password modified successfully！",
+    "set_fail": "Password modification failed：{err}",
+    "restore_old": "Restored original password"
+  },
+  "security.check_sandbox_path": {
+    "os_mode_pass": "OS mode: Path {path} automatically passes sandbox verification",
+    "sandbox_disabled": "Sandbox disabled, path {path} automatically allowed",
+    "path_block": "Sandbox blocked: Path not in allowed range",
+    "path_error": "Path check exception: {err}"
+  },
+  "security.check_tool_permission": {
+    "perm_exceed": "Current {mode} mode permission limit {limit}, cannot use level {req} tools",
+    "non_adv_high_perm": "Non-adv mode prohibits level {req} tools, please switch to adv mode"
+  },
+  "security.check_blocked_cmd": {
+    "base_block": "Sandbox blocked: High-risk command → {cmd} (matching rule: {rule})",
+    "special_block": "Sandbox blocked: Kali exclusive high-risk command → {cmd} (matching rule: {rule})",
+    "adv_confirm": "⚠️ High-risk command, confirm execution? (y/N)：",
+    "config_load_fail": "Warning: Failed to load high-risk command config, use default rules",
+    "adv_cancelled": "High-risk command execution cancelled",
+    "captcha_prompt": "Captcha: [ {code} ] — Enter the captcha above to confirm",
+    "captcha_wrong": "Wrong captcha, cancelled"
+  },
+  "tool_registry.execute_tool": {
+    "sandbox_block_tool": "Sandbox blocked: Tool path not in allowed range → {path}",
+    "process_limit": "Process count exceeds limit (max {max})"
+  },
+  "bootstrap.init_sado_config": {
+    "os_mode_non_root": "OS mode: Only root can initialize sado config, current user is non-root, skip",
+    "os_mode_root_creating": "OS mode (root user): Creating sado config file...",
+    "tbs_mode_creating": "TBS mode: Creating sado config file...",
+    "config_created": "Sado config file created: {path}",
+    "config_exists": "Sado config file already exists: {path}",
+    "config_load_fail": "Failed to load sado config: {err}",
+    "config_load_success": "Sado config loaded successfully: {count} rules"
+  },
+  "bootstrap.init_admin_password": {
+    "prompt_set": "First use of advanced mode (adv), please set administrator password (at least 6 characters)",
+    "input_pwd1": "Please enter adv password: ",
+    "input_pwd2": "Please confirm adv password: ",
+    "pwd_not_match": "The two passwords are inconsistent, please re-enter",
+    "pwd_too_short": "Password length is less than 6 characters, please re-enter",
+    "dir_create_fail": "Failed to create password storage directory: {err}",
+    "pwd_save_fail": "Password save failed: {err}",
+    "os_mode_non_root": "OS mode: Only root can initialize ADV password, current user is non-root, skip initialization",
+    "os_mode_root_creating": "OS mode (root user): Initializing ADV password...",
+    "tbs_mode_creating": "TBS mode: Initializing ADV password..."
+  },
+  "bootstrap.verify_admin_password": {
+    "input": "Please enter administrator password：",
+    "incorrect": "Password incorrect！",
+    "verify_fail": "Password verification failed：{err}"
+  },
+  "config_loader": {
+    "config_not_found": "Config file not found: {path}, program cannot start",
+    "config_format_error": "{file} format error: {err} (line: {line}, column: {col}), program cannot start",
+    "config_read_fail": "{file} read failed: {err}, program cannot start",
+    "missing_required_nodes": "{file} missing required nodes: {nodes}, program cannot start",
+    "config_loaded_success": "{file} loaded successfully",
+    "template_reset": "Template not found, reset to 'def' and fixed config.json"
+  },
+  "onyx.execute_tool": {
+    "sandbox_block_tool": "Sandbox blocked: Tool path not in allowed range → {path}",
+    "process_limit": "Process count exceeds limit (max {max})"
+  },
+  "onyx.source_rc_files": {
+    "sys_rc_load": "System RC file loaded: {path}",
+    "user_rc_load": "User RC file loaded: {path}",
+    "sys_rc_fail": "System RC file load failed: {err}",
+    "user_rc_fail": "User RC file load failed: {err}",
+    "rc_exec_start": "Executing RC initialization script...",
+    "rc_exec_complete": "RC script executed successfully",
+    "rc_disabled": "RC file execution disabled"
+  },
+  "onyx.initialize_environment": {
+    "fatal_user_home_fail": "Fatal error: User home directory initialization failed, program cannot start",
+    "fatal_config_load_fail": "Fatal error: Core config load failed, program cannot start",
+    "fatal_admin_pwd_fail": "Fatal error: Admin password initialization failed, program cannot start",
+    "fatal_tool_dir_fail": "Fatal error: Tool directory initialization failed, program cannot start",
+    "oneshot_admin_pwd_missing": "Admin password must be set in interactive mode first",
+    "oneshot_sado_config_missing": "Sado config must be initialized in interactive mode first",
+    "init_success": "Onyx environment initialized successfully",
+    "init_failed": "Onyx environment initialization failed",
+    "cache_mode_detected": "Persistent mode cache detected: {mode}, auto switching to this mode",
+    "cache_mode_adv_flow": "Cache specifies adv mode, executing safe switching flow...",
+    "cache_mode_adv_low_first": "Switched to low mode, preparing to enter adv via activite...",
+    "cache_mode_adv_success": "✅ Successfully entered adv mode via persistent cache",
+    "cache_mode_adv_failed": "❌ Failed to enter adv mode via persistent cache: {err}",
+    "cache_mode_invalid": "⚠️ Invalid persistent cache mode value: {val}, ignored and using default config"
+  },
+  "onyx.run_command_once": {
+    "exec_error": "Command execution error: {err}",
+    "init_failed": "Environment initialization failed"
+  },
+  "onyx.main_loop": {
+    "boot_time_info": "Boot Time: {time}",
+    "system_ready": "\n[Shell Ready] Enter command to start operation (enter exit to exit)...",
+    "main_loop_crash": "Main loop crashed unexpectedly: {err}",
+    "keyboard_interrupt": "\n^C",
+    "cmd_exec_interrupt": "Command execution interrupted: User triggered Ctrl+C",
+    "cmd_exec_error": "Command execution error: {err}",
+    "debug_time_cost": "（Time cost: {time}s）",
+    "rc_executing": "Executing RC initialization script...",
+    "rc_executed": "RC script executed successfully",
+    "stage_module_load": "Stage1-Module load completed",
+    "stage_init_env_start": "Stage2-Start environment initialization",
+    "stage_init_env_complete": "Stage2-Environment initialization completed (time: {time}ms)",
+    "stage_import_banner": "Stage3-Import Banner module (time: {time}ms)",
+    "stage_show_banner": "Stage4-Show startup banner (time: {time}ms)",
+    "stage_rc_files": "Stage5-Execute RC files (time: {time}ms)",
+    "stage_show_ready": "Stage6-Show ready prompt (time: {time}ms)",
+    "stage_wait_input": "Stage7-Waiting for user input",
+    "total_startup": "✅ Onyx startup complete! Total time: {time}ms"
+  }
+}

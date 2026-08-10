@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "echo": {
+      "Chinese": "用法：echo [选项] [字符串/变量...]\n功能：输出文本或变量值（Windows/Linux语法一致）\n核心选项：-n（不输出换行）、-e（启用转义字符，支持\\n换行、\\t制表符等）\n示例：\n  echo \"Hello Onyx\" - 输出字符串\n  echo -e \"Line1\\nLine2\" - 多行输出\n  echo $PATH - 输出环境变量\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: echo [option] [string/var...]\nFunction: Display a line of text (consistent syntax on Windows/Linux)\nCore options: -n (no trailing newline), -e (enable escape sequences, support \\n line break, \\t tab, etc.)\nExamples:\n  echo \"Hello Onyx\" - Output string\n  echo -e \"Line1\\nLine2\" - Multi-line output\n  echo $PATH - Output environment variable\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

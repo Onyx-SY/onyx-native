@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "sado": {
+      "Chinese": "名称：sado\n功能：临时提升权限执行命令（类似sudo）\n用法：sado <命令...>\n示例：sado ls /root\n说明：根据 /etc/sado.json 中的配置，临时将权限提升到指定的模式（low/mid/adv），执行完命令后自动恢复原权限。需要确认的规则会提示用户确认。",
+      "English": "Name: sado\nFunction: Temporarily elevate permissions to execute a command (like sudo)\nUsage: sado <command...>\nExample: sado ls /root\nDescription: Based on the configuration in /etc/sado.json, temporarily elevate permissions to the specified mode (low/mid/adv), then restore after execution. Rules that require confirmation will prompt the user."
+    }
+  }
+}

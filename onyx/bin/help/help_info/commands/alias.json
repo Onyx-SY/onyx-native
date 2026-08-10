@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "alias": {
+      "Chinese": "用法：alias | alias <别名>=<命令>\n功能：创建和管理命令别名\n示例：\n  alias - 查看所有已配置别名\n  alias ll='ls -l' - 创建ll别名（等效ls -l）\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: alias | alias <alias>=<command>\nFunction: Create and manage command aliases\nExamples:\n  alias - View all configured aliases\n  alias ll='ls -l' - Create alias ll (equivalent to ls -l)\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

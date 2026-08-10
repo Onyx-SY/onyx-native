@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "run": {
+      "Chinese": "用法：run <脚本路径> [参数]\n功能：异步执行脚本文件（支持.sh/.py/.exe等格式）\n示例：\n  run ~/test.sh - 异步执行shell脚本\n  run /tools/scan.py 127.0.0.1 - 带参数执行Python脚本\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: run <script path> [arguments]\nFunction: Execute script files asynchronously (supports .sh/.py/.exe etc.)\nExamples:\n  run ~/test.sh - Execute shell script asynchronously\n  run /tools/scan.py 127.0.0.1 - Execute Python script with arguments\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

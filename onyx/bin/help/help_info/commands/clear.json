@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "clear": {
+      "Chinese": "用法：clear\n功能：清空终端屏幕\n适配系统：Windows/Linux/Termux全兼容（Windows自动映射cls功能）",
+      "English": "Usage: clear\nFunction: Clear terminal screen \nCompatible systems: Windows/Linux/Termux "
+    }
+  }
+}

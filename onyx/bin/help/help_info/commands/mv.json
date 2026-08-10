@@ -1,0 +1,8 @@
+{
+  "命令": {
+    "mv": {
+      "Chinese": "用法：mv [选项] <源路径> <目标路径>\n功能：移动或重命名文件/目录（Windows等效 move 命令）\n核心选项：-i（覆盖前提示）、-v（显示进度）、-f（强制覆盖）\n适配系统：Windows/Linux/Termux全兼容",
+      "English": "Usage: mv [option] <source path> <target path>\nFunction: Move or rename files/directories (equivalent to move on Windows)\nCore options: -i (prompt before overwrite), -v (verbose output), -f (force overwrite)\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

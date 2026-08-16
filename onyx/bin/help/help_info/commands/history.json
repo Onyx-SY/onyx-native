@@ -1,8 +1,0 @@
-{
-  "命令": {
-    "history": {
-      "Chinese": "用法：history [条数] | history -c <chat> | history -a | history --help\n功能：查看你向 AI 问过的问题（记录在 ~/.ai_s/chat/<chat>.json，每次 AI 交互自动记录）\n示例：\n  history - 查看当前 chat 最近 10 条提问\n  history 20 - 查看最近 20 条提问\n  history -c first - 查看 chat 'first' 的提问\n  history -a - 查看所有 chat 的提问\n适配系统：Windows/Linux/Termux全兼容",
-      "English": "Usage: history [count] | history -c <chat> | history -a | history --help\nFunction: View the questions you asked the AI (recorded automatically in ~/.ai_s/chat/<chat>.json on every AI interaction)\nExamples:\n  history - View last 10 questions in current chat\n  history 20 - View last 20 questions\n  history -c first - View questions in chat 'first'\n  history -a - View questions across all chats\nCompatible systems: Windows/Linux/Termux"
-    }
-  }
-}

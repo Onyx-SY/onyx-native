@@ -469,14 +469,21 @@ class ExploreManager:
 
     # ── 结果收集（非阻塞 drain，主线程调用）──
     def collect_done(self) -> List[ExploreTask]:
+        """取回已完成任务（取出即从登记表删除，防任务对象无限累积）。
+
+        已完成且被消费的任务从 _tasks 移除：has_pending / format_activity
+        只关心 pending/running 任务，保留 done 任务只会让每次遍历越来越慢、
+        长会话内存无限增长。仍运行的任务保留在 _tasks（等待后续完成）。
+        """
         out: List[ExploreTask] = []
         while True:
             try:
                 tid = self._done_queue.get_nowait()
             except queue.Empty:
                 break
-            task = self._tasks.get(tid)
-            if task:
+            with self._lock:
+                task = self._tasks.pop(tid, None)
+            if task and task.status == "done":
                 out.append(task)
         return out
 
@@ -498,6 +505,9 @@ class ExploreManager:
 
         调用方（_exec_agent sync）先快照各任务状态生成汇总，再按同一
         快照决定移除哪些——status 只读一次，双注入/丢失窗口封死。
+        从 _done_queue 移除的同时从 _tasks 登记表删除：
+        这些任务已被调用方消费（汇总已作为工具结果返回），保留只会
+        让任务对象无限累积（含 prompt/summary/activities 大字符串）。
         """
         if not task_ids:
             return
@@ -511,6 +521,8 @@ class ExploreManager:
                 if tid not in task_ids:
                     kept.put(tid)
             self._done_queue = kept
+            for tid in task_ids:
+                self._tasks.pop(tid, None)
 
     def has_pending(self) -> bool:
         with self._lock:

@@ -135,7 +135,12 @@ def _get_lang_strings(language: str) -> Dict[str, str]:
             "system_info": "系统信息",
             "shell_ready": "Shell 就绪",
             "shell_prompt": "输入命令开始操作（输入 exit 退出）",
-            "error_title": "启动错误"
+            "error_title": "启动错误",
+            "info_title": "信息",
+            "info_col_item": "项目",
+            "info_col_value": "值",
+            "success_title": "成功",
+            "warning_title": "警告"
         },
         "english": {
             "version": "Version",
@@ -146,7 +151,12 @@ def _get_lang_strings(language: str) -> Dict[str, str]:
             "system_info": "System Info",
             "shell_ready": "Shell Ready",
             "shell_prompt": "Enter command (type exit to quit)",
-            "error_title": "Startup Error"
+            "error_title": "Startup Error",
+            "info_title": "Info",
+            "info_col_item": "Item",
+            "info_col_value": "Value",
+            "success_title": "Success",
+            "warning_title": "Warning"
         }
     }
     return strings.get(language, strings["chinese"])
@@ -413,7 +423,7 @@ def show_error_banner(error_msg: str, title: Optional[str] = None, language: str
     _console.print()
 
 
-def show_info_card(info_dict: Dict[str, Any], title: str = "信息", language: str = "chinese") -> None:
+def show_info_card(info_dict: Dict[str, Any], title: str = "", language: str = "chinese") -> None:
     """
     显示通用信息卡片（美化版）
     
@@ -424,6 +434,9 @@ def show_info_card(info_dict: Dict[str, Any], title: str = "信息", language: s
     """
     if not info_dict:
         return
+    
+    lang = _get_lang_strings(language)
+    title = title if title else lang['info_title']
     
     if not _init_rich():
         from lib.terminal.colors import Fore, Style
@@ -444,8 +457,8 @@ def show_info_card(info_dict: Dict[str, Any], title: str = "信息", language: s
         padding=(0, 2),
         width=panel_width
     )
-    table.add_column("项目", style="bold yellow", width=15, justify="right")
-    table.add_column("值", style="bright_white", width=40, justify="left")
+    table.add_column(lang['info_col_item'], style="bold yellow", width=15, justify="right")
+    table.add_column(lang['info_col_value'], style="bright_white", width=40, justify="left")
     
     for key, value in info_dict.items():
         table.add_row(str(key), str(value))
@@ -557,10 +570,11 @@ def show_success_banner(message: str, title: Optional[str] = None, language: str
         print(Fore.GREEN + f"\n✅ {message}" + Style.RESET_ALL)
         return
     
+    lang = _get_lang_strings(language)
     terminal_width = _get_terminal_width()
     panel_width = max(min(terminal_width - 4, 120), 50)
     
-    display_title = title if title else "成功"
+    display_title = title if title else lang['success_title']
     
     content = _Text()
     content.append("✓ ", style="bold green")
@@ -594,10 +608,11 @@ def show_warning_banner(message: str, title: Optional[str] = None, language: str
         print(Fore.YELLOW + f"\n⚠️ {message}" + Style.RESET_ALL)
         return
     
+    lang = _get_lang_strings(language)
     terminal_width = _get_terminal_width()
     panel_width = max(min(terminal_width - 4, 120), 50)
     
-    display_title = title if title else "警告"
+    display_title = title if title else lang['warning_title']
     
     content = _Text()
     content.append("⚠ ", style="bold yellow")

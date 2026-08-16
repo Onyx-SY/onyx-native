@@ -15,7 +15,7 @@ import json
 import uuid
 import hashlib
 from datetime import datetime
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, Callable, List, Tuple
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
@@ -36,6 +36,7 @@ console = Console()
 
 _SLASH_COMMANDS_CN: Dict[str, str] = {
     "/help":   "显示此帮助",
+    "/plus":   "🧠 一次性高级模式：下次任务先跑 4 步思考（分析→模拟→自检→规划），用完自动失效",
     "/exit":   "退出 AI 对话，返回 shell",
     "/quit":   "同 /exit",
     "/clear":  "清屏",
@@ -66,6 +67,7 @@ _SLASH_COMMANDS_CN: Dict[str, str] = {
 
 _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/help":   "Show this help",
+    "/plus":   "🧠 One-shot advanced mode: next task runs 4-step thinking (analyze→simulate→self-check→plan), auto-expires",
     "/exit":   "Exit AI mode, return to shell",
     "/quit":   "Same as /exit",
     "/clear":  "Clear screen",
@@ -103,9 +105,9 @@ _HELP_TEXT_CN = """\
 {commands}
 
 ### 提示
-- 按 `Esc` 两次可中断当前 AI 请求
-- 按 `Ctrl+C` 可中断等待中的命令
-- 按 `Alt+Enter` 换行输入，不会发送给 AI；按 `Enter` 发送
+- 按 `Esc` 直接停止（退出 AI 对话）
+- 按 `Ctrl+C` 打断当前工具/命令执行（AI 会继续处理）
+- 按 `Enter` 发送；按 `Alt+Enter` 进入多行模式（多行模式下 `Enter` 换行暂存、不会发送，再次按 `Alt+Enter` 统一发送）
 - 支持常规命令行编辑：方向键 / `Ctrl+A` `Ctrl+E` / `Ctrl+U` `Ctrl+K` / `Tab` 补全 / `Ctrl+R` 搜索历史
 - 输入 `/exit` 返回正常 shell
 """
@@ -119,9 +121,9 @@ Type your question directly to chat with AI. Context is maintained within the se
 {commands}
 
 ### Tips
-- Press `Esc` twice to interrupt AI request
-- Press `Ctrl+C` to interrupt running commands
-- Press `Alt+Enter` for a newline without sending; press `Enter` to send
+- Press `Esc` to stop immediately (exit AI chat)
+- Press `Ctrl+C` to interrupt the current tool/command (AI continues)
+- Press `Enter` to send; press `Alt+Enter` to enter multiline mode (then `Enter` inserts a newline without sending; press `Alt+Enter` again to send all lines at once)
 - Full command-line editing: arrows / `Ctrl+A` `Ctrl+E` / `Ctrl+U` `Ctrl+K` / `Tab` completion / `Ctrl+R` history search
 - Type `/exit` to return to shell
 """
@@ -158,6 +160,7 @@ def _check_and_setup_key(user_home_dir: str, lang: str = "chinese") -> Optional[
 _AI_PROMPT_STYLE = PromptStyle.from_dict({
     "prompt": "bold cyan",
     "separator": "dim",
+    "toolbar": "reverse bold",
 })
 
 
@@ -177,7 +180,7 @@ def _make_ai_prompt() -> str:
 def _save_conf(conf: dict, ctx: Dict[str, Any]) -> None:
     """将配置 dict 完整写入 key.conf（api_key 混淆存储）"""
     import json as _json
-    key_conf_path = os.path.join(ctx["user_home_dir"], ".config", "onyx", "ai", "key.conf")
+    key_conf_path = os.path.join(ctx["user_home_dir"], ".config", "onyx", "ai", "key.json")
     os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
     # 混淆 api_key 后再写入
     write_conf = dict(conf)
@@ -443,7 +446,7 @@ def _show_cost(ctx: Dict[str, Any]) -> None:
             )
             console.print(Panel(body, title="💰 Cost Stats", border_style="green"))
     except Exception as e:
-        console.print(f"[red]cost error: {e}[/]")
+        console.print(f"[red]cost error: {e}[/]" if ctx.get("lang", "chinese") == "english" else f"[red]费用统计错误: {e}[/]")
 
 
 # ─────────────────────────────── doctor 健康检查（/doctor） ───────────────────────────────
@@ -565,6 +568,17 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         console.print(f"[dim]{_t('bye', lang)}[/]")
         return False
 
+    elif cmd == "/plus":
+        # ── /plus：一次性高级模式（只对下一次任务有效，消费后自动失效）──
+        ctx["plus_pending"] = True
+        console.print(
+            "[bold cyan]🧠 Plus 高级模式已开启[/]\n" if lang == "chinese" else
+            "[bold cyan]🧠 Plus advanced mode enabled[/]\n"
+            "[dim]" + ("下一次任务将先运行「分析→模拟→自检→规划」4 步思考（当前系列最贵模型），完成后自动恢复普通模式。[/]" if lang == "chinese" else
+            "The next task will run the 4-step thinking pipeline (Analyze → Simulate → Self-check → Plan) with the most expensive model, then auto-revert to normal mode.[/]")
+        )
+        return True
+
     elif cmd == "/help":
         console.print(Markdown(_build_help(lang)))
         return True
@@ -580,7 +594,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             plat = conf.get("platform", "?")
             key = conf.get("api_key", "")
             masked = key[:4] + "*" * 24 + key[-4:] if len(key) > 28 else "***"
-            console.print(f"  平台: {plat}  Key: {masked}", style="dim")
+            console.print((f"  平台: {plat}  Key: {masked}" if lang == "chinese" else f"  Platform: {plat}  Key: {masked}"), style="dim")
         choice = input(_t("change_key", lang)).strip().lower()
         if choice == "y":
             _setup_key_conf_interactive(lang)
@@ -618,7 +632,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         else:
             models = _SUPPORTED_PLATFORMS.get(platform, {}).get("models", [])
         if not models:
-            console.print("[yellow]No models available[/]")
+            console.print("[yellow]No models available[/]" if lang == "english" else "[yellow]没有可用模型[/]")
             return True
 
         console.print(_t("model_list_title", lang, platform=plat_name))
@@ -648,7 +662,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
                 except (KeyboardInterrupt, EOFError):
                     pass
             else:
-                console.print(f"[yellow]Invalid selection[/]")
+                console.print("[yellow]Invalid selection[/]" if lang == "english" else "[yellow]无效选择[/]")
         except (ValueError, KeyboardInterrupt, EOFError):
             console.print(f"[dim]{_t('model_cancelled', lang)}[/]")
         return True
@@ -858,14 +872,22 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             name, value = args[0].lower(), args[1]
             valid_params = {
                 "temperature": float, "top_p": float,
-                "max_tokens": int, "reasoning_effort": str
+                "max_tokens": int, "reasoning_effort": str, "thinking": str
             }
             if name not in valid_params:
                 console.print(_t("param_invalid_name", lang, name=name))
                 console.print(_t("param_valid_names", lang))
                 return True
             try:
-                if name == "reasoning_effort":
+                if name == "thinking":
+                    if value.lower() in ("on", "true", "1", "yes", "enabled"):
+                        params[name] = True
+                    elif value.lower() in ("off", "false", "0", "no", "disabled", "none"):
+                        params[name] = False
+                    else:
+                        console.print(_t("param_invalid_value", lang, value=value))
+                        return True
+                elif name == "reasoning_effort":
                     if value.lower() not in ("high", "max"):
                         console.print(_t("param_effort_invalid", lang))
                         return True
@@ -1059,7 +1081,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
                 pass
             handle_history(["/history"] + args, "ai-repl", _home_dir=_home)
         except Exception as e:
-            console.print(f"[yellow]history 执行失败: {e}[/]")
+            console.print(f"[yellow]history 执行失败: {e}[/]" if lang == "chinese" else f"[yellow]history failed: {e}[/]")
         return True
 
     elif cmd in ("/memory-mode", "/memmode"):
@@ -1072,7 +1094,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
                 ctx["memory_mode"] = "project"
                 ctx["cwd"] = os.getcwd()
             else:
-                console.print(f"[yellow]Unknown mode: {new_mode} (global|project)[/]")
+                console.print(f"[yellow]Unknown mode: {new_mode} (global|project)[/]" if lang == "english" else f"[yellow]未知模式: {new_mode} (global|project)[/]")
                 return True
         else:
             current = ctx.get("memory_mode", "global")
@@ -1092,8 +1114,8 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             if hasattr(_thread_locals, attr):
                 delattr(_thread_locals, attr)
         mode_name = "project（当前目录专属）" if ctx["memory_mode"] == "project" else "global（全局 library）"
-        console.print(f"[green]🔁 记忆模式 → {mode_name}[/]")
-        console.print(f"[dim]   记忆根目录: {mem_root}[/]")
+        console.print(f"[green]🔁 记忆模式 → {mode_name}[/]" if lang == "chinese" else f"[green]🔁 Memory mode → {mode_name}[/]")
+        console.print(f"[dim]   记忆根目录: {mem_root}[/]" if lang == "chinese" else f"[dim]   Memory root: {mem_root}[/]")
         return True
 
     elif cmd == "/save":
@@ -1104,7 +1126,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             console.print(f"[red]{_t('export_fail', lang).format(path[4:])}[/]")
         else:
             fname = os.path.basename(path)
-            console.print(f"[green]💾 会话已保存: {fname}[/]")
+            console.print(f"[green]💾 会话已保存: {fname}[/]" if lang == "chinese" else f"[green]💾 Session saved: {fname}[/]")
         return True
 
     elif cmd == "/sessions":
@@ -1113,7 +1135,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         if not names:
             console.print(f"[dim]{_t('export_no_data', lang)}[/]")
             return True
-        console.print(f"\n💾 已保存会话（{len(names)}）:")
+        console.print(f"\n💾 已保存会话（{len(names)}）:" if lang == "chinese" else f"\n💾 Saved sessions ({len(names)}):")
         for i, n in enumerate(names, 1):
             console.print(f"  [{i}] {n}")
         return True
@@ -1121,7 +1143,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
     elif cmd == "/resume":
         """恢复已保存会话"""
         if not args:
-            console.print("[yellow]用法: /resume <名字|latest>[/]")
+            console.print("[yellow]用法: /resume <名字|latest>[/]" if lang == "chinese" else "[yellow]Usage: /resume <name|latest>[/]")
             return True
         target = args[0]
         names = _list_ai_sessions(ctx)
@@ -1133,12 +1155,12 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         elif target in names:
             name = target
         else:
-            console.print(f"[yellow]未找到会话: {target}（可用 /sessions 查看）[/]")
+            console.print(f"[yellow]未找到会话: {target}（可用 /sessions 查看）[/]" if lang == "chinese" else f"[yellow]Session not found: {target} (use /sessions to list)[/]")
             return True
         if _load_ai_session(ctx, name):
-            console.print(f"[green]🔄 已恢复会话: {name}[/]")
+            console.print(f"[green]🔄 已恢复会话: {name}[/]" if lang == "chinese" else f"[green]🔄 Session restored: {name}[/]")
         else:
-            console.print(f"[red]恢复失败: {name}[/]")
+            console.print(f"[red]恢复失败: {name}[/]" if lang == "chinese" else f"[red]Restore failed: {name}[/]")
         return True
 
     elif cmd == "/cost":
@@ -1259,13 +1281,15 @@ def ai_interactive_session(
 
     # ── 记忆模式提示：启动时始终显示当前记忆模式/根目录（cwd 自动判断），告知用户可切换 ──
     mode_label = "project（当前目录专属）" if _auto_mode == "project" else "global（全局 library）"
+    if current_lang == "english":
+        mode_label = "project (per-directory)" if _auto_mode == "project" else "global (library)"
     mem_root = user_home_dir
     try:
         mem_root = _memory_base_dir(user_home_dir, _auto_mode, ctx["cwd"])
     except Exception as _mem_err:
-        console.print(f"[yellow]⚠️ 记忆根目录计算失败（已回退 global）: {_mem_err}[/]")
-    console.print(f"[dim]🧠 记忆模式: {mode_label}（cwd={ctx['cwd']}）— 可用 /memory-mode 切换[/]")
-    console.print(f"[dim]   记忆根目录: {mem_root}[/]")
+        console.print(f"[yellow]⚠️ 记忆根目录计算失败（已回退 global）: {_mem_err}[/]" if current_lang == "chinese" else f"[yellow]⚠️ Memory root calculation failed (fallback to global): {_mem_err}[/]")
+    console.print(f"[dim]🧠 记忆模式: {mode_label}（cwd={ctx['cwd']}）— 可用 /memory-mode 切换[/]" if current_lang == "chinese" else f"[dim]🧠 Memory mode: {mode_label} (cwd={ctx['cwd']}) — use /memory-mode to switch[/]")
+    console.print(f"[dim]   记忆根目录: {mem_root}[/]" if current_lang == "chinese" else f"[dim]   Memory root: {mem_root}[/]")
 
     # ── / 指令补全 ──
     # 补全列表 = 命令表 key（与 _dispatch_slash 分支一一对应，不会出现"补全里有但实际不存在"的命令）
@@ -1284,11 +1308,16 @@ def ai_interactive_session(
     except Exception:
         _history = None
 
-    # ── 键绑定：Enter 提交发送；Alt+Enter 插入换行（不发送）──
+    # ── 键绑定：Enter 提交发送；Alt+Enter 进入/退出多行模式 ──
     # 注：Ctrl+Enter 在终端协议层面与 Enter 字节相同（都是 \r），prompt_toolkit 无法区分，
-    #     因此换行键只能选 Alt+Enter（escape-enter）。
+    #     因此多行切换键只能选 Alt+Enter（escape-enter）。
     # merge 默认绑定（保留全部 readline 编辑功能：方向键/Ctrl+A/E/U/K/Tab/Ctrl+R）
     _kb = KeyBindings()
+
+    # ── 多行模式状态 ──
+    # 普通模式：Enter 提交发送；Alt+Enter 进入多行模式（提示符前缀变为 [多行]）。
+    # 多行模式：Enter 只插入换行（暂存、不发送）；再次 Alt+Enter 统一发送并退出多行模式。
+    _ml_state = {"active": False}
 
     # eager=True 必须加：PromptSession 会把自定义绑定合并到默认绑定之后（prompt.py 的
     # merge_key_bindings([prompt_bindings, self.key_bindings])），而 key_processor 命中的是
@@ -1300,31 +1329,80 @@ def ai_interactive_session(
     @_kb.add('enter', eager=True, filter=~is_searching)
     @_kb.add('c-j', eager=True, filter=~is_searching)
     def _submit(event):
-        """Enter 提交（覆盖 multiline 默认换行行为）"""
+        """Enter：普通模式提交发送；多行模式插入换行（暂存，不发送给 AI）"""
         b = event.current_buffer
+        if _ml_state["active"]:
+            # 多行模式：回车只是换行暂存，绝不发送
+            b.insert_text('\n')
+            return
         if b.complete_state and b.complete_state.complete_index is not None:
             b.apply_completion(b.complete_state.current_completion)
         event.current_buffer.validate_and_handle()
 
     @_kb.add('escape', 'enter', eager=True, filter=~is_searching)
+    @_kb.add('escape', 'c-j', eager=True, filter=~is_searching)
     def _newline(event):
-        """Alt+Enter 插入换行，不发送给 AI"""
-        event.current_buffer.insert_text('\n')
+        """Alt+Enter：普通模式 → 进入多行模式；多行模式 → 统一发送并退出多行模式。
 
-    _key_bindings = merge_key_bindings([_kb, load_key_bindings()])
+        同时绑定 enter 与 c-j：Termux/Android 等终端开启 ICRNL 会把输入 \r 转成 \n，
+        只绑 'escape','enter' 时 Alt+Enter（\x1b\r）实际到达的是 escape+c-j → 匹配不上 → 切换失效。
+        """
+        b = event.current_buffer
+        if _ml_state["active"]:
+            # 多行模式：再次 Alt+Enter = 把所有暂存行统一发给 AI，并退出多行模式
+            _ml_state["active"] = False
+            if b.complete_state and b.complete_state.complete_index is not None:
+                b.apply_completion(b.complete_state.current_completion)
+            event.current_buffer.validate_and_handle()
+        else:
+            # 普通模式：进入多行模式并换行（已有内容另起一行；之后 Enter 都是换行暂存）
+            _ml_state["active"] = True
+            b.insert_text('\n')
+
+    @_kb.add('c-c', eager=True, filter=~is_searching)
+    def _cancel(event):
+        """Ctrl+C：清空当前输入行并退出多行模式（不退出 REPL；AI 运行中的 Ctrl+C
+        由信号层处理，用于打断工具执行而不是停止 AI 闭环）"""
+        _ml_state["active"] = False
+        event.current_buffer.reset()
+
+    @_kb.add('escape', filter=~is_searching)
+    def _esc_exit(event):
+        """ESC：直接停止（退出 AI 对话）。
+
+        非 eager：单独按下（meta 超时）才触发，不影响 Alt+Enter（escape+enter
+        由 _newline eager 绑定抢先匹配）；默认绑定中 escape 是"忽略"，
+        必须让 _kb 排在 merge 的最后才能命中本绑定。
+        """
+        event.app.exit(exception=EOFError)
+
+    # 顺序注意：defaults 在前、_kb 在后——非 eager 绑定时 key_processor 命中
+    # 匹配列表的最后一个；若 _kb 在前，默认的 escape=忽略 会抢先命中，ESC 退出失效。
+    _key_bindings = merge_key_bindings([load_key_bindings(), _kb])
+
+    # ── 多行模式提示：提示符前缀 + 底部工具栏（随 _ml_state 动态刷新）──
+    def _ai_prompt() -> str:
+        base = _make_ai_prompt()
+        if _ml_state["active"]:
+            return f"[多行] {base}"
+        return base
+
+    def _bottom_toolbar() -> List[Tuple[str, str]]:
+        if _ml_state["active"]:
+            return [("class:toolbar", " 📝 多行模式：Enter=换行暂存 · Alt+Enter=统一发送 · Ctrl+C=清空退出 ")]
+        return [("class:toolbar", " Enter=发送 · Alt+Enter=多行模式 · Esc=退出 · /help=帮助 ")]
 
     # ── 对话循环 ──
-    # ESC 不杀 AI，只设标记；AI 本轮完成后询问用户是否有补充
-    esc_flag = [False]
-
+    # ESC = 直接停止（退出 REPL）；Ctrl+C = 打断工具执行（AI 闭环继续，见 handle_ai）
     try:
         session = PromptSession(
-            _make_ai_prompt,
+            _ai_prompt,
             style=_AI_PROMPT_STYLE,
             completer=completer,
             history=_history,
             multiline=True,
             key_bindings=_key_bindings,
+            bottom_toolbar=_bottom_toolbar,
         )
 
         # ── 粘贴合并探测会话：独立 app（DummyOutput 零渲染），共享主会话 input ──
@@ -1338,18 +1416,12 @@ def ai_interactive_session(
         )
 
         while True:
-            # 上轮 AI 被 ESC 标记 → 先问用户
-            if esc_flag[0]:
-                esc_flag[0] = False
-                console.print(f"[dim]💬 {_t('ask_after_esc', current_lang)}[/]")
-
             try:
                 user_input = session.prompt()
             except KeyboardInterrupt:
-                # prompt 阶段的 ESC → 设标记，等 AI 结束后问
-                esc_flag[0] = True
-                console.print(f"\n[dim]📌 {_t('esc_marked', current_lang)}[/]")
-                continue
+                # ESC → 直接停止（退出 AI 对话）；Ctrl+C 已被 _cancel 绑定拦截（清空输入）
+                console.print(f"\n[dim]{_t('bye', current_lang)}[/]")
+                break
             except EOFError:
                 console.print(f"\n[dim]{_t('bye', current_lang)}[/]")
                 break
@@ -1365,25 +1437,17 @@ def ai_interactive_session(
                     break
                 continue
 
-            # ── 发给 AI（ESC 只标记不中断——signal 临时吞掉 SIGINT） ──
-            import signal as _signal
-            def _on_sigint(signum, frame):
-                esc_flag[0] = True
-            _old_sigint = _signal.signal(_signal.SIGINT, _on_sigint)
+            # ── 发给 AI ──
+            # 不再临时吞掉 SIGINT：Ctrl+C 直接传播进 handle_ai —— AI 生成阶段停止生成，
+            # 工具/命令执行阶段打断当前工具（AI 闭环继续），与"ESC=直接停止"语义分离。
             try:
                 _call_ai_engine(user_input, user_home_dir, onyx_module, global_config,
                               user_info, user_mode, parse_and_execute, ctx, **kwargs)
+            except KeyboardInterrupt:
+                # 兜底：handle_ai 未捕获的 Ctrl+C（如发生在工具执行段之外）→ 回到 prompt
+                console.print("\n  [bold yellow]⏹ 已中断，回到输入[/]" if current_lang == "chinese" else "\n  [bold yellow]⏹ Interrupted, back to input[/]")
             except Exception as e:
                 console.print(f"[red]{_t('ai_error', current_lang, reason=str(e))}[/]")
-            finally:
-                _signal.signal(_signal.SIGINT, _old_sigint)
-                if esc_flag[0]:
-                    console.print(f"\n[dim]📌 {_t('esc_marked', current_lang)}[/]")
-
-            # AI 回复后 → 检查 ESC 标记
-            if esc_flag[0]:
-                esc_flag[0] = False
-                console.print(f"[dim]💬 {_t('ask_after_esc', current_lang)}[/]")
 
     except Exception as e:
         console.print(f"[red]{_t('ai_exception', current_lang, reason=str(e))}[/]")
@@ -1423,6 +1487,25 @@ def _call_ai_engine(
         # handle_ai 内部记忆相关调用（library/chat/tmp/cost）全部跟随该根目录；
         # API key / MCP 配置仍走全局 user_home_dir，互不影响。
         _mem_base = _memory_base_dir(user_home_dir, ctx.get("memory_mode", "global"), ctx.get("cwd"))
+        # ── Plus 一次性高级模式：消费 flag → 先跑 4 步思考，结果注入干活阶段 ──
+        _plus_think = None
+        if ctx.get("plus_pending"):
+            ctx["plus_pending"] = False  # 一次性：立即消费，防连续任务都走 plus
+            try:
+                from bin.ai_lib.plus import run_plus_think
+                console.print("[bold cyan]🧠 Plus 思考流水线运行中（分析→模拟→自检→规划）…[/]" if ctx.get("lang", "chinese") == "chinese" else "[bold cyan]🧠 Plus thinking pipeline running (analyze→simulate→self-check→plan)…[/]")
+                _plus_result = run_plus_think(
+                    question,
+                    _mem_base if ctx.get("memory_mode") == "project" else user_home_dir,
+                    on_log=lambda line: console.print(f"[dim]  {line}[/]"),
+                )
+                if _plus_result.get("plan"):
+                    _plus_think = _plus_result["plan"]
+                    console.print("[bold green]🧠 Plus 思考完成，规划已注入干活阶段[/]" if ctx.get("lang", "chinese") == "chinese" else "[bold green]🧠 Plus thinking done, plan injected[/]")
+                else:
+                    console.print("[yellow]⚠️ Plus 思考未产出规划，按普通模式继续[/]" if ctx.get("lang", "chinese") == "chinese" else "[yellow]⚠️ Plus produced no plan, continuing normal[/]")
+            except Exception as e:
+                console.print(f"[yellow]⚠️ Plus 思考失败（{e}），按普通模式继续[/]" if ctx.get("lang", "chinese") == "chinese" else f"[yellow]⚠️ Plus thinking failed ({e}), continuing normal[/]")
         handle_ai(
             cmd_parts=cmd_parts,
             request_id=call_request_id,
@@ -1435,7 +1518,8 @@ def _call_ai_engine(
             parse_and_execute=parse_and_execute,
             _in_repl=True,
             conversation_history=_conv_hist,
-            **{k: v for k, v in kwargs.items() if k not in ("cmd_parts", "request_id", "onyx_module", "user_home_dir", "global_config", "user_info", "user_mode", "parse_and_execute")}
+            plus_think=_plus_think,
+            **{k: v for k, v in kwargs.items() if k not in ("cmd_parts", "request_id", "onyx_module", "user_home_dir", "global_config", "user_info", "user_mode", "parse_and_execute", "plus_think")}
         )
         # handle_ai 原地修改了 _conv_hist → 存回 ctx 供下一轮使用
         ctx["_conversation_history"] = _conv_hist

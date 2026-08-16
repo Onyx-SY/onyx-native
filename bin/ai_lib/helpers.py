@@ -78,21 +78,21 @@ def confirm_plan(plan_text: str, lang_text: Dict[str, str]) -> str:
     console.print()
     try:
         choice = select_option(
-            message=lang_text.get("plan_prompt", "请选择操作:"),
+            message=lang_text.get("plan_prompt", "请选择操作: / Please choose:"),
             options=[
-                lang_text.get("plan_opt_confirm", "✅ 确认计划，开始执行"),
-                lang_text.get("plan_opt_guide", "💡 提出修改意见"),
-                lang_text.get("plan_opt_discard", "🗑️ 摒弃计划，重新制定"),
+                lang_text.get("plan_opt_confirm", "✅ 确认计划，开始执行 | ✅ Confirm plan and start"),
+                lang_text.get("plan_opt_guide", "💡 提出修改意见 | 💡 Suggest changes"),
+                lang_text.get("plan_opt_discard", "🗑️ 摒弃计划，重新制定 | 🗑️ Discard and redo"),
             ],
-            default=lang_text.get("plan_opt_confirm", "✅ 确认计划，开始执行"),
+            default=lang_text.get("plan_opt_confirm", "✅ 确认计划，开始执行 | ✅ Confirm plan and start"),
             lang=get_current_lang(),
         )
     except (KeyboardInterrupt, EOFError):
         console.print()
         return "confirm"
-    if choice in (lang_text.get("plan_opt_discard", "🗑️ 摒弃计划，重新制定"),):
+    if choice in (lang_text.get("plan_opt_discard", "🗑️ 摒弃计划，重新制定 | 🗑️ Discard and redo"),):
         return "discard"
-    elif choice in (lang_text.get("plan_opt_guide", "💡 提出修改意见"),):
+    elif choice in (lang_text.get("plan_opt_guide", "💡 提出修改意见 | 💡 Suggest changes"),):
         return "guide"
     return "confirm"
 
@@ -334,7 +334,7 @@ _EXTRA_DANGEROUS_DEFAULT = [
     "mv / /", "mv /* /",
     # 2026-09 加固：AI 记忆/密钥文件（H1/H2）——任何触碰这些路径的命令都必须人工确认
     ".ai_s/", "onyx_ai.md",
-    ".config/onyx/ai/", "key.conf",
+    ".config/onyx/ai/", "key.conf", "key.json",
 ]
 
 

@@ -47,6 +47,7 @@ from .parse import (
     _is_subshell,
     clear_path_mapping_cache,
 )
+from lib.resolve_path import FORBIDDEN_MSG
 from .safe import (
     load_perm_path_config, set_perm_debug_flag,
     is_path_under_fine_grained_control,
@@ -522,7 +523,8 @@ def _determine_cmd_type_local(cmd_head: str, builtin_commands: Dict,
 def _build_command_for_execution(cmd_str: str, clean_cmd: str, redirect_config: Dict,
                                   cmd_type: str, tool_info: Any,
                                   replace_virtual_path_in_cmd_func,
-                                  request_id: str) -> str:
+                                  request_id: str,
+                                  resolve_path_func=None) -> str:
     """
     构建最终要执行的命令字符串
     
@@ -545,7 +547,7 @@ def _build_command_for_execution(cmd_str: str, clean_cmd: str, redirect_config: 
                     non_here_redirect[key] = redirect_config[key]
         
         if non_here_redirect:
-            full_cmd = _append_redirect_to_cmd(replaced_cmd, non_here_redirect)
+            full_cmd = _append_redirect_to_cmd(replaced_cmd, non_here_redirect, resolve_path_func)
         else:
             full_cmd = replaced_cmd
     else:
@@ -639,7 +641,8 @@ def _execute_resolved_command(full_cmd: str, redirect_config: Dict,
                                run_cmd_sync_func,
                                log_info_func, log_error_func,
                                request_id: str, cmd_type: str = 'tool',
-                               cmd_head: str = "") -> Tuple[bool, str]:
+                               cmd_head: str = "",
+                               resolve_path_func=None) -> Tuple[bool, str]:
     """
     轻量级执行已解析完成的命令（跳过 _execute_command_unified 的开销）。
     
@@ -654,7 +657,7 @@ def _execute_resolved_command(full_cmd: str, redirect_config: Dict,
             if key in redirect_config and redirect_config[key]:
                 non_here_redirect[key] = redirect_config[key]
         if non_here_redirect:
-            full_cmd = _append_redirect_to_cmd(full_cmd, non_here_redirect)
+            full_cmd = _append_redirect_to_cmd(full_cmd, non_here_redirect, resolve_path_func)
     
     if log_info_func:
         cmd_type_name = _CMD_TYPE_NAME_MAP.get(cmd_type, cmd_type)
@@ -686,6 +689,7 @@ def _execute_command_unified(cmd_str: str, clean_cmd: str, redirect_config: Dict
                               Fore, Style,
                               debug_parsecmd: bool = False,
                               cmd_head: str = None,
+                              resolve_path_func=None,
                               **kwargs) -> Tuple[bool, str]:
     """
     统一命令执行函数
@@ -730,7 +734,7 @@ def _execute_command_unified(cmd_str: str, clean_cmd: str, redirect_config: Dict
                     non_here_redirect[key] = redirect_config[key]
         
         if non_here_redirect:
-            full_cmd = _append_redirect_to_cmd(full_cmd, non_here_redirect)
+            full_cmd = _append_redirect_to_cmd(full_cmd, non_here_redirect, resolve_path_func)
             
     elif cmd_type == 'tool' and tool_info:
         # 兼容 dict 和对象两种格式
@@ -772,7 +776,7 @@ def _execute_command_unified(cmd_str: str, clean_cmd: str, redirect_config: Dict
                         non_here_redirect[key] = redirect_config[key]
             
             if non_here_redirect:
-                full_cmd = _append_redirect_to_cmd(tool_cmd, non_here_redirect)
+                full_cmd = _append_redirect_to_cmd(tool_cmd, non_here_redirect, resolve_path_func)
             else:
                 full_cmd = tool_cmd
         else:
@@ -828,11 +832,15 @@ def _execute_command_unified(cmd_str: str, clean_cmd: str, redirect_config: Dict
                     log_error_func(f"清理临时文件失败 {temp_heredoc_file}: {str(e)}", request_id)
 
 
-def _append_redirect_to_cmd(cmd: str, redirect_config: Dict) -> str:
+def _append_redirect_to_cmd(cmd: str, redirect_config: Dict, resolve_path_func=None) -> str:
     """
     将重定向配置追加到命令字符串末尾
     注意：不处理 here-document，here-doc 在处理流程中单独处理
     重要：不要对重定向路径使用 shlex.quote，保持原始引号
+
+    安全：重定向目标是原样拼接的（命令文本转换层碰不到它），因此对 resolve 判为
+    越界（FORBIDDEN_MSG）的目标在此替换为 /dev/null 安全落点——否则
+    `echo x > /沙箱外已存在文件` 会真实写入外部。其余目标保持原样。
     """
     if not redirect_config:
         return cmd
@@ -841,6 +849,7 @@ def _append_redirect_to_cmd(cmd: str, redirect_config: Dict) -> str:
     
     if redirect_config.get('stdout'):
         file_path, mode = redirect_config['stdout']
+        file_path = _safe_redirect_target(file_path, resolve_path_func)
         # 保持原始格式，不添加额外引号
         parts.append('>>' if mode == 'a' else '>')
         parts.append(file_path)  # 直接使用原始路径，保持引号
@@ -850,14 +859,28 @@ def _append_redirect_to_cmd(cmd: str, redirect_config: Dict) -> str:
             parts.append('2>&1')
         else:
             file_path, mode = redirect_config['stderr']
+            file_path = _safe_redirect_target(file_path, resolve_path_func)
             parts.append('2>>' if mode == 'a' else '2>')
             parts.append(file_path)  # 直接使用原始路径，保持引号
     
     if redirect_config.get('stdin'):
         parts.append('<')
-        parts.append(redirect_config['stdin'])  # 直接使用原始路径，保持引号
+        parts.append(_safe_redirect_target(redirect_config['stdin'], resolve_path_func))  # 直接使用原始路径，保持引号
     
     return ' '.join(parts)
+
+
+def _safe_redirect_target(file_path: str, resolve_path_func=None) -> str:
+    """重定向目标安全化：resolve 判为越界（FORBIDDEN_MSG）→ /dev/null 安全落点。
+    其余（相对路径、虚拟路径、假路径、特殊白名单）保持原样，与今日行为一致。"""
+    if not file_path or file_path == 'STDOUT' or resolve_path_func is None:
+        return file_path
+    try:
+        if resolve_path_func(file_path) == FORBIDDEN_MSG:
+            return '/dev/null'
+    except Exception:
+        pass
+    return file_path
 
 
 def _check_adv_danger_prompt_config(root_dir: str, read_config_file_func=None) -> bool:
@@ -896,7 +919,10 @@ def _adv_confirm_prompt(cmd_str: str, current_lang: str, msg: Dict,
     import secrets as _pae_secrets
     captcha = _pae_secrets.token_hex(2).upper()
     print(f"{Fore.RED}{warning}{Style.RESET_ALL}")
-    prompt = f"{Fore.YELLOW}验证码: [ {captcha} ]  — 请输入上方验证码以确认执行\n> {Style.RESET_ALL}"
+    if current_lang == "chinese":
+        prompt = f"{Fore.YELLOW}验证码: [ {captcha} ]  — 请输入上方验证码以确认执行\n> {Style.RESET_ALL}"
+    else:
+        prompt = f"{Fore.YELLOW}Captcha: [ {captcha} ]  — please enter the captcha above to confirm\n> {Style.RESET_ALL}"
     try:
         response = safe_input(prompt).strip()
     except (EOFError, KeyboardInterrupt):
@@ -1339,7 +1365,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 if not check_fine_grained_advanced_syntax(
                     resolved_paths, ROOT_DIR, username, user_mode,
                     advanced_syntax, log_info_func, log_error_func, request_id,
-                    USER_HOME_DIR, is_ai_call=is_ai_triggered
+                    USER_HOME_DIR, is_ai_call=is_ai_triggered,
+                    cmd_str=clean_cmd_simple
                 ):
                     return
             
@@ -1373,7 +1400,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 log_info_func, log_error_func,
                 msg, Fore, Style,
                 debug_parsecmd=debug_parsecmd,
-                cmd_head=actual_head_simple
+                cmd_head=actual_head_simple,
+                resolve_path_func=resolve_path_func
             )
             return
         
@@ -1398,7 +1426,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 if not check_fine_grained_advanced_syntax(
                     resolved_paths, ROOT_DIR, username, user_mode,
                     advanced_syntax, log_info_func, log_error_func, request_id,
-                    USER_HOME_DIR, is_ai_call=is_ai_triggered
+                    USER_HOME_DIR, is_ai_call=is_ai_triggered,
+                    cmd_str=clean_cmd_simple
                 ):
                     return
             
@@ -1432,7 +1461,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 log_info_func, log_error_func,
                 msg, Fore, Style,
                 debug_parsecmd=debug_parsecmd,
-                cmd_head=actual_head_simple
+                cmd_head=actual_head_simple,
+                resolve_path_func=resolve_path_func
             )
             return
         
@@ -1511,7 +1541,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_fine_grained_advanced_syntax(
                 resolved_paths, ROOT_DIR, username, user_mode,
                 advanced_syntax, log_info_func, log_error_func, request_id,
-                USER_HOME_DIR, is_ai_call=is_ai_triggered
+                USER_HOME_DIR, is_ai_call=is_ai_triggered,
+                cmd_str=expanded_cmd
             ):
                 return
             
@@ -1691,7 +1722,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 if not check_fine_grained_advanced_syntax(
                     resolved_paths, ROOT_DIR, username, user_mode,
                     advanced_syntax, log_info_func, log_error_func, request_id,
-                    USER_HOME_DIR, is_ai_call=is_ai_triggered
+                    USER_HOME_DIR, is_ai_call=is_ai_triggered,
+                    cmd_str=clean_cmd
                 ):
                     return
             
@@ -1737,7 +1769,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
                 log_info_func, log_error_func,
                 msg, Fore, Style,
                 debug_parsecmd=debug_parsecmd,
-                cmd_head=actual_cmd_head
+                cmd_head=actual_cmd_head,
+                resolve_path_func=resolve_path_func
             )
             _sync_cwd_from_shell(log_info_func, request_id, 'system')
             return
@@ -1778,7 +1811,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_fine_grained_advanced_syntax(
                 resolved_paths, ROOT_DIR, username, user_mode,
                 advanced_syntax, log_info_func, log_error_func, request_id,
-                USER_HOME_DIR, is_ai_call=is_ai_triggered
+                USER_HOME_DIR, is_ai_call=is_ai_triggered,
+                cmd_str=clean_cmd
             ):
                 return
         
@@ -1828,7 +1862,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             log_info_func, log_error_func,
             msg, Fore, Style,
             debug_parsecmd=debug_parsecmd,
-            cmd_head=actual_cmd_head
+            cmd_head=actual_cmd_head,
+            resolve_path_func=resolve_path_func
         )
         return
     
@@ -1854,7 +1889,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             if not check_fine_grained_advanced_syntax(
                 resolved_paths, ROOT_DIR, username, user_mode,
                 advanced_syntax, log_info_func, log_error_func, request_id,
-                USER_HOME_DIR, is_ai_call=is_ai_triggered
+                USER_HOME_DIR, is_ai_call=is_ai_triggered,
+                cmd_str=clean_cmd
             ):
                 return
         
@@ -1910,7 +1946,8 @@ def parse_and_execute(cmd: str, is_recursive: bool = False, is_ai_triggered: boo
             log_info_func, log_error_func,
             msg, Fore, Style,
             debug_parsecmd=debug_parsecmd,
-            cmd_head=actual_cmd_head
+            cmd_head=actual_cmd_head,
+            resolve_path_func=resolve_path_func
         )
 
         # === 原为 unknown 的命令：bash 已尝试执行，若不存在则提示相似命令 ===

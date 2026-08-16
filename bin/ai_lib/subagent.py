@@ -199,20 +199,41 @@ def _param_log(params: Dict) -> str:
 
 # ── 提示词构建 ──
 
-def build_agent_system_prompt(agent_type: str = "explore") -> str:
-    """默认系统提示词（agreement.md）+ 对应类型的子代理角色段。"""
+def build_agent_system_prompt(agent_type: str = "explore", prompt_source: str = "agreement") -> str:
+    """默认系统提示词 + 对应类型的子代理角色段。
+
+    prompt_source:
+      - "agreement": 旧入口（etc/ai/agreement.md，兼容旧会话）
+      - "selfskill": 拆分后三件套（etc/ai/self.md + skill.md）——子代理与主 AI 同步
+      - 其它：直接作为提示词文本（plus 思考等自定义场景）
+    """
     agent_type = _normalize_type(agent_type)
     base = ""
     try:
         from .config import ROOT_DIR
-        for _ap in (
-            os.path.join(ROOT_DIR, "onyx", "etc", "ai", "agreement.md"),
-            os.path.join("etc", "ai", "agreement.md"),
-        ):
-            if os.path.exists(_ap):
-                with open(_ap, "r", encoding="utf-8") as f:
-                    base = f.read()
-                break
+        if prompt_source == "agreement":
+            for _ap in (
+                os.path.join(ROOT_DIR, "onyx", "etc", "ai", "agreement.md"),
+                os.path.join("etc", "ai", "agreement.md"),
+            ):
+                if os.path.exists(_ap):
+                    with open(_ap, "r", encoding="utf-8") as f:
+                        base = f.read()
+                    break
+        elif prompt_source == "selfskill":
+            parts = []
+            for _name in ("self.md", "skill.md"):
+                for _ap in (
+                    os.path.join(ROOT_DIR, "onyx", "etc", "ai", _name),
+                    os.path.join("etc", "ai", _name),
+                ):
+                    if os.path.exists(_ap):
+                        with open(_ap, "r", encoding="utf-8") as f:
+                            parts.append(f.read())
+                        break
+            base = "\n\n".join(parts)
+        else:
+            base = str(prompt_source)
     except Exception:
         pass
     if not base:
@@ -231,13 +252,15 @@ def build_explore_tools() -> List[Dict]:
     return build_agent_tools("explore")
 
 
-def build_agent_tools(agent_type: str = "explore") -> List[Dict]:
+def build_agent_tools(agent_type: str = "explore", exclude_agent: bool = False) -> List[Dict]:
     """按类型构建子代理工具集：ReadOnly 权限 + 类型白名单。
 
     - explore: 只读文件工具 + RunCommand（经 Onyx 安全管线执行命令）
     - plan: 只读文件工具 + 只读 git 工具 + RunCommand（经安全管线）
     - lint/test: 只读文件工具 + 只读 git 工具 + RunCommand（经安全管线）
     - web_search_agent: 只读文件工具 + 联网工具（web_search）+ RunCommand
+
+    exclude_agent=True 时额外排除 Agent 工具（plus 思考流水线：禁止派生子代理）。
     """
     agent_type = _normalize_type(agent_type)
     whitelist = TOOL_SETS.get(agent_type, TOOL_SETS["explore"])
@@ -248,6 +271,8 @@ def build_agent_tools(agent_type: str = "explore") -> List[Dict]:
             fn = t.get("function", {})
             name = fn.get("name", "")
             if name not in whitelist:
+                continue
+            if exclude_agent and name == "Agent":
                 continue
             # 只读工具直接放行；联网工具（web_search）虽为 DangerFullAccess，但执行走
             # 子代理 web 执行器（不弹确认），按类型白名单放行；
@@ -288,6 +313,11 @@ def extract_summary(result: Dict, tag: str = "EXPLORE_SUMMARY") -> str:
     txt = re.sub(r"\[(?:TXT|ANALYSIS|ANSWER|TAG|CLASS|MEMORY|PROMPT|PLAN)[^\]]*\]", "", txt)
     txt = re.sub(r"^>>{8,}\s*$", "", txt, flags=re.MULTILINE)
     txt = txt.strip()
+    # ── 兜底：若"总结"实际是 XML 工具调用文本（<invoke>），视为无效总结 → 返回空 ──
+    # 场景：模型（deepseek 系）在无 tools 或收尾轮输出 <invoke name="..."> 而不是总结；
+    # api 层已尽量解析为 tool_calls，此处拦截漏网之鱼，避免主 AI 收到工具调用 XML。
+    if "<invoke" in txt and "## " not in txt:
+        return ""
     if len(txt) > MAX_SUMMARY_CHARS:
         txt = txt[:MAX_SUMMARY_CHARS] + "\n…(summary truncated)"
     return txt
@@ -551,6 +581,7 @@ class ExploreManager:
         _bounded = (task.agent_type == "plan")
         _max_rounds = MAX_PLAN_ROUNDS if _bounded else 0
         _ctx_retried = False  # 上下文超限兜底已触发（下一次直接进强制收尾轮）
+        _summary_retried = False  # 空总结兜底已触发（最多补一轮强制收尾）
         rnd = 0
         while True:
             rnd += 1

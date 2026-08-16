@@ -25,6 +25,16 @@ from rich.rule import Rule
 
 console = RichConsole()
 
+
+def _ui_lang() -> str:
+    """获取当前语言（延迟导入避免与 config 循环依赖）。"""
+    try:
+        from .config import get_current_lang
+        return get_current_lang()
+    except Exception:
+        return "chinese"
+
+
 # ============================================================
 # InquirerPy 优雅降级
 # ============================================================
@@ -192,9 +202,11 @@ def confirm_dangerous(
     # ── 2026-09：确认框全程走真实终端（防 sys.stdout 被捕获流替换导致框不可见）──
     with real_terminal_io():
         # 显示警告面板（两种路径共用）
+        _cmd_label = "命令" if lang == "chinese" else "Command"
+        _risk_label = "风险" if lang == "chinese" else "Risk"
         panel = Panel(
-            f"[bold yellow]命令:[/bold yellow]\n  {command}\n\n"
-            f"[bold red]风险:[/bold red]\n  {reason}",
+            f"[bold yellow]{_cmd_label}:[/bold yellow]\n  {command}\n\n"
+            f"[bold red]{_risk_label}:[/bold red]\n  {reason}",
             title=title,
             border_style="red",
             box=HEAVY,
@@ -217,7 +229,7 @@ def confirm_dangerous(
         if _ensure_inquirer() is not None and _has_tty():
             try:
                 confirmed = _inquirer.confirm(
-                    message="确认执行此命令？",
+                    message="确认执行此命令？" if lang == "chinese" else "Confirm executing this command?",
                     default=False,
                 ).execute()
 
@@ -225,13 +237,13 @@ def confirm_dangerous(
                     return True, "y", ""
                 else:
                     refuse = _inquirer.text(
-                        message="拒绝原因（可选，回车跳过）:",
+                        message="拒绝原因（可选，回车跳过）:" if lang == "chinese" else "Reason to refuse (optional, Enter to skip):",
                     ).execute()
-                    refuse = refuse or "用户拒绝执行"
+                    refuse = refuse or ("用户拒绝执行" if lang == "chinese" else "User refused")
                     return False, "n", refuse
             except (KeyboardInterrupt, EOFError):
                 console.print()
-                return False, "interrupt", "用户中断"
+                return False, "interrupt", "用户中断" if lang == "chinese" else "User interrupted"
             except Exception:
                 pass  # 回退
 
@@ -271,8 +283,10 @@ def _fallback_confirm_dangerous(
     title: str, command: str, reason: str, lang: str
 ) -> Tuple[bool, str, str]:
     """prompt_toolkit 回退确认器（异常时再退化为纯 input，保证框一定可见可答）"""
+    _cmd_label = "命令" if lang == "chinese" else "Command"
+    _risk_label = "风险" if lang == "chinese" else "Risk"
     console.print(Panel(
-        f"命令: {command}\n风险: {reason}",
+        f"{_cmd_label}: {command}\n{_risk_label}: {reason}",
         title=title,
         border_style="red",
         box=HEAVY,
@@ -282,26 +296,26 @@ def _fallback_confirm_dangerous(
     except Exception:
         pass
 
-    label = "确认执行？(y/N): " if lang == "english" else "确认执行？(y/N): "
+    label = "Confirm? (y/N): " if lang == "english" else "确认执行？(y/N): "
     try:
         from prompt_toolkit import prompt as pt_prompt
         user_input = pt_prompt(label).lower().strip()
     except (KeyboardInterrupt, EOFError):
         console.print()
-        return False, "interrupt", "用户中断"
+        return False, "interrupt", "User interrupted" if lang == "english" else "用户中断"
     except Exception:
         # prompt_toolkit 异常（无 TTY / 终端状态异常）→ 纯 input 兜底
         try:
             user_input = input(label).strip().lower()
         except (KeyboardInterrupt, EOFError):
             console.print()
-            return False, "interrupt", "用户中断"
+            return False, "interrupt", "User interrupted" if lang == "english" else "用户中断"
 
     if user_input == "y":
         return True, "y", ""
 
     # 收集拒绝原因
-    reason_label = "拒绝原因（可选）: " if lang == "english" else "拒绝原因（可选）: "
+    reason_label = "Reason to refuse (optional): " if lang == "english" else "拒绝原因（可选）: "
     try:
         from prompt_toolkit import prompt as pt_prompt
         refuse = pt_prompt(reason_label).strip()
@@ -312,7 +326,7 @@ def _fallback_confirm_dangerous(
             refuse = input(reason_label).strip()
         except (KeyboardInterrupt, EOFError):
             refuse = ""
-    return False, "n", refuse or "用户拒绝执行"
+    return False, "n", refuse or ("User refused" if lang == "english" else "用户拒绝执行")
 
 
 # ============================================================
@@ -355,10 +369,11 @@ def text_input(
 
 def render_plan_panel(plan_text: str) -> Panel:
     """渲染计划内容 Panel"""
-    md = Markdown(plan_text.strip()) if plan_text.strip() else Text("(空计划)")
+    _l = _ui_lang()
+    md = Markdown(plan_text.strip()) if plan_text.strip() else Text("(空计划)" if _l == "chinese" else "(empty plan)")
     return Panel(
         md,
-        title="📋 AI 计划",
+        title="📋 AI 计划" if _l == "chinese" else "📋 AI Plan",
         border_style="cyan",
         box=ROUNDED,
         padding=(1, 2),
@@ -367,9 +382,10 @@ def render_plan_panel(plan_text: str) -> Panel:
 
 def render_analysis_panel(analysis_text: str) -> Panel:
     """渲染策略分析 Panel"""
+    _l = _ui_lang()
     return Panel(
         analysis_text.strip(),
-        title="🧠 AI 决策分析",
+        title="🧠 AI 决策分析" if _l == "chinese" else "🧠 AI Decision Analysis",
         border_style="blue",
         box=ROUNDED,
         padding=(1, 2),
@@ -392,7 +408,7 @@ def render_ai_panel(text: str, title: str = "🤖 AI") -> Panel:
     content = text.strip()
     if content:
         content = "● " + content
-    md = Markdown(content) if content else Text("(无内容)")
+    md = Markdown(content) if content else Text("(无内容)" if _ui_lang() == "chinese" else "(empty)")
     return Panel(
         md,
         title=title,
@@ -404,18 +420,19 @@ def render_ai_panel(text: str, title: str = "🤖 AI") -> Panel:
 
 def render_tool_table(tool_results: List[Dict[str, str]]) -> Table:
     """渲染工具执行结果表格"""
+    _l = _ui_lang()
     table = Table(
-        title="🔧 工具执行",
+        title="🔧 工具执行" if _l == "chinese" else "🔧 Tool Execution",
         box=ROUNDED,
         border_style="dim",
         show_header=True,
         header_style="bold cyan",
     )
     table.add_column("#", style="dim", width=3)
-    table.add_column("工具", style="bold")
-    table.add_column("参数", style="dim", overflow="fold")
-    table.add_column("状态")
-    table.add_column("输出")
+    table.add_column("工具" if _l == "chinese" else "Tool", style="bold")
+    table.add_column("参数" if _l == "chinese" else "Params", style="dim", overflow="fold")
+    table.add_column("状态" if _l == "chinese" else "Status")
+    table.add_column("输出" if _l == "chinese" else "Output")
 
     for i, tc in enumerate(tool_results, 1):
         status = tc.get("status", "")
@@ -436,9 +453,11 @@ def render_separator(text: str = "") -> Rule:
     return Rule(text, style="dim")
 
 
-def render_spinner(text: str = "思考中..."):
+def render_spinner(text: str = ""):
     """返回 Rich spinner 状态文本"""
     from rich.spinner import Spinner
+    if not text:
+        text = "思考中..." if _ui_lang() == "chinese" else "Thinking..."
     return Spinner("dots", text=text, style="bold cyan")
 
 
@@ -469,7 +488,8 @@ class StreamingDisplay:
     def panel(self):
         """初始 Panel（思考中...）"""
         from rich.spinner import Spinner
-        spinner = Spinner("dots", text=" 思考中...", style="bold cyan")
+        _think = "思考中..." if self.lang == "chinese" else "Thinking..."
+        spinner = Spinner("dots", text=f" {_think}", style="bold cyan")
         return Panel(spinner, title="🤖 AI", border_style="green", box=ROUNDED)
 
     def attach(self, live):

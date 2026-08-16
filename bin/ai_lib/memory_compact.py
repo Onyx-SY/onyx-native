@@ -95,7 +95,7 @@ def stage1_supersede(entries: List[Dict]) -> Tuple[List[Dict], int]:
         content = entry.get("content", "")
         file_ops = _extract_file_operations(content)
         for op in file_ops:
-            if op["type"] in ("edit", "write", "edit_range", "delete"):
+            if op["type"] in ("edit", "write", "edit_range", "delete", "append", "insert"):
                 file_last_write[op["path"]] = i
     
     # 第二遍：标记被取代的 VIEW
@@ -148,6 +148,29 @@ def _extract_file_operations(content: str) -> List[Dict]:
         base_op_name = op_name.split(":")[0] if ":" in op_name else op_name
         op_type = type_map.get(icon, type_map.get(base_op_name, base_op_name.lower()))
         ops.append({"type": op_type, "path": path})
+    
+    # 对话条目格式：### ASSISTANT\n[tool_calls: read_file] {"path": "src/app.py"}\n...
+    # （工具名 → 操作类型，path 从同行的 arguments JSON 中提取）
+    tc_match = re.search(r'\[tool_calls:\s*([^\]]*)\]', content)
+    if tc_match:
+        tool_type_map = {
+            "read_file": "view", "grep_search": "view", "search_file": "view",
+            "glob_search": "view", "LspHover": "view", "LspSymbols": "view",
+            "LspDefinition": "view", "LspReferences": "view",
+            "edit_file": "edit", "write_file": "write",
+            "append_file": "append", "insert_file": "insert",
+            "delete_file": "delete", "remove_file": "delete",
+        }
+        tc_line = content[tc_match.start():].split("\n", 1)[0]
+        path_matches = re.findall(r'"path"\s*:\s*"([^"]+)"', tc_line)
+        tool_names = re.findall(r'\b(\w+)\b', tc_match.group(1))
+        for ti, name in enumerate(tool_names):
+            op_type = tool_type_map.get(name)
+            if not op_type:
+                continue
+            path = path_matches[ti] if ti < len(path_matches) else ""
+            if path:
+                ops.append({"type": op_type, "path": path})
     
     return ops
 
@@ -451,10 +474,10 @@ def summarize_messages(entries: List[Dict]) -> str:
     
     for entry in entries:
         content = entry.get("content", "")
-        # 角色计数（从内容推断）
-        if re.search(r'### (?:Question|用户提问)', content):
+        # 角色计数（从内容推断；兼容 library 格式 Question/AI Response 与对话格式 USER/ASSISTANT）
+        if re.search(r'### (?:Question|用户提问|USER)', content):
             user_count += 1
-        if re.search(r'### (?:AI Response|AI回答)', content):
+        if re.search(r'### (?:AI Response|AI回答|ASSISTANT)', content):
             assistant_count += 1
         
         # 提取工具名
@@ -515,7 +538,7 @@ def _collect_recent_user_requests(entries: List[Dict], limit: int = 3) -> List[s
     requests = []
     for entry in reversed(entries):
         content = entry.get("content", "")
-        m = re.search(r'### (?:Question|用户提问)\n(.*?)(?:\n###|\n####|\n---|\Z)', content, re.DOTALL)
+        m = re.search(r'### (?:Question|用户提问|USER)\n(.*?)(?:\n###|\n####|\n---|\Z)', content, re.DOTALL)
         if m:
             text = m.group(1).strip()
             requests.append(_truncate_summary(text, 160))
@@ -532,7 +555,7 @@ def _infer_pending_work(entries: List[Dict]) -> List[str]:
     for entry in reversed(entries):
         content = entry.get("content", "").lower()
         if any(kw in content for kw in keywords):
-            m = re.search(r'### (?:AI Response|AI回答)\n(.*?)(?:\n###|\n####|\n---|\Z)', 
+            m = re.search(r'### (?:AI Response|AI回答|ASSISTANT)\n(.*?)(?:\n###|\n####|\n---|\Z)', 
                          entry.get("content", ""), re.DOTALL)
             if m:
                 text = m.group(1).strip()
@@ -546,7 +569,7 @@ def _infer_current_work(entries: List[Dict]) -> Optional[str]:
     """推断当前工作（最近一条非空文本）"""
     for entry in reversed(entries):
         content = entry.get("content", "")
-        for section in ["AI Response", "AI回答", "Question", "用户提问"]:
+        for section in ["AI Response", "AI回答", "ASSISTANT", "Question", "用户提问", "USER"]:
             m = re.search(rf'### (?:{section})\n(.*?)(?:\n###|\n####|\n---|\Z)', content, re.DOTALL)
             if m:
                 text = m.group(1).strip()
@@ -560,9 +583,9 @@ def _infer_entry_role(entry: Dict) -> str:
     content = entry.get("content", "")
     if "_compacted" in entry:
         return "system"
-    if re.search(r'### (?:Question|用户提问)', content):
+    if re.search(r'### (?:Question|用户提问|USER)', content):
         return "user"
-    if re.search(r'### (?:AI Response|AI回答)', content):
+    if re.search(r'### (?:AI Response|AI回答|ASSISTANT)', content):
         return "assistant"
     return "system"
 
@@ -583,7 +606,7 @@ def _summarize_entry_blocks(entry: Dict) -> str:
         return _truncate_summary("tool_calls: " + ", ".join(tool_match[:3]), 160)
     
     # 文本内容
-    text_match = re.search(r'### (?:AI Response|AI回答|Question|用户提问)\n(.*?)(?:\n###|\n####|\n---|\Z)', content, re.DOTALL)
+    text_match = re.search(r'### (?:AI Response|AI回答|ASSISTANT|Question|用户提问|USER)\n(.*?)(?:\n###|\n####|\n---|\Z)', content, re.DOTALL)
     if text_match:
         return _truncate_summary(text_match.group(1).strip(), 160)
     
@@ -1522,6 +1545,18 @@ def partition_rounds_keep_fold(
             if len(content) <= keep_user_max_chars:
                 kept.extend(rnd)
                 continue
+            # 超长用户轮（粘贴的大段日志/代码）：头尾各保留一半进 kept（
+            # 保证 LLM 摘要失败、正则回退时原话头尾仍可见），完整原文进 fold 供 LLM 摘要。
+            if keep_user_marked and "[内容过长，中间省略" in content:
+                # 已是截断版（幂等）：直接保留，不再折叠
+                kept.extend(rnd)
+                continue
+            if keep_user_marked:
+                _half = keep_user_max_chars // 2
+                _clipped = (content[:_half]
+                            + f"\n…[内容过长，中间省略 {max(0, len(content) - keep_user_max_chars)} 字符]…\n"
+                            + content[-_half:])
+                kept.append({**rnd[0], "content": _clipped})
             fold.extend(rnd)
             continue
         if role == "assistant":

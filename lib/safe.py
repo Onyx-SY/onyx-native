@@ -223,13 +223,12 @@ LANG_MESSAGES = {
         "adv_confirm_pipeline": "⚠️ 高级模式，细颗粒控制路径中使用了管道，确认执行？(y/N): ",
         "adv_confirm_logic": "⚠️ 高级模式，细颗粒控制路径中使用了逻辑操作符，确认执行？(y/N): ",
         "user_cancelled": "用户取消执行",
-        "user_confirmed": "用户确认执行",
+        "user_confirmed": "✅ 权限已通过，确认执行",
         "dangerous_cmd_blocked": "❌ 高危命令被拦截：{cmd} (匹配模式: {pattern})",
         "dangerous_cmd_warning": "⚠️ 高危命令：{cmd} (匹配模式: {pattern})",
         "dangerous_cmd_confirm": "确认执行？(y/N): ",
         "protected_dir_blocked": "❌ 当前目录「{dir}」是核心保护目录，不允许使用 {cmd} 命令",
         "tool_perm_denied": "❌ 工具权限不足：工具 '{tool}' 需要权限等级 {required}，当前模式权限等级上限为 {max_perm}",
-        "mode_cmd_denied": "❌ 当前{mode}模式不允许执行命令「{cmd}」",
         # === 新增消息 ===
         "adv_confirm_disable_ask": "是否关闭后续此类危险操作的二次确认？(y/N): ",
         "adv_confirm_disabled": "✅ 二次确认已关闭，可通过 'manage set adv_danger_cmd_prompt true' 重新开启",
@@ -243,6 +242,11 @@ LANG_MESSAGES = {
         # === 新增：路径规则最低模式（min_mode） ===
         "min_mode_denied": "❌ 权限不足：命令 '{cmd}' 在路径 '{path}' 上需要 {required} 及以上模式（当前 {mode}）",
         "min_mode_denied_adv_syntax": "❌ 权限不足：在路径 '{path}' 上使用高级语法需要 {required} 及以上模式（当前 {mode}）",
+        # === 新增：验证码确认 ===
+        "captcha_skip_hint": "  (本会话已验证，跳过验证码确认)",
+        "captcha_prompt": "验证码: [ {captcha} ]  — 请输入上方验证码以确认执行",
+        "captcha_wrong": "验证码错误，已取消",
+        "captcha_save_fail": "保存配置失败",
     },
     "english": {
         "variable_cmd_fine_grained_blocked_en": "❌ Command '{cmd}' contains variable (like $VAR), current directory '{dir}' is under fine-grained control, cannot determine expanded path",
@@ -264,13 +268,12 @@ LANG_MESSAGES = {
         "adv_confirm_pipeline": "⚠️ Advanced mode, pipeline in fine-grained path, confirm? (y/N): ",
         "adv_confirm_logic": "⚠️ Advanced mode, logical operators in fine-grained path, confirm? (y/N): ",
         "user_cancelled": "User cancelled execution",
-        "user_confirmed": "User confirmed execution",
+        "user_confirmed": "✅ Permission granted, execution confirmed",
         "dangerous_cmd_blocked": "❌ Dangerous command blocked: {cmd} (pattern: {pattern})",
         "dangerous_cmd_warning": "⚠️ Dangerous command: {cmd} (pattern: {pattern})",
         "dangerous_cmd_confirm": "Confirm execution? (y/N): ",
         "protected_dir_blocked": "❌ Current directory '{dir}' is a protected directory, '{cmd}' command not allowed",
         "tool_perm_denied": "❌ Tool permission denied: tool '{tool}' requires level {required}, max level in current mode is {max_perm}",
-        "mode_cmd_denied": "❌ Command '{cmd}' not allowed in {mode} mode",
         # === 新增消息 ===
         "adv_confirm_disable_ask": "Disable further dangerous operation confirmations? (y/N): ",
         "adv_confirm_disabled": "✅ Confirmation disabled, use 'manage set adv_danger_cmd_prompt true' to re-enable",
@@ -284,6 +287,11 @@ LANG_MESSAGES = {
         # === 新增：路径规则最低模式（min_mode） ===
         "min_mode_denied": "❌ Permission denied: command '{cmd}' on path '{path}' requires {required} mode or above (current: {mode})",
         "min_mode_denied_adv_syntax": "❌ Permission denied: advanced syntax on path '{path}' requires {required} mode or above (current: {mode})",
+        # === 新增：验证码确认 ===
+        "captcha_skip_hint": "  (Verified earlier in this session, captcha skipped)",
+        "captcha_prompt": "Captcha: [ {captcha} ]  — please enter the captcha above to confirm",
+        "captcha_wrong": "Wrong captcha, cancelled",
+        "captcha_save_fail": "Failed to save configuration",
     }
 }
 
@@ -319,7 +327,7 @@ def _adv_confirm_with_disable_option(warning_msg: str, confirm_msg: str,
     # === 会话级跳过：本会话已验证过一次验证码，后续命令执行不再重复弹验证码 ===
     if _SESSION_CAPTCHA_VERIFIED:
         _debug_print(f"本会话已验证过验证码，跳过确认 (cmd_type={cmd_type})")
-        print(Fore.LIGHTBLACK + "  (本会话已验证，跳过验证码确认)" + Style.RESET_ALL)
+        print(Fore.LIGHTBLACK + _get_msg("captcha_skip_hint") + Style.RESET_ALL)
         return True
 
     # === 如果是强制确认类型，给出额外提示 ===
@@ -340,7 +348,7 @@ def _adv_confirm_with_disable_option(warning_msg: str, confirm_msg: str,
     import secrets as _safe_secrets
     captcha = _safe_secrets.token_hex(2).upper()
     print(Fore.RED + warning_msg + Style.RESET_ALL)
-    print(Fore.YELLOW + f"验证码: [ {captcha} ]  — 请输入上方验证码以确认执行" + Style.RESET_ALL)
+    print(Fore.YELLOW + _get_msg("captcha_prompt", captcha=captcha) + Style.RESET_ALL)
     try:
         confirm = input("> ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -348,11 +356,12 @@ def _adv_confirm_with_disable_option(warning_msg: str, confirm_msg: str,
         return False
     
     if confirm.upper() != captcha:
-        print(Fore.RED + "验证码错误，已取消" + Style.RESET_ALL)
+        print(Fore.RED + _get_msg("captcha_wrong") + Style.RESET_ALL)
         return False
 
     # === 验证码正确 → 标记本会话已验证，后续命令免验证码 ===
     mark_session_captcha_verified()
+    print(Fore.GREEN + _get_msg("user_confirmed") + Style.RESET_ALL)
 
     # === 强制确认类型不允许关闭二次确认 ===
     if force_confirm:
@@ -387,7 +396,7 @@ def _adv_confirm_with_disable_option(warning_msg: str, confirm_msg: str,
             # === 清空内存缓存，让下次重新从文件加载 ===
             clear_adv_confirm_memory()
         else:
-            print(Fore.RED + "保存配置失败" + Style.RESET_ALL)
+            print(Fore.RED + _get_msg("captcha_save_fail") + Style.RESET_ALL)
     else:
         # 用户选择保持开启
         _debug_print(f"用户选择保持 {cmd_type} 类型的二次确认")
@@ -835,6 +844,45 @@ def check_tool_permission(tool_name: str, tool_perm: int, user_mode,
     return True
 
 
+def _home_exempt_zones(user_home: str, root_dir: str, username: str) -> List[str]:
+    """计算用户主目录豁免区：真实 user_home +（root 用户时）/root 的物理映射。
+
+    前提（用户决策 2026-09）：目录必须是**确定是自己的用户主目录**——
+    realpath 后为已存在的真实目录（防 `..` 逃逸 / 软链接伪装成 home），
+    且不可能是文件系统根 `/`。
+    """
+    zones = []
+    if user_home:
+        h = os.path.realpath(user_home)
+        if h and h != os.path.sep and os.path.isdir(h):
+            zones.append(h)
+    if username == "root":
+        r = os.path.realpath(os.path.join(root_dir, "root"))
+        if r and r != os.path.sep and os.path.isdir(r):
+            zones.append(r)
+    return zones
+
+
+def _all_paths_in_home_zones(phys_paths: List[str], zones: List[str]) -> bool:
+    """所有路径（含 CWD——调用方 _collect_and_resolve_paths 已把 cwd 并入）
+    都在豁免区内 → True。含 FORBIDDEN_MSG / 空路径 → 不豁免。
+
+    相对路径处理：resolve_path 对裸相对路径（无 ./ 前缀）原样返回，路径列表
+    里会混入相对路径（如 `rm -f gomoku/x.so` 的 `gomoku/x.so`）。此时按当前
+    cwd（parse_and_execute 已把 shell cwd 同步到 os.getcwd()）绝对化后判定，
+    否则豁免会漏判 → 又弹确认（2026-09 实测踩坑）。
+    """
+    if not zones or not phys_paths:
+        return False
+    for p in phys_paths:
+        if not p or p == FORBIDDEN_MSG:
+            return False
+        pr = os.path.realpath(os.path.abspath(p))
+        if not any(pr == z or pr.startswith(z + os.sep) for z in zones):
+            return False
+    return True
+
+
 def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str], 
                                    username: str, user_mode,
                                    log_info_func=None, log_error_func=None,
@@ -852,17 +900,24 @@ def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str],
     
     返回 True 表示允许执行，False 表示拦截
     """
-    # 越界路径（resolve 判定为沙箱外，如 /storage/emulated/0/... 真实路径）→ 硬拦截，
-    # 不再当作普通路径继续走规则匹配（FORBIDDEN_MSG 不是合法路径，放行会导致直达真实命令）
-    if any(p == FORBIDDEN_MSG for p in (all_phys_paths or [])):
-        _debug_print(f"路径越界拦截：cmd='{cmd_head}', 含 FORBIDDEN_MSG 路径")
-        if log_error_func:
-            log_error_func(f"沙箱越界拦截：命令 {cmd_head} 包含沙箱外路径", request_id)
-        print(Fore.RED + f"❌ 沙箱越界拦截：命令「{cmd_head}」包含沙箱外路径" + Style.RESET_ALL)
-        return False
+    # FORBIDDEN_MSG（resolve 判定为沙箱外）不再在此硬拦截——越界裁决由执行层的
+    # 命令转换兜底（安全边界不变）：
+    # - 参数 token：resolve_paths_in_multiline_text 会把 FORBIDDEN_MSG 原文替换进命令文本，
+    #   bash 找不到该文件，命令必然失败，真实路径接触不到；
+    # - 重定向目标：_append_redirect_to_cmd 会把 FORBIDDEN 目标替换为 /dev/null 安全落点。
+    # 因此这里只跳过 FORBIDDEN_MSG——它不是真实路径，不应参与细颗粒规则匹配
+    # （否则 '/' 兜底规则会把越界裁决误判成路径权限拒绝，造成同样的误伤）。
 
     if not PERM_PATH_CONFIG or not all_phys_paths:
         _debug_print("没有规则或没有路径，跳过权限检查")
+        return True
+
+    # 【用户决策 2026-09】cwd 与操作路径全部位于用户主目录内（root 用户含 /root）→
+    # 直接放行：home 是自己地盘，细颗粒黑名单/白名单规则不适用于自身主目录。
+    # 前提：user_home 已 realpath 校验为真实存在目录（防 .. 逃逸/软链接伪装）。
+    # 其他用户 home（/home/<other>）与系统目录（/etc /data 等）不豁免，行为不变。
+    if _all_paths_in_home_zones(all_phys_paths, _home_exempt_zones(user_home, _ROOT_DIR, username)):
+        _debug_print(f"cwd 与目标路径均在用户主目录内，跳过路径权限检查（cmd='{cmd_head}'）")
         return True
     
     cmd_lower = cmd_head.lower()
@@ -873,14 +928,14 @@ def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str],
     else:
         current_mode = "low"
     
-    # home 目录不再特例：与其它路径一样走细颗粒规则匹配（不再静默跳过）
-    
     # 【修复重复询问】：收集所有被拦截的路径，统一处理
     denied_paths = []
     min_mode_violation = None  # (path, required_mode)：规则要求的最低模式高于当前模式
     for phys_path in all_phys_paths:
         if not phys_path:
             continue
+        if phys_path == FORBIDDEN_MSG:
+            continue  # 非真实路径：越界裁决已由执行层转换兜底，不参与规则匹配
         
         is_hit, matched_rule = is_path_under_fine_grained_control(
             phys_path, _ROOT_DIR, username, check_existence=False
@@ -965,16 +1020,102 @@ def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str],
                 return False
             if confirm in ('y', 'yes'):
                 _debug_print(f"人类用户确认执行：{cmd_head}")
+                print(Fore.GREEN + _get_msg("user_confirmed") + Style.RESET_ALL)
                 return True
             print(Fore.RED + _get_msg("user_cancelled") + Style.RESET_ALL)
             return False
+
+def _strip_heredoc_bodies(cmd_str: str) -> str:
+    """剔除 heredoc 正文（`<< TAG` 到独立 TAG 行之间的内容），保留命令骨架。
+
+    拆链逻辑（split_by_semicolon 等）是字符级扫描、不理解 heredoc 语法——
+    `cat > x.py << 'EOF'` 后正文里出现的词（如 `rm`）会被误判为子命令头，
+    导致 home 内合法命令被「链式黑名单」误伤（2026-09 实测：
+    `cd gomoku && cat > smoke_auth.py << 'EOF' ... rm ... EOF` 被拦截）。
+    威胁模型不变：只过滤最简单攻击，heredoc 正文本就不是命令。
+
+    支持 `<<EOF` / `<<-EOF` / `<<'EOF'` / `<<"EOF"`；`<<<`（here-string）不匹配。
+    """
+    if not cmd_str or "<<" not in cmd_str:
+        return cmd_str
+    import re as _re
+    out = []
+    in_heredoc = None  # 当前 heredoc 的结束 TAG
+    for line in cmd_str.split("\n"):
+        if in_heredoc is not None:
+            if line.strip() == in_heredoc:
+                in_heredoc = None
+                out.append("")  # 结束 TAG 行清空（保持行数）
+            else:
+                out.append("")  # 正文清空
+            continue
+        m = _re.search(r"<<[-]?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line)
+        if m:
+            in_heredoc = m.group(2)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _home_chain_blacklisted_head(cmd_str: str, user_home: str,
+                                 root_dir: str, username: str) -> Optional[str]:
+    """
+    最简单的链式命令语义（用户威胁模型：只过滤最简单攻击）：
+    按 ; && || | 拆分后逐个子命令取头，与 home 黑名单（/home/<username> 规则的
+    allowed 列表）比对，返回命中的黑名单命令名；无命中返回 None。
+
+    防的是最简单形态的绕过：`ls && rm -rf ~/x`、`mkdir x; rm -rf ~/y`。
+    $() 嵌套、混淆等深层对抗不在防御范围（用户明确定义）。
+    """
+    if not cmd_str or not cmd_str.strip():
+        return None
+    try:
+        from lib.parse import (
+            split_by_semicolon, split_by_logical_operators,
+            extract_sub_commands_from_pipeline, smart_shlex_split,
+        )
+        if not user_home:
+            return None
+        hit, rule = is_path_under_fine_grained_control(
+            user_home, root_dir, username, check_existence=False)
+        if not hit or not rule or rule.get('mode') != 'blacklist':
+            return None
+        blacklist = set(rule.get('allowed') or [])
+        if not blacklist:
+            return None
+
+        # heredoc 正文不是命令：先剔除再拆链（防正文里的词被误判为命令头）
+        cmd_str = _strip_heredoc_bodies(cmd_str)
+        if not cmd_str.strip():
+            return None
+
+        subs: List[str] = []
+        for seg in split_by_semicolon(cmd_str, 'bash'):
+            for part, _op in split_by_logical_operators(seg, 'bash'):
+                subs.extend(extract_sub_commands_from_pipeline(part, 'bash'))
+
+        for sub in subs:
+            if not sub.strip():
+                continue
+            tokens = smart_shlex_split(sub, 'bash')
+            if not tokens:
+                continue
+            head = tokens[0].lower()
+            if head == 'sudo' and len(tokens) > 1:
+                head = tokens[1].lower()
+            if head in blacklist:
+                return head
+    except Exception:
+        pass
+    return None
+
 
 def check_fine_grained_advanced_syntax(phys_paths: List[str], root_dir: str, username: str,
                                         user_mode, advanced_types: Dict[str, bool],
                                         log_info_func=None, log_error_func=None,
                                         request_id: str = None,
                                         user_home: str = None,
-                                        is_ai_call: bool = False) -> bool:
+                                        is_ai_call: bool = False,
+                                        cmd_str: str = "") -> bool:
     """
     检查细颗粒度路径 + 高级语法的组合
     
@@ -990,12 +1131,31 @@ def check_fine_grained_advanced_syntax(phys_paths: List[str], root_dir: str, use
     if not phys_paths:
         return True
     
-    # home 目录不再特例：与其它路径一样走细颗粒规则匹配（不再静默跳过）
-    
     if user_mode and hasattr(user_mode, 'current_mode'):
         current_mode = user_mode.current_mode
     else:
         current_mode = "low"
+    
+    # 【用户决策 2026-08 + 2026-09】cwd 与操作路径全部位于用户主目录内
+    # （root 用户含 /root）→ 直接放行，不进行细颗粒+高级语法审查
+    # （home 内 `mkdir && echo`、`mkdir -p x && echo OK` 不再弹确认/被拒）。
+    # 附带一层最简单的语义：拆分链式命令，若任一子命令头命中 home 黑名单
+    # （rm/rmdir/dd/mkfs…）则仍然拦截——防的是最简单形态的绕过
+    # （`ls && rm -rf ~/x`、`mkdir x; rm -rf ~/y`）。
+    # 威胁模型（用户定义）：只过滤最简单攻击；深层对抗（$() 嵌套、混淆等）
+    # 不在防御范围。home 外路径（/etc、其他用户 home 等）不受影响。
+    _home_zones = _home_exempt_zones(user_home, root_dir, username)
+    if _all_paths_in_home_zones(phys_paths, _home_zones):
+        _home_real = _home_zones[0]
+        if _home_chain_blacklisted_head(cmd_str, _home_real, root_dir, username) is None:
+            _debug_print("路径全部位于用户主目录内且链式子命令头安全，跳过细颗粒+高级语法审查")
+            return True
+        deny_head = _home_chain_blacklisted_head(cmd_str, _home_real, root_dir, username)
+        deny_msg = _get_msg("fine_grained_logic_denied")
+        print(Fore.RED + f"❌ 命令链包含用户主目录黑名单命令「{deny_head}」，已拦截" + Style.RESET_ALL)
+        if log_error_func:
+            log_error_func(f"home 链式命令含黑名单子命令：{deny_head}", request_id)
+        return False
     
     any_hit, hit_path, hit_rule = is_any_path_under_fine_grained_control(
         phys_paths, root_dir, username
@@ -1078,6 +1238,10 @@ def check_fine_grained_advanced_syntax(phys_paths: List[str], root_dir: str, use
             return False
         else:
             # 人类调用弹确认框
+            # 会话级豁免（沿用 adv 的既有机制）：本会话确认过一次后，后续直接执行
+            if _SESSION_CAPTCHA_VERIFIED:
+                _debug_print("本会话已确认过一次，跳过后续确认")
+                return True
             warning_msg = _get_msg(deny_key)
             print(Fore.YELLOW + warning_msg + Style.RESET_ALL)
             try:
@@ -1086,7 +1250,9 @@ def check_fine_grained_advanced_syntax(phys_paths: List[str], root_dir: str, use
                 print()
                 return False
             if confirm in ('y', 'yes'):
-                _debug_print(f"人类用户确认执行高级语法命令")
+                mark_session_captcha_verified()
+                _debug_print("人类用户确认执行高级语法命令（本会话后续不再询问）")
+                print(Fore.GREEN + _get_msg("user_confirmed") + Style.RESET_ALL)
                 return True
             print(Fore.RED + _get_msg("user_cancelled") + Style.RESET_ALL)
             return False

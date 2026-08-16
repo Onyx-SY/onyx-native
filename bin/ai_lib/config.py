@@ -26,7 +26,8 @@ help_info_path = os.path.join(ROOT_DIR, "onyx", "bin", "help", "help_info.json")
 onyx_config_path = os.path.join(ROOT_DIR, "onyx", "etc", "config.json")
 AI_KEY_DIR = os.path.join(USER_HOME_DIR, ".config", "onyx", "ai")
 AI_KEY_PATH = os.path.join(AI_KEY_DIR, "key.key")
-KEY_CONF_PATH = os.path.join(USER_HOME_DIR, ".config", "onyx", "ai", "key.conf")
+KEY_CONF_PATH = os.path.join(USER_HOME_DIR, ".config", "onyx", "ai", "key.json")
+KEY_CONF_LEGACY_PATH = os.path.join(USER_HOME_DIR, ".config", "onyx", "ai", "key.conf")
 MOOD_PATH = os.path.join(USER_HOME_DIR, ".ai_s", "mood.json")
 SERVER_URL_FILE = os.path.join(ROOT_DIR, "onyx", "etc", ".url")
 
@@ -144,11 +145,28 @@ def _deobfuscate(encoded: str) -> str:
     return bytes(b ^ key for b in raw).decode("utf-8")
 
 def load_key_conf() -> dict:
-    """读取 key.conf，返回 {platform, api_key, model, params} 或空 dict"""
-    if not os.path.exists(KEY_CONF_PATH):
-        return {}
+    """读取 key.json（旧 key.conf 自动迁移），返回 {platform, api_key, model, params} 或空 dict"""
+    path = KEY_CONF_PATH
+    if not os.path.exists(path):
+        if os.path.exists(KEY_CONF_LEGACY_PATH):
+            # 旧版 key.conf → 自动迁移为 key.json（迁移成功才删旧文件）
+            try:
+                with open(KEY_CONF_LEGACY_PATH, "r", encoding="utf-8") as _f:
+                    _data = json.load(_f)
+                if isinstance(_data, dict):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as _f:
+                        json.dump(_data, _f, ensure_ascii=False, indent=2)
+                    os.chmod(path, 0o600)
+                    os.remove(KEY_CONF_LEGACY_PATH)
+            except Exception:
+                pass
+            if not os.path.exists(path):
+                path = KEY_CONF_LEGACY_PATH  # 迁移失败，回退旧文件
+        else:
+            return {}
     try:
-        with open(KEY_CONF_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
             return {}
@@ -171,6 +189,12 @@ def save_key_conf(platform: str, api_key: str, model: str = "", params: dict = N
     with open(KEY_CONF_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.chmod(KEY_CONF_PATH, 0o600)
+    # 迁移完成：删除旧版 key.conf（若仍存在）
+    try:
+        if os.path.exists(KEY_CONF_LEGACY_PATH):
+            os.remove(KEY_CONF_LEGACY_PATH)
+    except Exception:
+        pass
 
 def _setup_key_conf_interactive(lang: str = "chinese") -> dict:
     """交互式配置 API 平台和密钥，使用箭头键选择，返回配置 dict 或空"""
@@ -211,11 +235,20 @@ def _setup_key_conf_interactive(lang: str = "chinese") -> dict:
             mt = input(f"  max_tokens [{params.get('max_tokens', 4096)}]: ").strip()
             if mt:
                 params["max_tokens"] = int(mt)
+            _tk_default = params.get("thinking", bool(info.get("thinking", False)))
+            tk = input(f"  思考模式 [{'on' if _tk_default else 'off'}]: ").strip().lower()
+            if tk in ("on", "true", "1", "yes", "enabled"):
+                params["thinking"] = True
+            elif tk in ("off", "false", "0", "no", "disabled", "none"):
+                params["thinking"] = False
         except (ValueError, KeyboardInterrupt, EOFError):
             pass
 
     save_key_conf(platform, key, model, params)
-    console.print(f"✅ {info['name']} — {model}" + (" (自定义参数)" if tune == "y" else ""), style="bold green")
+    suffix = " (自定义参数)" if tune == "y" else ""
+    if lang != "chinese":
+        suffix = " (custom params)" if tune == "y" else ""
+    console.print(f"✅ {info['name']} — {model}{suffix}", style="bold green")
     return {"platform": platform, "api_key": key, "model": model, "params": params}
 
 def _render_edit_diff(old_text: str, new_text: str, context_lines: int = 2):
@@ -233,7 +266,7 @@ def _render_edit_diff(old_text: str, new_text: str, context_lines: int = 2):
                 show_range = range(i1, i2)
             else:
                 show_range = list(range(i1, i1 + context_lines)) + list(range(i2 - context_lines, i2))
-                console.print(f"       [dim]... {total - context_lines * 2} 行未变化 ...[/]")
+                console.print(f"       [dim]... {total - context_lines * 2} 行未变化 ... | {total - context_lines * 2} lines unchanged ...[/]")
             for idx in show_range:
                 console.print((f"   {idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="bright_black")
             if total > context_lines * 2 + 1:

@@ -86,14 +86,22 @@ from lib.approval_tokens import (
     ApprovalTokenLedger, ApprovalScope,
 )
 
-# ── 记忆查询缓存（避免重复查询）──
-_MEMORY_QUERY_CACHE: dict[str, str] = {}
-_MEMORY_CACHE_MAX = 50
-
 # （解析已统一走 bin/ai_lib/parsers.py，纯 Markdown 直通，无标记语言）
 from .ai_lib.lang import get_lang_text
 from .ai_lib.i18n import _ as _i18n  # 双语文本（中英）
 from .ai_lib.tools import code_analysis  # 代码分析工具（py_*/Lsp*，独立工具包）
+# 记忆工具执行器（MemoryRead/MemorySearch/remember/forget/memory/compact_stats 已
+# 提取至 bin/ai_lib/memory_tools.py；记忆根 set/get_memory_home 亦在其中）
+from .ai_lib.memory_tools import (
+    set_memory_home, get_memory_home,
+    _resolve_memory_path, _get_file_uuid, _cache_query,
+    _exec_memory_read, _exec_memory_search,
+    _exec_remember_session, _exec_forget_session,
+    _exec_search_library, _exec_list_hippocampus,
+    _exec_read_memory, _exec_compact_stats,
+    _exec_list_timeline,
+)
+from .ai_lib.grep_utils import _run_grep_lines  # 文件搜索核心（MemorySearch/grep_search 共用）
 from .ai_lib.helpers import (
     handle_sleep_wait, set_ai_thread_priority, confirm_plan,
     parse_arguments, show_loading,
@@ -1374,13 +1382,19 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ),
         _make_tool(
             "memory",
-            "操作 library 历史会话：search 按关键词搜索；list 列出活跃记忆；read 用 session_id 读完整记录。",
+            "操作 library 历史会话与时间线：search 按关键词搜索；list 列出活跃记忆，或传 day/month/year/start/end 查询时间线（当日任务/当月每日描述/当年每月描述/区间）；read 用 session_id 读完整记录。",
             {
                 "operation": {"type": "string", "enum": ["search", "list", "read"], "description": "search/list/read"},
                 "query": {"type": "string", "description": "搜索关键词（search 时必填）"},
                 "session_id": {"type": "string", "description": "会话 UUID（read 时必填）"},
                 "filter": {"type": "string", "description": "过滤 class 等级（list 时可选）"},
                 "limit": {"type": "integer", "description": "返回结果数，默认 8，最大 20"},
+                "day": {"type": "string", "description": "时间线：查询指定日 'YYYY-M-D'（如 2026-2-12）当日任务列表"},
+                "month": {"type": "string", "description": "时间线：查询指定月 'YYYY-M'（如 2026-6）该月每日描述"},
+                "year": {"type": "string", "description": "时间线：查询指定年 'YYYY'（如 2026）该年每月描述"},
+                "start": {"type": "string", "description": "时间线：区间起始日 'YYYY-M-D'（配合 end 查询几日到几日的工作内容）"},
+                "end": {"type": "string", "description": "时间线：区间结束日 'YYYY-M-D'"},
+                "skill": {"type": "string", "description": "预留：按技能维度过滤时间线（当前版本仅透传）"},
             },
             ["operation"],
             PERM_READONLY,
@@ -1725,7 +1739,7 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
                     "description": mt.get("description", ""),
                     "parameters": mt.get("inputSchema", {}),
                 },
-                "x_permission": PERM_DANGER_FULL,  # MCP 工具默认危险
+                "x_permission": PERM_READONLY,  # 2026-09 用户拍板：MCP 工具一律免手动确认（ReadOnly 全模式自动放行）
             })
             seen_names.add(mcp_prefixed)
 
@@ -2242,33 +2256,6 @@ def _exec_glob_search(pattern: str, path: str = None) -> str:
     except Exception as e:
         return _i18n("glob_failed", "bilingual", err=e)
 
-
-def _run_grep_lines(pattern: str, search_paths, context: int = 0,
-                    case_insensitive: bool = False, glob: str = None,
-                    timeout: int = 15) -> Optional[str]:
-    """grep -rn 核心文件搜索逻辑：返回含 file:line:content 的原始匹配文本。
-
-    超时返回 None；无匹配返回空字符串。MemorySearch 与 grep_search 共用此逻辑。
-    """
-    cmd = ["grep", "-rn", "-H"]  # -H：单文件搜索时也输出文件名（MemorySearch 分组依赖）
-    if case_insensitive:
-        cmd.append("-i")
-    if context and context > 0:
-        cmd.append(f"-C{context}")
-    if glob:
-        cmd.extend(["--include", glob])
-    cmd.append("--")
-    cmd.append(pattern)
-    if isinstance(search_paths, str):
-        search_paths = [search_paths]
-    cmd.extend(search_paths)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode == 0 or result.returncode == 1:
-            return result.stdout
-        return result.stderr.strip() or None
-    except subprocess.TimeoutExpired:
-        return None
 
 
 def _exec_grep_search(pattern: str, path: str = None, glob: str = None,
@@ -2847,253 +2834,6 @@ def _exec_cron_delete(cron_id: str) -> str:
 # LSP — 语言服务器协议执行器
 # ═══════════════════════════════════════════════════════════
 
-def _resolve_memory_path(path: str) -> str:
-    """将记忆路径简写解析为完整文件路径。
-
-    接受格式:
-      library/<uuid>       → ~/.ai_s/library/<uuid>.txt
-      library/<uuid>.txt   → ~/.ai_s/library/<uuid>.txt  (兼容旧格式)
-      chat/<name>          → ~/.ai_s/chat/<name>.json
-      onyx_ai              → ~/.ai_s/onyx_ai.md
-    记忆根跟随 get_memory_home()（project 模式 → ~/.ai_s/projects/<id>/）
-
-    边界守卫：任何路径（含 ../ 穿越与绝对路径）必须落在记忆根内，
-    越界抛 ValueError（防任意文件读取）。
-    """
-    home = get_memory_home()
-    base = os.path.join(home, ".ai_s")
-    if path.startswith("chat/"):
-        name = path[5:]
-        if name.endswith(".json"):
-            name = name[:-5]
-        _cand = os.path.join(base, "chat", name + ".json")
-    elif path.startswith("library/"):
-        uuid_part = path[8:]
-        if uuid_part.endswith(".txt"):
-            uuid_part = uuid_part[:-4]
-        _cand = os.path.join(base, "library", uuid_part + ".txt")
-    elif path == "onyx_ai" or path == "onyx_ai.md":
-        _cand = os.path.join(base, "onyx_ai.md")
-    elif os.path.isabs(path):
-        _cand = path
-    else:
-        _cand = os.path.join(base, path)
-
-    # ── 边界守卫：realpath 后必须在记忆根内，否则拒绝 ──
-    _base_real = os.path.realpath(base)
-    _norm = os.path.normpath(_cand)
-    _p_real = os.path.realpath(_norm) if os.path.exists(_norm) else os.path.abspath(_norm)
-    if _p_real == _base_real or _p_real.startswith(_base_real + os.sep):
-        return _norm
-    raise ValueError(f"⛔ 记忆路径越界: '{path}' 不在记忆根 {base} 内")
-
-
-def _cache_query(key: str, result: str) -> str:
-    """缓存查询结果。"""
-    global _MEMORY_QUERY_CACHE
-    if len(_MEMORY_QUERY_CACHE) >= _MEMORY_CACHE_MAX:
-        # 淘汰最旧的
-        old_key = next(iter(_MEMORY_QUERY_CACHE))
-        _MEMORY_QUERY_CACHE.pop(old_key, None)
-    _MEMORY_QUERY_CACHE[key] = result
-    return result
-
-
-
-# ═══════════════════════════════════════════════════════════
-# Memory — 记忆查询执行器
-# ═══════════════════════════════════════════════════════════
-
-def _exec_memory_read(path: str, range_str: str = None) -> str:
-    """读取记忆文件，支持行号范围。返回带行号前缀的内容。"""
-    try:
-        file_path = _resolve_memory_path(path)
-        if not os.path.exists(file_path):
-            return _i18n("mem_read_not_found", "bilingual", path=path, file_path=file_path)
-
-        # 检查缓存
-        cache_key = f"read:{file_path}:{range_str or 'full'}"
-        if cache_key in _MEMORY_QUERY_CACHE:
-            return _MEMORY_QUERY_CACHE[cache_key] + "\n\n" + _i18n("cached_hint", "bilingual")
-
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-
-        all_lines = content.split("\n")
-        total_lines = len(all_lines)
-        start_line = 1
-        view_mode = "full"
-
-        if range_str:
-            try:
-                if "-" in range_str:
-                    start, end = map(int, range_str.split("-", 1))
-                    start_line = max(1, start)
-                    end_line = min(total_lines, end)
-                    selected = all_lines[start_line - 1:end_line]
-                    view_mode = f"range {start_line}-{end_line}"
-                else:
-                    line_no = int(range_str)
-                    start_line = max(1, min(line_no, total_lines))
-                    selected = [all_lines[start_line - 1]]
-                    view_mode = f"line {start_line}"
-            except (ValueError, IndexError):
-                selected = all_lines
-        else:
-            selected = all_lines
-
-        # ── 添加行号（与 read_file 一致）──
-        from lib.native_fs.panels import number_lines as _num_lines
-        raw = "\n".join(selected)
-        numbered = _num_lines(raw, start=start_line)
-
-        # 不在此处截断 — AI 显式调用 MemoryRead 需要完整内容。
-        # 上层 _MAX_TOOL_OUTPUT (32KB) 统一切断，保证不撑爆上下文。
-        header = f"📄 `{path}` " + _i18n("mem_read_header", "bilingual", mode=view_mode, total=total_lines)
-        result = f"{header}\n\n{numbered}"
-        return _cache_query(cache_key, result)
-    except Exception as e:
-        return _i18n("mem_read_failed", "bilingual", err=e)
-
-
-def _get_file_uuid(file_path: str) -> str:
-    """从记忆文件路径提取 UUID。"""
-    base = os.path.basename(file_path)
-    name, ext = os.path.splitext(base)
-    if ext == ".txt":
-        return name  # library 文件：文件名就是 UUID
-    elif ext == ".json":
-        # chat 文件：尝试提取 session_uuid
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            for m in data.get("messages", []):
-                suuid = m.get("session_uuid", "")
-                if suuid:
-                    return suuid
-        except Exception:
-            pass
-        return f"chat/{name}"
-    return base
-
-
-def _exec_memory_search(pattern: str, uuid: str = "all", context: int = 3,
-                        case_insensitive: bool = True) -> str:
-    """在记忆文件中搜索关键字。
-
-    uuid 参数：真实 UUID → 只搜 ~/.ai_s/library/<uuid>.txt；
-              'all'（默认）→ 全范围查找（chat/ + library/ + onyx_ai.md）。
-    本质是文件搜索：复用 grep 文件搜索逻辑（_run_grep_lines），结果带行号
-    （file:line:content）。
-    """
-    try:
-        home = os.path.expanduser("~")
-        base = os.path.join(home, ".ai_s")
-
-        # ── 解析 uuid → 搜索目标 ──
-        scope_label = uuid or "all"
-        if uuid and uuid != "all":
-            uuid_part = uuid
-            if uuid_part.startswith("library/"):
-                uuid_part = uuid_part[8:]
-            if uuid_part.endswith(".txt"):
-                uuid_part = uuid_part[:-4]
-            file_path = os.path.join(base, "library", uuid_part + ".txt")
-            # ── 边界守卫：uuid 含 ../ 或绝对路径时拒绝（防穿越）──
-            _base_real = os.path.realpath(base)
-            _fp_real = os.path.realpath(file_path) if os.path.exists(file_path) else os.path.abspath(file_path)
-            if not (_fp_real == _base_real or _fp_real.startswith(_base_real + os.sep)):
-                return _i18n("mem_search_uuid_missing", "bilingual", uuid=uuid, path=file_path)
-            if not os.path.exists(file_path):
-                return _i18n("mem_search_uuid_missing", "bilingual", uuid=uuid, path=file_path)
-            search_targets = [file_path]
-        else:
-            if not os.path.isdir(base):
-                return _i18n("mem_search_dir_missing", "bilingual", path=base)
-            search_targets = [base]
-            scope_label = "all"
-
-        cache_key = f"search:{pattern}:{scope_label}:{context}:{case_insensitive}"
-        if cache_key in _MEMORY_QUERY_CACHE:
-            return _MEMORY_QUERY_CACHE[cache_key] + "\n\n" + _i18n("cached_hint", "bilingual")
-
-        # ── 复用文件搜索逻辑（grep -rn，结果含行号）──
-        raw = _run_grep_lines(pattern, search_targets, context=context,
-                              case_insensitive=case_insensitive, timeout=30)
-        if raw is None:
-            return _i18n("mem_search_timeout", "bilingual")
-        if not raw.strip():
-            return _i18n("mem_search_no_match", "bilingual", pattern=pattern)
-
-        # 按文件分组 + UUID 标注（保留 file:line 行号信息）
-        groups: dict[str, list[str]] = {}
-        file_order: list[str] = []
-        current_file = None
-        current_block: list[str] = []
-
-        def _flush_block():
-            nonlocal current_file, current_block
-            if current_file and current_block:
-                if current_file not in groups:
-                    groups[current_file] = []
-                    file_order.append(current_file)
-                groups[current_file].extend(current_block)
-            current_block = []
-
-        for line in raw.split("\n"):
-            if line == "--":
-                _flush_block()
-                current_file = None
-                continue
-            if not line:
-                continue
-            idx = line.find(":")
-            if idx <= 0:
-                current_block.append(line)
-                continue
-            maybe_path = line[:idx]
-            rest = line[idx + 1:]
-            idx2 = rest.find(":")
-            if idx2 <= 0:
-                current_block.append(line)
-                continue
-            maybe_lineno = rest[:idx2]
-            if not maybe_lineno.isdigit():
-                current_block.append(line)
-                continue
-            if maybe_path != current_file:
-                _flush_block()
-                current_file = maybe_path
-            current_block.append(line)
-
-        _flush_block()
-
-        out = []
-        first = True
-        for fpath in file_order:
-            lines = groups[fpath]
-            uuid_label = _get_file_uuid(fpath)
-            if not first:
-                out.append("─" * 40)
-            first = False
-            out.append(f"📌 UUID: `{uuid_label}`")
-            out.append(f"   {_i18n('mem_search_path', 'bilingual')}: {fpath}")
-            if fpath.endswith(".txt") or (fpath.endswith(".json") and not uuid_label.startswith("chat/")):
-                out.append(f"   💡 {_i18n('mem_search_hint', 'bilingual', uuid=uuid_label)}")
-            out.append("")
-            out.extend(lines)
-            out.append("")
-
-        formatted = "\n".join(out)
-        if len(formatted) > 20000:
-            formatted = formatted[:20000] + "\n\n" + _i18n("mem_search_truncated", "bilingual")
-
-        header = _i18n("mem_search_header", "bilingual", pattern=pattern,
-                       scope=scope_label, ctx=context, files=len(groups))
-        return _cache_query(cache_key, f"{header}\n\n{formatted}")
-    except Exception as e:
-        return _i18n("mem_search_failed", "bilingual", err=e)
-
 
 def _exec_undo_last_edit() -> str:
     """撤销上一次文件编辑或写入操作。"""
@@ -3641,71 +3381,6 @@ def _exec_choose_ask(question: str, options: list) -> str:
         return f"❌ choose_ask failed: {e}"
 
 
-def _exec_remember_session(session_id: str) -> str:
-    """标记 library 会话为重要"""
-    try:
-        from .ai_lib.storage import mark_session_important
-        home_dir = os.path.expanduser("~")
-        return mark_session_important(home_dir, session_id)
-    except Exception as e:
-        return f"❌ remember failed: {e}"
-
-
-def _exec_forget_session(session_id: str) -> str:
-    """归档 library 会话"""
-    try:
-        from .ai_lib.storage import archive_session
-        home_dir = os.path.expanduser("~")
-        return archive_session(home_dir, session_id)
-    except Exception as e:
-        return f"❌ forget failed: {e}"
-
-
-def _exec_search_library(query: str, limit: int = 8) -> str:
-    """BM25 搜索海马体"""
-    try:
-        from .ai_lib.storage import search_library
-        home_dir = os.path.expanduser("~")
-        return search_library(home_dir, query, limit)
-    except Exception as e:
-        return f"❌ memory search failed: {e}"
-
-
-def _exec_list_hippocampus(filter_type: str = None, limit: int = 30) -> str:
-    """列出海马体活跃记忆"""
-    try:
-        from .ai_lib.storage import list_hippocampus
-        home_dir = os.path.expanduser("~")
-        return list_hippocampus(home_dir, filter_type=filter_type, limit=limit)
-    except Exception as e:
-        return f"❌ memory list failed: {e}"
-
-
-def _exec_read_memory(session_id: str) -> str:
-    """用 UUID 直接读取 library 完整记录"""
-    try:
-        from .ai_lib.storage import load_memory_by_uuid
-        home_dir = os.path.expanduser("~")
-        content = load_memory_by_uuid(home_dir, session_id)
-        if not content:
-            return f"Session {session_id} not found in library."
-        # 限制长度防止上下文溢出
-        if len(content) > 8000:
-            content = content[:8000] + f"\n\n... (truncated, {len(content)} chars total)"
-        return content
-    except Exception as e:
-        return f"❌ memory read failed: {e}"
-
-
-def _exec_compact_stats() -> str:
-    """查看压缩状态"""
-    try:
-        from .ai_lib.storage import get_compaction_stats
-        home_dir = os.path.expanduser("~")
-        return get_compaction_stats(home_dir)
-    except Exception as e:
-        return f"❌ compact_stats failed: {e}"
-
 
 def _exec_config(action: str, key: str, value: str = None) -> str:
     """获取或设置配置。"""
@@ -3770,20 +3445,6 @@ def get_main_command_executor() -> Optional[Callable]:
     return _MAIN_RUN_COMMAND_EXECUTOR
 
 
-# ── 模块级记忆根（由 handle_ai 注入 _mem_home：MemoryRead/MemorySearch 等
-#    路径解析跟随记忆模式 global/project，未注入时回落用户主目录）──
-_MEM_HOME = None
-
-
-def set_memory_home(home_dir: str) -> None:
-    """注入当前会话记忆根目录（handle_ai 内 _mem_home）。"""
-    global _MEM_HOME
-    _MEM_HOME = home_dir
-
-
-def get_memory_home() -> str:
-    """返回当前记忆根目录；未注入时回落用户主目录（兼容旧调用）。"""
-    return _MEM_HOME or os.path.expanduser("~")
 
 
 # ── library 工具结果采集白名单：文件/代码/Git/命令类工具执行后记录到 library ──
@@ -3900,13 +3561,13 @@ def _refresh_subagent_status(_sa_mod, final: bool = False) -> None:
         if _status is None:
             return
         if final:
-            _status.update("  [dim]🧩 子代理运行完成[/]")
+            _status.update(_mcp_t("  [dim]🧩 子代理运行完成[/]", "  [dim]🧩 Subagents finished[/]"))
             return
         _act = _sa_mod.get_manager().format_activity(4)
         if _act:
-            _status.update("  [dim]🧩 子代理运行中…\n" + _act + "[/]")
+            _status.update(_mcp_t("  [dim]🧩 子代理运行中…\n" + _act + "[/]", "  [dim]🧩 Subagents running…\n" + _act + "[/]"))
         else:
-            _status.update("  [dim]🧩 子代理运行中…[/]")
+            _status.update(_mcp_t("  [dim]🧩 子代理运行中…[/]", "  [dim]🧩 Subagents running…[/]"))
     except Exception:
         pass
 
@@ -5153,6 +4814,12 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
             if p.get("operation", "search") == "search"
             else _exec_read_memory(p.get("session_id", ""))
             if p.get("operation") == "read"
+            else _exec_list_timeline(
+                p.get("day", ""), p.get("month", ""), p.get("year", ""),
+                p.get("start", ""), p.get("end", ""), p.get("skill", ""))
+            if p.get("operation") == "list" and (
+                p.get("day") or p.get("month") or p.get("year")
+                or p.get("start") or p.get("end"))
             else _exec_list_hippocampus(p.get("filter"), p.get("limit", 30))
         ),
         "compact_stats": lambda p: _exec_compact_stats(),
@@ -5287,16 +4954,17 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
                 _confirm = input(f"  {_prompt}").strip().lower()
             except (KeyboardInterrupt, EOFError):
                 console.print()
-                return False, "⛔ 用户取消了危险操作"
+                return False, _mcp_t("⛔ 用户取消了危险操作", "⛔ Dangerous operation cancelled by user")
         if _confirm not in ("y", "yes"):
-            return False, "⛔ 用户拒绝了危险操作"
+            return False, _mcp_t("⛔ 用户拒绝了危险操作", "⛔ Dangerous operation refused by user")
         # 创建审批令牌
         _scope = ApprovalScope(action=raw_tool, policy="dangerous_write")
         _token_grant = _APPROVAL_LEDGER.create(
             scope=_scope, approving_actor="user",
             approved_executor="ai", max_uses=1, ttl_seconds=60,
         )
-        console.print(f"  [dim]✓ 已授权（令牌: {_token_grant.token[:12]}...）[/]")
+        console.print(_mcp_t(f"  [dim]✓ 已授权（令牌: {_token_grant.token[:12]}...）[/]",
+                            f"  [dim]✓ Authorized (token: {_token_grant.token[:12]}...)[/]"))
     # WorkspaceWrite / ReadOnly：全模式自动放行
     # （可逆操作：UndoLastEdit + git + 终端实时可见性提供安全；确认弹窗留给不可逆动作）
 
@@ -5516,7 +5184,7 @@ def list_mcp_servers() -> str:
     config = _load_mcp_config()
     servers = config.get("servers", {})
     if not servers:
-        return "没有已注册的 MCP 服务器"
+        return _mcp_t("没有已注册的 MCP 服务器", "No MCP servers registered")
 
     lines = ["📋 MCP 服务器列表:", ""]
     for sname, sinfo in servers.items():
@@ -5572,7 +5240,7 @@ def install_mcp_server_cmd(name: str, package: str = None) -> str:
     except FileNotFoundError:
         return _mcp_t("❌ npm 未找到，请先安装 Node.js", "❌ npm not found, please install Node.js")
     except subprocess.TimeoutExpired:
-        return "❌ 安装超时（120s）"
+        return _mcp_t("❌ 安装超时（120s）", "❌ Install timed out (120s)")
 
     # 注册到配置文件
     config = _load_mcp_config()
@@ -5661,7 +5329,7 @@ def _run_shell_cmd(cmd: str, timeout: int = 10) -> str:
 # ── 对话压缩管道（/compact 与自动压缩共用）──
 # 自动压缩阈值：估算 token 数（含 reasoning_content），超过即触发。
 # 压缩会重置缓存前缀（一次性 miss），换来后续注意力集中与更长的有效记忆窗口。
-_AUTO_COMPACT_TOKEN_THRESHOLD = 300 * 1024
+_AUTO_COMPACT_TOKEN_THRESHOLD = 600 * 1024
 
 # 工具 schema 的固定 token 开销：校准 tokPerChar 时从真实 prompt tokens 中扣除。
 # 回退值 22000（约 55 个内置工具 + 描述）；首次使用时按实际工具 JSON 字节实测。
@@ -5693,6 +5361,42 @@ _COMPACT_BREAKER_DISABLED: Dict[str, bool] = {}
 # ── 窗口感知阈值（trigger = 窗口 − 13K 安全缓冲；400 报错实测值可覆盖）──
 _WINDOW_SAFETY_BUFFER = 13_000
 _SESSION_CONTEXT_WINDOWS: Dict[str, int] = {}
+
+
+def _persist_compact_to_library(summary: str, saved: int, superseded: int,
+                                old_len: int, trident_stats: dict,
+                                user_home_dir: str = None, session_id: str = "") -> None:
+    """把会话压缩摘要追加到当前 session 的 library 记录（便于人工核对压缩是否失真）。
+
+    2026-09 用户需求：AutoCompact / /compact / 400 超限重试三条路径共用本函数，
+    压缩一发生就把摘要 + 统计写进 ~/.ai_s/library/<session_id>.txt。
+
+    防御：session_id 必须为单段文件名（防路径穿越）；任何失败静默，不影响主流程。
+    """
+    if not summary or not user_home_dir or not session_id:
+        return
+    if "/" in session_id or "\\" in session_id or session_id in (".", ".."):
+        return
+    try:
+        import datetime as _dt
+        from .ai_lib.storage import get_ai_session_library_dir
+        from .ai_lib.memory_compact import format_compact_summary
+        lib_dir = get_ai_session_library_dir(user_home_dir)
+        fpath = os.path.join(lib_dir, f"{session_id}.txt")
+        _formatted = format_compact_summary(summary)
+        _stats = trident_stats or {}
+        _block = (
+            f"## 🔄 对话压缩 — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- 压缩范围: {old_len} 条旧消息 → 摘要 + 最近原文（约省 {saved} 条）\n"
+            f"- Superseded: {superseded}；Trident: {_stats}\n\n"
+            f"{_formatted}\n"
+        )
+        with open(fpath, "a", encoding="utf-8") as f:
+            f.write(f"\n\n---\n\n{_block}")
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        pass
 
 
 def _compact_conversation_history(conversation_history: List[Dict], keep_last: int = 8,
@@ -5812,6 +5516,14 @@ def _compact_conversation_history(conversation_history: List[Dict], keep_last: i
         "content": get_compact_continuation_message(_summary),
     }
     _saved = max(0, len(_old) - len(_kept) - 1)
+    # ── 压缩摘要持久化到 library（2026-09：便于人工核对压缩是否失真）──
+    try:
+        _persist_compact_to_library(
+            _summary, _saved, _superseded, len(_old), _trident_stats,
+            user_home_dir, session_id,
+        )
+    except Exception:
+        pass
     return [_compact_msg] + _kept + _recent, _saved, _superseded, len(_old), _trident_stats
 
 
@@ -5861,10 +5573,20 @@ def _platform_context_window() -> int:
 
 
 def _effective_compact_threshold(session_id: str = "") -> int:
-    """自动压缩生效阈值 = min(用户 300K, 实测/默认窗口 − 13K 安全缓冲)。"""
+    """自动压缩生效阈值 = min(用户 600K, 实测/默认窗口 − 13K 安全缓冲)。"""
     _win = _SESSION_CONTEXT_WINDOWS.get(session_id) or _platform_context_window()
     _thr = min(_AUTO_COMPACT_TOKEN_THRESHOLD, _win - _WINDOW_SAFETY_BUFFER)
     return max(_thr, 32 * 1024)
+
+
+def _should_append_reply_assistant(ai_txt: str, tool_calls: List) -> bool:
+    """纯文本回复是否写入对话历史：正文为空（纯思考轮）不写。
+
+    思考被截断（finish_reason=length）时模型可能只输出 reasoning_content——
+    content=None 且无 tool_calls 的 assistant 消息回传会被 API 以
+    400 "Invalid assistant message" 拒绝，导致会话卡死。
+    """
+    return bool(ai_txt and ai_txt.strip()) and not tool_calls
 
 
 def _estimate_conversation_tokens(conversation_history: List[Dict], session_id: str = "") -> int:
@@ -5952,6 +5674,7 @@ def handle_ai(
     _in_repl: bool = False,
     conversation_history: List[Dict] = None,
     memory_base_dir: str = None,
+    plus_think: str = None,
 ) -> None:
     from io import StringIO
     import sys as sys_module
@@ -6317,7 +6040,7 @@ def handle_ai(
         import json as _json
         conf = load_key_conf()
         if not conf:
-            console.print("[yellow]No API key configured. Run 'ai -key <key>' first.[/]")
+            console.print(_mcp_t("[yellow]No API key configured. Run 'ai -key <key>' first.[/]", "[yellow]No API key configured. Run 'ai -key <key>' first.[/]"))
             return
         platform = conf.get("platform", "deepseek")
         current_model = conf.get("model", "")
@@ -6326,20 +6049,21 @@ def handle_ai(
         if not content:
             # List current model + effort
             effort = conf.get("params", {}).get("reasoning_effort", "") or _SUPPORTED_PLATFORMS.get(platform, {}).get("reasoning_effort", "")
-            console.print(f"[dim]Platform: {plat_name}  Model: {current_model or '?'}  Effort: {effort or '—'}[/]")
+            console.print(_mcp_t(f"[dim]平台: {plat_name}  模型: {current_model or '?'}  推理强度: {effort or '—'}[/]",
+                                 f"[dim]Platform: {plat_name}  Model: {current_model or '?'}  Effort: {effort or '—'}[/]"))
             if not is_custom:
                 models = _SUPPORTED_PLATFORMS.get(platform, {}).get("models", [])
-                console.print("Available models:")
+                console.print(_mcp_t("可用模型:", "Available models:"))
                 for m in models:
                     marker = "  ←" if m == current_model else ""
                     console.print(f"  {m}{marker}")
-                console.print("\nUsage: ai -model <name>\n       ai -effort high|max")
+                console.print(_mcp_t("\n用法: ai -model <名称>\n       ai -effort high|max", "\nUsage: ai -model <name>\n       ai -effort high|max"))
             return
         # Switch model
         new_model = content.strip()
         conf["model"] = new_model
         # 混淆 api_key 后写入
-        key_conf_path = os.path.join(user_home_dir, ".config", "onyx", "ai", "key.conf")
+        key_conf_path = os.path.join(user_home_dir, ".config", "onyx", "ai", "key.json")
         os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
         _write_conf = dict(conf)
         if "api_key" in _write_conf and isinstance(_write_conf["api_key"], str):
@@ -6347,7 +6071,7 @@ def handle_ai(
         with open(key_conf_path, "w", encoding="utf-8") as f:
             _json.dump(_write_conf, f, ensure_ascii=False, indent=2)
         os.chmod(key_conf_path, 0o600)
-        console.print(f"[green]✅ Switched to model: {new_model}[/]")
+        console.print(_mcp_t(f"[green]✅ 已切换到模型: {new_model}[/]", f"[green]✅ Switched to model: {new_model}[/]"))
         return
 
     if content_type == "effort_command":
@@ -6355,17 +6079,17 @@ def handle_ai(
         import json as _json
         conf = load_key_conf()
         if not conf:
-            console.print("[yellow]No API key configured.[/]")
+            console.print(_mcp_t("[yellow]未配置 API key。[/]", "[yellow]No API key configured.[/]"))
             return
         if not content:
             current_effort = conf.get("params", {}).get("reasoning_effort", "") or _SUPPORTED_PLATFORMS.get(conf.get("platform", ""), {}).get("reasoning_effort", "high")
-            console.print(f"[dim]Current reasoning effort: {current_effort}[/]")
-            console.print("Available: high, max")
-            console.print("Usage: ai -effort high  |  ai -effort max")
+            console.print(_mcp_t(f"[dim]当前推理强度: {current_effort}[/]", f"[dim]Current reasoning effort: {current_effort}[/]"))
+            console.print(_mcp_t("可用: high, max", "Available: high, max"))
+            console.print(_mcp_t("用法: ai -effort high  |  ai -effort max", "Usage: ai -effort high  |  ai -effort max"))
             return
         effort_val = content.strip().lower()
         if effort_val not in ("high", "max"):
-            console.print("[yellow]Invalid effort. Use: high or max[/]")
+            console.print(_mcp_t("[yellow]无效的推理强度。请使用: high 或 max[/]", "[yellow]Invalid effort. Use: high or max[/]"))
             return
         params = conf.get("params", {})
         if not isinstance(params, dict):
@@ -6373,7 +6097,7 @@ def handle_ai(
         params["reasoning_effort"] = effort_val
         conf["params"] = params
         # 混淆 api_key 后写入
-        key_conf_path = os.path.join(user_home_dir, ".config", "onyx", "ai", "key.conf")
+        key_conf_path = os.path.join(user_home_dir, ".config", "onyx", "ai", "key.json")
         os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
         _write_conf = dict(conf)
         if "api_key" in _write_conf and isinstance(_write_conf["api_key"], str):
@@ -6381,7 +6105,7 @@ def handle_ai(
         with open(key_conf_path, "w", encoding="utf-8") as f:
             _json.dump(_write_conf, f, ensure_ascii=False, indent=2)
         os.chmod(key_conf_path, 0o600)
-        console.print(f"[green]✅ Reasoning effort set to: {effort_val}[/]")
+        console.print(_mcp_t(f"[green]✅ 推理强度已设置为: {effort_val}[/]", f"[green]✅ Reasoning effort set to: {effort_val}[/]"))
         return
 
     if content_type == "deep_aff_mode":
@@ -6394,11 +6118,11 @@ def handle_ai(
                 from bin.plugin_loader import load_plugin, verify
                 ok, reason, payload = verify("deep_aff")
                 if not ok:
-                    console.print(f"❌ 深情模式插件验证失败: {reason}", style="bold red")
+                    console.print(_mcp_t(f"❌ 深情模式插件验证失败: {reason}", f"❌ Deep Affection plugin verification failed: {reason}"), style="bold red")
                     return
                 lib = load_plugin("deep_aff")
                 if not lib:
-                    console.print("❌ 无法加载深情模式插件", style="bold red")
+                    console.print(_mcp_t("❌ 无法加载深情模式插件", "❌ Failed to load Deep Affection plugin"), style="bold red")
                     return
                 # 调用 C 模块初始化
                 validation_key = payload.get("binary_hash", "deep_aff_key")[:32]
@@ -6406,7 +6130,7 @@ def handle_ai(
                 lib.deep_aff_init.restype = ctypes.c_int
                 ret = lib.deep_aff_init(validation_key.encode())
                 if ret != 0:
-                    console.print("❌ 深情模式授权失败", style="bold red")
+                    console.print(_mcp_t("❌ 深情模式授权失败", "❌ Deep Affection authorization failed"), style="bold red")
                     return
                 # 获取提示词
                 lib.deep_aff_get_prompt.argtypes = []
@@ -6414,7 +6138,7 @@ def handle_ai(
                 lib.deep_aff_free.argtypes = [ctypes.c_char_p]
                 prompt_ptr = lib.deep_aff_get_prompt()
                 if not prompt_ptr:
-                    console.print("❌ 无法获取深情模式提示词", style="bold red")
+                    console.print(_mcp_t("❌ 无法获取深情模式提示词", "❌ Failed to get Deep Affection prompt"), style="bold red")
                     return
                 prompt_text = ctypes.c_char_p(prompt_ptr).value.decode("utf-8")
                 lib.deep_aff_free(prompt_ptr)
@@ -6423,10 +6147,10 @@ def handle_ai(
                 os.makedirs(os.path.dirname(deep_aff_path), exist_ok=True)
                 with open(deep_aff_path, "w", encoding="utf-8") as f:
                     f.write(prompt_text)
-                console.print("💕 深情模式已激活", style="bold magenta")
-                console.print(f"   提示词已保存: {len(prompt_text)} 字", style="dim")
+                console.print(_mcp_t("💕 深情模式已激活", "💕 Deep Affection mode activated"), style="bold magenta")
+                console.print(_mcp_t(f"   提示词已保存: {len(prompt_text)} 字", f"   Prompt saved: {len(prompt_text)} chars"), style="dim")
             except Exception as e:
-                console.print(f"❌ 深情模式启动失败: {e}", style="bold red")
+                console.print(_mcp_t(f"❌ 深情模式启动失败: {e}", f"❌ Deep Affection mode startup failed: {e}"), style="bold red")
                 import traceback
                 traceback.print_exc()
         else:
@@ -6434,7 +6158,7 @@ def handle_ai(
             deep_aff_path = os.path.join(user_home_dir, ".ai_s", "deep_aff_prompt.txt")
             if os.path.exists(deep_aff_path):
                 os.remove(deep_aff_path)
-            console.print("💕 深情模式已关闭", style="dim")
+            console.print(_mcp_t("💕 深情模式已关闭", "💕 Deep Affection mode disabled"), style="dim")
         return
 
     if content_type == "machine_id_command":
@@ -6442,9 +6166,9 @@ def handle_ai(
         try:
             from bin.plugin_loader import get_machine_id
             mid = get_machine_id()
-            console.print(f"Machine ID: [bold]{mid}[/]")
+            console.print(_mcp_t(f"机器 ID: [bold]{mid}[/]", f"Machine ID: [bold]{mid}[/]"))
         except Exception as e:
-            console.print(f"[red]Failed to get machine ID: {e}[/]")
+            console.print(_mcp_t(f"[red]获取机器 ID 失败: {e}[/]", f"[red]Failed to get machine ID: {e}[/]"))
         return
 
     if content_type == "plugin_command":
@@ -6469,7 +6193,8 @@ def handle_ai(
             import subprocess as _sp
             _sp.run([sys.executable, os.path.join(root, "plugin_compile.py"), args[0]])
         else:
-            console.print("Usage: ai -plugin list | load <name> | verify <name> | sign <name> [ver] | compile <file.c>")
+            console.print(_mcp_t("用法: ai -plugin list | load <名称> | verify <名称> | sign <名称> [版本] | compile <文件.c>",
+                                 "Usage: ai -plugin list | load <name> | verify <name> | sign <name> [ver] | compile <file.c>"))
         return
 
     if content_type == "chat_only":
@@ -6502,7 +6227,7 @@ def handle_ai(
                 console.print(lang_text["chat_already_exists"].format(name), style="bold yellow")
             return
         else:
-            console.print(f"Unknown -c action: {chat_action}", style="bold red")
+            console.print(_mcp_t(f"未知 -c 操作: {chat_action}", f"Unknown -c action: {chat_action}"), style="bold red")
             return
     
     if content_type == "key_only":
@@ -6619,17 +6344,35 @@ def handle_ai(
 
     # ── 提前加载海马体索引 + agreement（供 _env_info 和 .prompt 使用）──
     _hippocampus_index = build_stable_prefix(_mem_home)
+    # ── agreement 三件套拼接：普通模式 = self.md + skill.md（固定前缀，缓存命中）；
+    #    plus 模式思考段 = 仅 self.md（最短），干活段 = self.md + skill.md + plus 思考结果。
+    #    旧 agreement.md 保留为兼容入口（仅说明，不承载正文）。
     _agreement_text = ""
     try:
-        _agreement_paths = [
-            os.path.join(ROOT_DIR, "onyx", "etc", "ai", "agreement.md"),
-            os.path.join("etc", "ai", "agreement.md"),
+        _ai_dir_candidates = [
+            os.path.join(ROOT_DIR, "onyx", "etc", "ai"),
+            os.path.join("etc", "ai"),
         ]
-        for _ap in _agreement_paths:
-            if os.path.exists(_ap):
-                with open(_ap, "r", encoding="utf-8") as _af:
-                    _agreement_text = _af.read()
-                break
+        _ai_dir = next((d for d in _ai_dir_candidates if os.path.isdir(d)), None)
+        if _ai_dir:
+            _parts = []
+            for _name in ("self.md", "skill.md"):
+                _p = os.path.join(_ai_dir, _name)
+                if os.path.exists(_p):
+                    with open(_p, "r", encoding="utf-8") as _af:
+                        _parts.append(_af.read())
+            if _parts:
+                _agreement_text = "\n\n".join(_parts)
+        if not _agreement_text:
+            # 回退：旧 agreement.md（兼容旧部署）
+            for _ap in (
+                os.path.join(ROOT_DIR, "onyx", "etc", "ai", "agreement.md"),
+                os.path.join("etc", "ai", "agreement.md"),
+            ):
+                if os.path.exists(_ap):
+                    with open(_ap, "r", encoding="utf-8") as _af:
+                        _agreement_text = _af.read()
+                    break
     except Exception:
         pass
 
@@ -6782,7 +6525,7 @@ def handle_ai(
     # 会话内 AI 已通过 conversation_history 持有全部上下文，无需每轮刷新。
     _cached_memory_section = build_memory_context(
         _mem_home, current_chat_name, current_session_id,
-        referenced_memory_uuid, True, mode
+        referenced_memory_uuid, True, mode, plus_think=plus_think
     )
 
     # ── Layer 2 / TimeBased 闲置压缩：挂机 >60 分钟回来 → 清理已消费的旧工具结果 ──
@@ -6792,7 +6535,7 @@ def handle_ai(
             if compact_consumed_tool_results(conversation_history):
                 from .ai_lib.api import bump_rewrite_version as _bump_idle
                 _bump_idle(current_session_id)
-                console.print("[dim]📦 闲置压缩: 已清理过期的工具输出[/]")
+                console.print(_mcp_t("[dim]📦 闲置压缩: 已清理过期的工具输出[/]", "[dim]📦 Idle compact: cleaned up expired tool outputs[/]"))
     except Exception:
         pass
     _last_ai_interaction_ts = time.time()
@@ -6808,10 +6551,12 @@ def handle_ai(
             for _et in _explore_done:
                 if _et.status == "done" and _et.summary:
                     _inject = f"子代理结果：{_et.label}任务「{_et.name}」完成：\n{_et.summary}"
-                    console.print(f"  [bold cyan]🧩 {_et.label}子代理「{_et.name}」完成，结果已注入上下文[/]")
+                    console.print(_mcp_t(f"  [bold cyan]🧩 {_et.label}子代理「{_et.name}」完成，结果已注入上下文[/]",
+                                         f"  [bold cyan]🧩 {_et.label} subagent「{_et.name}」done, result injected into context[/]"))
                 else:
                     _inject = f"子代理任务失败：{_et.label}任务「{_et.name}」失败：{_et.error or _et.status}"
-                    console.print(f"  [bold red]🧩 {_et.label}子代理「{_et.name}」失败[/]")
+                    console.print(_mcp_t(f"  [bold red]🧩 {_et.label}子代理「{_et.name}」失败[/]",
+                                         f"  [bold red]🧩 {_et.label} subagent「{_et.name}」failed[/]"))
                 conversation_history.append({"role": "system", "content": _inject})
             # 运行中的子代理：灰色显示最近活动尾行（告诉用户没卡住）
             if _subagent_mod.get_manager().has_pending():
@@ -7021,17 +6766,24 @@ def handle_ai(
                         session_id=current_session_id,
                     )
                     if _new_hist is None:
-                        console.print("[dim]📦 对话压缩: 无可安全压缩的旧消息（tool_calls 链覆盖全部）[/]")
+                        console.print(_mcp_t("[dim]📦 对话压缩: 无可安全压缩的旧消息（tool_calls 链覆盖全部）[/]",
+                                             "[dim]📦 Conversation compact: no safely compressible old messages (tool_calls chain covers all)[/]"))
                     else:
                         conversation_history = _new_hist
                         # 通知缓存诊断：rewrite 版本号 +1，归因缓存断裂为日志重写
                         from .ai_lib.api import bump_rewrite_version as _bump
                         _bump(current_session_id)
                         console.print(
-                            f"[dim]📦 对话压缩: {_old_len} 条 → 摘要 "
-                            f"({_saved} 条节省, {_superseded} 条去重"
-                            f", {_trident_stats.get('collapsed_msgs', 0)} 折叠"
-                            f", {_trident_stats.get('clustered_msgs', 0)} 聚类)[/]"
+                            _mcp_t(
+                                f"[dim]📦 对话压缩: {_old_len} 条 → 摘要 "
+                                f"({_saved} 条节省, {_superseded} 条去重"
+                                f", {_trident_stats.get('collapsed_msgs', 0)} 折叠"
+                                f", {_trident_stats.get('clustered_msgs', 0)} 聚类)[/]",
+                                f"[dim]📦 Conversation compact: {_old_len} msgs → summary "
+                                f"({_saved} saved, {_superseded} deduped"
+                                f", {_trident_stats.get('collapsed_msgs', 0)} collapsed"
+                                f", {_trident_stats.get('clustered_msgs', 0)} clustered)[/]"
+                            )
                         )
                 except Exception:
                     pass
@@ -7055,10 +6807,16 @@ def handle_ai(
                             from .ai_lib.api import bump_rewrite_version as _bump
                             _bump(current_session_id)
                             console.print(
-                                f"[dim]📦 自动压缩: ~{_eff_thr // 1024}K tokens 上下文 "
-                                f"→ 摘要 ({_saved} 条节省, {_superseded} 条去重"
-                                f", {_trident_stats.get('collapsed_msgs', 0)} 折叠"
-                                f", {_trident_stats.get('clustered_msgs', 0)} 聚类)[/]"
+                                _mcp_t(
+                                    f"[dim]📦 自动压缩: ~{_eff_thr // 1024}K tokens 上下文 "
+                                    f"→ 摘要 ({_saved} 条节省, {_superseded} 条去重"
+                                    f", {_trident_stats.get('collapsed_msgs', 0)} 折叠"
+                                    f", {_trident_stats.get('clustered_msgs', 0)} 聚类)[/]",
+                                    f"[dim]📦 Auto compact: ~{_eff_thr // 1024}K tokens context "
+                                    f"→ summary ({_saved} saved, {_superseded} deduped"
+                                    f", {_trident_stats.get('collapsed_msgs', 0)} collapsed"
+                                    f", {_trident_stats.get('clustered_msgs', 0)} clustered)[/]"
+                                )
                             )
                             # ── 熔断器：压缩后仍 ≥90% 阈值 → 计数；连续 3 次 → 本会话停用自动压缩 ──
                             _after = _estimate_conversation_tokens(conversation_history, current_session_id)
@@ -7068,9 +6826,15 @@ def handle_ai(
                                 if _COMPACT_BREAKER_COUNTS[current_session_id] >= 3:
                                     _COMPACT_BREAKER_DISABLED[current_session_id] = True
                                     console.print(
-                                        "[bold yellow]⚠️ 连续 3 次压缩后上下文仍接近阈值，"
-                                        "本会话已停止自动压缩。请用 /compact 手动压缩，"
-                                        f"或调大 {_eff_thr // 1024}K 阈值。[/]")
+                                        _mcp_t(
+                                            "[bold yellow]⚠️ 连续 3 次压缩后上下文仍接近阈值，"
+                                            "本会话已停止自动压缩。请用 /compact 手动压缩，"
+                                            f"或调大 {_eff_thr // 1024}K 阈值。[/]",
+                                            "[bold yellow]⚠️ Context still near threshold after 3 compactions, "
+                                            "auto-compact disabled for this session. Use /compact manually, "
+                                            f"or raise the {_eff_thr // 1024}K threshold.[/]"
+                                        )
+                                    )
                             else:
                                 _COMPACT_BREAKER_COUNTS[current_session_id] = 0
                 except Exception:
@@ -7171,7 +6935,7 @@ def handle_ai(
                     import sys as _sys
                     _tb.print_exc(file=_sys.stderr)
                     _mcp_debug(f"call_ai_api_sse 异常: {type(_api_exc).__name__}: {_api_exc}")
-                    console.print(f"[red]API 调用异常: {_api_exc}[/]")
+                    console.print(_mcp_t(f"[red]API 调用异常: {_api_exc}[/]", f"[red]API call error: {_api_exc}[/]"))
                     continue_asking = False
                     break
                 current_times += 1
@@ -7240,6 +7004,30 @@ def handle_ai(
                 console.print(f"❌ {lang_text['api_error'].format(error_str)}", style="bold red")
             if log_error:
                 log_error(f"AI error: {error_str}", current_session_id)
+            # ── 自愈：400 Invalid assistant message → 剔除坏消息并重试 ──
+            # 思考截断轮可能留下 content 与 tool_calls 均为空的 assistant 消息，
+            # 回传即被服务器拒绝（"content or tool_calls must be set"）。
+            # 剔除后会话无需重启即可继续。
+            if "Invalid assistant message" in error_str:
+                try:
+                    from .ai_lib.api import strip_empty_assistant_messages as _strip_empty_asst
+                    _hist_healed, _healed_n = _strip_empty_asst(conversation_history)
+                except Exception:
+                    _hist_healed, _healed_n = conversation_history, 0
+                if _healed_n:
+                    conversation_history = _hist_healed
+                    console.print(_mcp_t(
+                        f"[bold yellow]🩹 自愈: 已剔除 {_healed_n} 条空 assistant 消息并重试[/]",
+                        f"[bold yellow]🩹 Self-healed: removed {_healed_n} empty assistant message(s), retrying[/]"))
+                    conversation_history.append({
+                        "role": "system",
+                        "content": _mcp_t(
+                            "⚠️ 上轮请求因 assistant 消息缺少 content 被拒，系统已剔除坏消息并重试。继续当前任务。",
+                            "⚠️ The previous request was rejected for an empty assistant message; "
+                            "the system removed it and is retrying. Continue the task."),
+                    })
+                    continue_asking = True
+                    continue
             # ── Layer 4 / Reactive：上下文超限报错 → 强制压缩一次并重试（最后保命兜底）──
             if _is_context_too_long_error(error_str) and not _reactive_compact_done:
                 _reactive_compact_done = True
@@ -7268,7 +7056,8 @@ def handle_ai(
                                 "the system force-compacted history and is retrying. Continue the task."),
                         })
                         console.print(
-                            "[bold yellow]📦 应急压缩: 上下文超限 → 已强制压缩并重试[/]")
+                            _mcp_t("[bold yellow]📦 应急压缩: 上下文超限 → 已强制压缩并重试[/]",
+                                   "[bold yellow]📦 Emergency compact: context limit exceeded → force-compacted and retrying[/]"))
                         continue_asking = True
                         continue
                 except Exception:
@@ -7315,7 +7104,8 @@ def handle_ai(
         if len(ai_commands) > 10:
             _discarded = ai_commands[10:]
             ai_commands = ai_commands[:10]
-            _warn = lang_text.get("cmd_limit", "⚠️ 命令超过 10 条限制，已截断前 10 条执行") if False else "⚠️ 命令超过 10 条限制，已截断前 10 条执行"
+            _warn = _mcp_t("⚠️ 命令超过 10 条限制，已截断前 10 条执行",
+                           "⚠️ Command limit of 10 exceeded, truncated to first 10")
             console.print(f"  [bold yellow]{_warn}[/]")
             conversation_history.append({"role": "system", "content": f"{_warn}。多余的 {len(_discarded)} 条命令被丢弃，请下一轮继续。"})
         # 命令执行摘要面板（[ANALYSIS] 标记已移除 — AI 分析直接走正文 Markdown）
@@ -7418,9 +7208,10 @@ def handle_ai(
                 continue
 
             elif plan_choice == "guide":
-                console.print(lang_text.get("plan_guide_prompt", "💡 请输入你对计划的修改意见："), style="bold cyan")
+                console.print(lang_text.get("plan_guide_prompt",
+                    "💡 请输入你对计划的修改意见：" if current_lang == "chinese" else "💡 Enter your revision to the plan:"), style="bold cyan")
                 try:
-                    guide_text = ui_text_input("💡 修改意见").strip()
+                    guide_text = ui_text_input("💡 修改意见" if current_lang == "chinese" else "💡 Revision").strip()
                 except (KeyboardInterrupt, EOFError):
                     guide_text = ""
                     console.print()
@@ -7609,7 +7400,7 @@ def handle_ai(
                                         _req = _t["function"]["parameters"].get("required", [])
                                         _hint_items = []
                                         for _pk, _pv in _props.items():
-                                            _req_flag = "(必填)" if _pk in _req else "(可选)"
+                                            _req_flag = ("(必填)" if _pk in _req else "(可选)") if current_lang == "chinese" else ("(required)" if _pk in _req else "(optional)")
                                             _p_type = _pv.get("type", "string")
                                             _hint_items.append(f"  \"{_pk}\": <{_p_type}> {_req_flag}")
                                         if _hint_items:
@@ -7660,7 +7451,7 @@ def handle_ai(
                     _status_started = False
                     if tool_name not in ("choose_ask", "RunCommand"):
                         from rich.status import Status as _RichStatus
-                        _status = _RichStatus(f"  [dim]⏳ {_tool_display_name} 运行中…[/]", spinner="dots", console=console)
+                        _status = _RichStatus(_mcp_t(f"  [dim]⏳ {_tool_display_name} 运行中…[/]", f"  [dim]⏳ {_tool_display_name} running…[/]"), spinner="dots", console=console)
                         _status.start()
                         _status_started = True
 
@@ -7759,14 +7550,14 @@ def handle_ai(
                             short = output[:100] + ("..." if len(output) > 100 else "")
                             console.print(f"   → {short}", style="dim")
                     else:
-                        err_msg = f"❌ 工具执行失败: {output}"
+                        err_msg = _mcp_t(f"❌ 工具执行失败: {output}", f"❌ Tool execution failed: {output}")
                         tool_results.append(err_msg)
                         console.print(f"   {err_msg}", style="bold red")
 
             except KeyboardInterrupt:
                 # Ctrl+C 强制打断工具执行
                 _AI_INTERRUPTED = True
-                console.print("\n  [bold red]⏹ 用户中断工具执行[/]")
+                console.print(_mcp_t("\n  [bold red]⏹ 用户中断工具执行[/]", "\n  [bold red]⏹ Tool execution interrupted by user[/]"))
                 # 终止所有 MCP 子进程并同步清理注册表（防 stale；健康检查下次直接重建）
                 for _name, _proc in list(MCP_SERVER_PROCESSES.items()):
                     try:
@@ -7778,7 +7569,11 @@ def handle_ai(
                 # 避免 "assistant 有 tool_calls 但缺少 tool 消息" 的 API 错误
                 while len(tool_results) < len(tool_calls):
                     tool_results.append("⏹ 用户中断，该工具未执行")
-                continue_asking = False
+                # 用户要求：Ctrl+C 只打断当前工具，不停止 AI 闭环——
+                # 复位中断标志并把"工具被中断"结果回传 AI，让 AI 调整策略继续
+                _reset_ai_interrupt_flags()
+                continue_asking = True
+                _tool_calls_processed_this_round = True
 
             # ── 提取 submit_plan / mark_step_complete 结果 ──
             # submit_plan 完整内容保留在 conversation_history 中（AI 首次需要看到），
@@ -7981,7 +7776,7 @@ def handle_ai(
         # ── AI 纯文本回复 → 追加 assistant 消息 ──
         _ai_txt = (ai_result.get("txt", "") or "").strip()
         _reasoning = ai_result.get("_reasoning", "")
-        if (_ai_txt or _reasoning) and not tool_calls:
+        if _should_append_reply_assistant(_ai_txt, tool_calls):
             _assistant_msg = {
                 "role": "assistant",
                 "content": _ai_txt or None,
@@ -8366,23 +8161,25 @@ def handle_ai(
             try:
                 from .ai_lib import subagent as _subagent_wait
                 if _subagent_wait.get_manager().has_pending() and not was_interrupted:
-                    console.print("  [bold cyan]🧩 等待子代理完成总结…[/]")
+                    console.print(_mcp_t("  [bold cyan]🧩 等待子代理完成总结…[/]", "  [bold cyan]🧩 Waiting for subagent summaries…[/]"))
                     from rich.status import Status as _ExploreStatus
-                    with _ExploreStatus("  [dim]🧩 子代理运行中…[/]", spinner="dots", console=console) as _st:
+                    with _ExploreStatus(_mcp_t("  [dim]🧩 子代理运行中…[/]", "  [dim]🧩 Subagents running…[/]"), spinner="dots", console=console) as _st:
                         _deadline = time.time() + 600
                         while _subagent_wait.get_manager().has_pending() and time.time() < _deadline:
                             _act_tail = _subagent_wait.get_manager().format_activity(4)
                             if _act_tail:
-                                _st.update("  [dim]🧩 子代理运行中…\n" + _act_tail + "[/]")
+                                _st.update(_mcp_t("  [dim]🧩 子代理运行中…\n" + _act_tail + "[/]", "  [dim]🧩 Subagents running…\n" + _act_tail + "[/]"))
                             _subagent_wait.get_manager().wait_any(timeout=0.4)  # 事件驱动等待（完成即醒）
                     _waited = _subagent_wait.get_manager().collect_done()
                     for _et in _waited:
                         if _et.status == "done" and _et.summary:
                             _inject = f"探索子代理结果：任务「{_et.name}」完成：\n{_et.summary}"
-                            console.print(f"  [bold cyan]🧩 Explore 子代理「{_et.name}」完成，结果已注入上下文[/]")
+                            console.print(_mcp_t(f"  [bold cyan]🧩 Explore 子代理「{_et.name}」完成，结果已注入上下文[/]",
+                                                 f"  [bold cyan]🧩 Explore subagent「{_et.name}」done, result injected[/]"))
                         else:
                             _inject = f"探索子代理任务失败：任务「{_et.name}」失败：{_et.error or _et.status}"
-                            console.print(f"  [bold red]🧩 Explore 子代理「{_et.name}」失败[/]")
+                            console.print(_mcp_t(f"  [bold red]🧩 Explore 子代理「{_et.name}」失败[/]",
+                                                 f"  [bold red]🧩 Explore subagent「{_et.name}」failed[/]"))
                         conversation_history.append({"role": "system", "content": _inject})
                     if _waited:
                         continue_asking = True
@@ -8390,7 +8187,6 @@ def handle_ai(
             except Exception:
                 pass
             continue_asking = False
-            esc_pressed = [False]
             # 延迟导入 prompt_toolkit（ESC 追问仅在本块使用）——避免模块级加载 ~1s
             from prompt_toolkit import prompt
             from prompt_toolkit.key_binding import KeyBindings
@@ -8399,12 +8195,12 @@ def handle_ai(
 
             @kb_esc.add('escape')
             def on_esc(event):
-                esc_pressed[0] = True
-                event.app.exit(result='')
+                # ESC = 直接停止（与 Ctrl+C 一致）：结束本回合，不再追问
+                event.app.exit(exception=KeyboardInterrupt())
 
             hint = lang_text.get("esc_hint",
-                "Press ESC to ask, Enter to exit") if current_lang == "chinese" else \
-                lang_text.get("esc_hint", "Press ESC to ask, Enter to exit")
+                "Press ESC to exit, Enter to exit") if current_lang == "chinese" else \
+                lang_text.get("esc_hint", "Press ESC to exit, Enter to exit")
             try:
                 follow_up = prompt(
                     [('class:dim', hint + ' ')],
@@ -8416,27 +8212,6 @@ def handle_ai(
                 console.print(lang_text.get("user_exit",
                     "Goodbye!" if current_lang == "english" else "再见！"), style="dim")
                 continue
-
-            if esc_pressed[0]:
-                console.print()
-                console.print(lang_text.get("esc_ask",
-                    "Any questions?" if current_lang == "english" else "有什么问题吗？"), style="dim")
-                try:
-                    follow_up = prompt("> ").strip()
-                except (KeyboardInterrupt, EOFError):
-                    console.print()
-                    console.print(lang_text.get("user_exit",
-                        "Goodbye!" if current_lang == "english" else "再见！"), style="dim")
-                    continue
-
-                if follow_up:
-                    last_user_question = follow_up
-                    message_appended = False
-                    current_question = follow_up
-                    _time_tag = f"\n\n[⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}]"
-                    conversation_history.append({"role": "user", "content": follow_up + _time_tag})
-                    _user_input_round = True  # 用户 ESC 追问
-                    continue_asking = True
 
     # 恢复原始 SIGINT 处理器
     import signal as _signal

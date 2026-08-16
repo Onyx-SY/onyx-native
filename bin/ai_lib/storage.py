@@ -309,140 +309,6 @@ def _consume_tool_results() -> List[Dict]:
     return data
 
 
-# ── 自动压缩（library 超预算自动折叠，不再仅手动 /compact）──
-
-_ENTRY_SEPARATOR = "\n\n---\n\n"
-_AUTO_COMPACT_MAX_ENTRIES = 20          # 条目数阈值（与 CompactConfig.max_entries 一致）
-_AUTO_COMPACT_MAX_TOKENS = 10_000       # 估算 token 阈值（与 CompactConfig.max_tokens 一致）
-_AUTO_COMPACT_MIN_FILE_SIZE = 64 * 1024 # 小于 64KB 的 library 文件不扫描
-_AUTO_COMPACT_MIN_SAVINGS = 4 * 1024    # 节省少于 4KB 不重写（避免无谓磁盘写）
-_AUTO_COMPACT_COOLDOWN = 60.0           # 同一文件两次压缩最小间隔（秒）
-_AUTO_COMPACT_ELIDE_BLOCK = 1024        # 条目内代码块超过 1KB 即 elide
-_AUTO_COMPACT_ELIDE_KEEP = 300          # elide 后保留前 N 字符
-
-_last_auto_compact: Dict[str, float] = {}  # fpath → 上次压缩时间
-
-
-def split_library_entries(content: str, fname: str) -> List[Dict]:
-    """按条目分隔符拆分 library 文件内容为条目 dict 列表。"""
-    entries = []
-    for part in content.split(_ENTRY_SEPARATOR):
-        part = part.strip()
-        if not part:
-            continue
-        time_str = ""
-        import re as _re
-        _m = _re.search(r"## (?:Interaction|交互记录) — ([\d\- :.]+)", part)
-        if _m:
-            time_str = _m.group(1)
-        entries.append({
-            "session_id": fname[:-4] if fname.endswith(".txt") else fname,
-            "time": time_str,
-            "content": part,
-        })
-    return entries
-
-
-def elide_oversized_blocks(content: str,
-                           max_block: int = _AUTO_COMPACT_ELIDE_BLOCK,
-                           keep: int = _AUTO_COMPACT_ELIDE_KEEP) -> Tuple[str, int]:
-    """
-    把条目内超长 ``` 代码块（旧版本写入的原始工具输出/文件全文）替换为 elided 标记。
-    保留代码块围栏 + 前 keep 字符，让 AI 仍能看到内容性质。
-
-    Returns:
-        (elided_content, saved_chars)
-    """
-    import re as _re
-    saved = 0
-    _block_re = _re.compile(r"(```[^\n]*\n)(.*?)(```)", _re.DOTALL)
-
-    def _repl(m):
-        nonlocal saved
-        inner = m.group(2)
-        if len(inner) <= max_block:
-            return m.group(0)
-        marker = f"[elided tool result — {len(inner)} bytes dropped to save context; " \
-                 f"re-run the tool if the data is needed again]\n"
-        saved += len(inner) - (keep + len(marker))
-        return m.group(1) + inner[:keep] + marker + m.group(3)
-
-    out = _block_re.sub(_repl, content)
-    return out, saved
-
-
-def maybe_compact_library(home_dir: str) -> bool:
-    """
-    自动压缩 library：文件超阈值时执行「条目内大块 elide + Trident 条目级压缩」。
-    保留最近 preserve_recent 条原样。
-    带冷却与最小收益保护，压缩失败不影响主流程。
-
-    Returns:
-        True 表示至少一个文件发生了压缩重写。
-    """
-    global _last_auto_compact
-    try:
-        from .memory_compact import estimate_tokens, compact_library_entries, CompactConfig
-    except Exception:
-        return False
-    library_dir = get_ai_session_library_dir(home_dir)
-    changed = False
-    now = time.time()
-    try:
-        for fname in sorted(os.listdir(library_dir)):
-            if not fname.endswith(".txt"):
-                continue
-            fpath = os.path.join(library_dir, fname)
-            # 冷却保护：刚压缩过的文件不重复扫描
-            _last_ts = _last_auto_compact.get(fpath, 0.0)
-            if now - _last_ts < _AUTO_COMPACT_COOLDOWN:
-                continue
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    content = f.read()
-            except Exception:
-                continue
-            if len(content) < _AUTO_COMPACT_MIN_FILE_SIZE:
-                continue
-
-            # ── 1) 条目内大块 elide（旧文件残留的原始工具输出）──
-            content2, saved_chars = elide_oversized_blocks(content)
-
-            # ── 2) 条目级 Trident 压缩 ──
-            entries = split_library_entries(content2, fname)
-            needs_compact = (
-                len(entries) > _AUTO_COMPACT_MAX_ENTRIES
-                or estimate_tokens(content2) > _AUTO_COMPACT_MAX_TOKENS
-            )
-            if needs_compact:
-                try:
-                    _cfg = CompactConfig()
-                    _result = compact_library_entries(entries, _cfg)
-                    if _result.final_count < _result.original_count:
-                        rebuilt = _ENTRY_SEPARATOR.join(
-                            e["content"] for e in _result.entries if e.get("content")
-                        )
-                        saved_chars += max(0, len(content2) - len(rebuilt))
-                        content2 = rebuilt
-                except Exception:
-                    pass
-
-            if saved_chars < _AUTO_COMPACT_MIN_SAVINGS:
-                continue
-            # 原子写回
-            tmp_path = fpath + ".compact.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(content2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, fpath)
-            _last_auto_compact[fpath] = time.time()
-            changed = True
-    except Exception:
-        pass
-    return changed
-
-
 # ── 会话管理 ──
 
 def get_ai_session_library_dir(home_dir: str) -> str:
@@ -677,6 +543,15 @@ def record_ai_session(home_dir: str, session_id: str, user_question: str,
         maybe_compact_library(home_dir)
     except Exception:
         pass  # 压缩失败不影响主流程
+
+    # ── 时间线记录：同步写入当日 time/YYYY/MM/YYYY-M-D/list.json ──
+    # list.json 与旧 chat.json messages 同构（当日任务的 session uuid 索引），
+    # 任何失败静默降级，不影响主流程。
+    try:
+        from .timeline import record_session as _tl_record
+        _tl_record(home_dir, session_id, user_question, ai_result, tag=tag, class_level=ai_result.get("class", "1"))
+    except Exception:
+        pass
 
 
 # ── 写入降噪常量（工具原文只活会话，library 只存高信号）──
@@ -1002,8 +877,8 @@ def maybe_compact_library(home_dir: str) -> Optional[str]:
       1. 加载所有 library 条目内容
       2. 运行 Trident 三阶段压缩
       3. 将被压缩的旧条目移到 .archive/
-      4. 写入压缩摘要为新条目
-      5. 重建 LIBRARY.md 索引
+      4. 写入压缩摘要为新条目（compact_<时间戳>.txt）
+      5. 同步海马体索引：归档 session 标记 class=0（LIBRARY.md 已废弃，索引层=海马体）
     
     Returns:
         压缩摘要文本，如果不需要压缩则返回 None

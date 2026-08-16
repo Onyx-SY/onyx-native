@@ -1583,26 +1583,85 @@ def _exec_ai_subprocess(cmd: str, output_buffer: List[str],
     """AI 执行模式：subprocess 直跑命令。
 
     返回退出码；命令属于交互式（需要 TTY）时返回 None 让调用方回退 PTY。
+
+    2026-09 用户决策：AI 运行中按 Ctrl+C 只杀命令、不杀 AI——
+    子进程放独立进程组（start_new_session），临时 SIGINT handler 只把信号
+    转发到命令进程组；命令结束后恢复原 handler。AI 会话的全局中断标志
+    （mcp_state._AI_INTERRUPTED）不被置位 → 下一次 API 调用正常 → AI 循环继续。
     """
     import subprocess as _sp
+    import signal as _sig
     _head = (cmd or "").strip().split(None, 1)[0].lower() if (cmd or "").strip() else ""
     if _head and os.path.basename(_head) in _AI_INTERACTIVE_TOKENS:
         return None  # 交互式命令 → 回退 PTY
 
+    _proc = None
+    _old_sigint = None
+    _interrupted = {'value': False}
+
+    def _kill_cmd_process():
+        """杀掉命令进程组（bash + 其子孙），尽力而为。"""
+        if _proc is None:
+            return
+        try:
+            os.killpg(os.getpgid(_proc.pid), _sig.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError, AttributeError):
+            try:
+                _proc.kill()
+            except Exception:
+                pass
+
+    def _cmd_sigint_handler(signum, frame):
+        """AI 执行模式下 Ctrl+C：只转发 SIGINT 到命令进程组，不置位任何全局中断标志。"""
+        _interrupted['value'] = True
+        if _proc is not None:
+            try:
+                os.killpg(os.getpgid(_proc.pid), _sig.SIGINT)
+            except (ProcessLookupError, PermissionError, OSError, AttributeError):
+                try:
+                    _proc.kill()
+                except Exception:
+                    pass
+
     try:
-        _res = _sp.run(
-            cmd, shell=True, capture_output=True, text=True,
-            errors="replace", cwd=cwd, timeout=600,
+        _old_sigint = _sig.signal(_sig.SIGINT, _cmd_sigint_handler)
+    except ValueError:
+        _old_sigint = None  # 非主线程无法装 handler → 保持原样（子进程独立组，Ctrl+C 打不到它）
+
+    try:
+        _proc = _sp.Popen(
+            cmd, shell=True, stdout=_sp.PIPE, stderr=_sp.PIPE,
+            text=True, errors="replace", cwd=cwd,
+            start_new_session=True,  # 独立进程组：终端 Ctrl+C 不直接打到命令
         )
+        _out_b, _err_b = _proc.communicate(timeout=600)
+        _out = (_out_b or "").rstrip()
+        _err = (_err_b or "").rstrip()
     except _sp.TimeoutExpired:
+        _kill_cmd_process()
         output_buffer.append("[AI 命令执行超时（>600s），已终止]")
         return 124
+    except KeyboardInterrupt:
+        # 兜底：handler 未生效（非主线程）时默认 SIGINT 处理抛出的 KeyboardInterrupt
+        _kill_cmd_process()
+        output_buffer.append("[命令被用户中断]")
+        return -1
     except Exception as _e:
+        _kill_cmd_process()
         output_buffer.append(f"[AI 命令执行异常: {_e}]")
         return -1
+    finally:
+        if _old_sigint is not None:
+            try:
+                _sig.signal(_sig.SIGINT, _old_sigint)
+            except ValueError:
+                pass
 
-    _out = (_res.stdout or "").rstrip()
-    _err = (_res.stderr or "").rstrip()
+    if _interrupted['value']:
+        # handler 已转发 SIGINT：命令被用户中断（不置位任何全局标志 → AI 循环继续）
+        output_buffer.append("[命令被用户中断]")
+        return -1
+
     # 写回 output_buffer（供 is_tool 缓存 / AI_TOOL_OUTPUT_CACHE 使用）
     if _out:
         output_buffer.append(_out)
@@ -1618,7 +1677,7 @@ def _exec_ai_subprocess(cmd: str, output_buffer: List[str],
             sys.stderr.flush()
         except Exception:
             pass
-    return _res.returncode
+    return _proc.returncode
 
 
 def run_cmd_sync(

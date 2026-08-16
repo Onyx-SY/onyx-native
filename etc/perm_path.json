@@ -5,7 +5,7 @@
 
   "/dev/<*:10>": {
     "mode": "blacklist",
-    "min_mode": "adv",
+    "min_mode": "mid",
     "allow_advanced_syntax": true,
     "commands": [
       "rm", "dd", "dcfldd",
@@ -46,21 +46,6 @@
     "allow_advanced_syntax": false,
     "commands": ["ls", "cd", "cat", "grep", "less", "head", "tail", "stat", "file"]
   },
-  "/home/<username>/<*:10>": {
-    "mode": "blacklist",
-    "min_mode": "low",
-    "allow_advanced_syntax": true,
-    "commands": [
-      "mkfs", "fdisk", "parted", "gdisk", "sgdisk",
-      "dd", "dcfldd",
-      "wipefs", "shred", "blkdiscard",
-      "mkswap", "cryptsetup",
-      "pvremove", "pvcreate", "vgremove", "vgcreate", "lvremove", "lvcreate",
-      "mdadm", "dmsetup",
-      "rm", "rmdir"
-    ]
-  },
-
   "/sys/<*:10>": {
     "mode": "whitelist",
     "min_mode": "adv",
@@ -263,13 +248,6 @@
     "allow_advanced_syntax": false,
     "commands": ["ls", "cd"]
   },
-  "<onyx>": {
-    "mode": "whitelist",
-    "min_mode": "adv",
-    "allow_advanced_syntax": false,
-    "commands": ["cd", "ls"]
-  },
-
   "/<*:1>": {
     "mode": "whitelist",
     "min_mode": "adv",

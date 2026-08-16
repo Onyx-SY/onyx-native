@@ -37,7 +37,7 @@ def load_all_help_json():
                         data = json.load(f)
                         cmd_dict.update(data.get("命令", {}))
                 except Exception as e:
-                    print(f"{get_color_attr('YELLOW')}警告：读取 {filename} 失败：{str(e)}{get_color_attr('RESET', '')}")
+                    print(f"{get_color_attr('YELLOW')}警告：读取 {filename} 失败：{str(e)} | Warning: failed to read {filename}: {str(e)}{get_color_attr('RESET', '')}")
     # 加载Linux专属命令
     if os.path.exists(LINUX_DIR):
         for filename in os.listdir(LINUX_DIR):
@@ -48,7 +48,7 @@ def load_all_help_json():
                         data = json.load(f)
                         cmd_dict.update(data.get("命令", {}))
                 except Exception as e:
-                    print(f"{get_color_attr('YELLOW')}警告：读取 {filename} 失败：{str(e)}{get_color_attr('RESET', '')}")
+                    print(f"{get_color_attr('YELLOW')}警告：读取 {filename} 失败：{str(e)} | Warning: failed to read {filename}: {str(e)}{get_color_attr('RESET', '')}")
     # 加载工具信息（从原mktool迁移）
     CMD_HELP_INFO["工具"]["mktool"] = {
         "Chinese": """
@@ -132,7 +132,7 @@ def load_config() -> Dict[str, Any]:
                 raise KeyError("配置结构不完整")
             return config
     except (json.JSONDecodeError, KeyError, Exception) as e:
-        print(f"{get_color_attr('YELLOW')}警告：config.json 格式异常，使用默认配置：{str(e)}{get_color_attr('RESET', '')}")
+        print(f"{get_color_attr('YELLOW')}警告：config.json 格式异常，使用默认配置：{str(e)} | Warning: config.json malformed, using defaults: {str(e)}{get_color_attr('RESET', '')}")
         return {
             "display_info": {
                 "language": {"default": "Chinese"}
@@ -164,11 +164,11 @@ def scan_tool_dirs() -> List[str]:
                 if any(os.path.exists(os.path.join(dir_path, f)) for f in entry_files):
                     tool_names.append(dir_name)
     except PermissionError:
-        print(f"{get_color_attr('YELLOW')}警告：无权限访问工具目录 {TOOLS_DIR}{get_color_attr('RESET', '')}")
+        print(f"{get_color_attr('YELLOW')}警告：无权限访问工具目录 {TOOLS_DIR} | Warning: no permission to access tools dir {TOOLS_DIR}{get_color_attr('RESET', '')}")
     
     return tool_names
 
-def extract_summary(help_text: str) -> str:
+def extract_summary(help_text: str, lang: str = "Chinese") -> str:
     """从帮助文本中提取功能摘要"""
     lines = [line.strip() for line in help_text.split("\n") if line.strip()]
     for line in lines:
@@ -176,7 +176,7 @@ def extract_summary(help_text: str) -> str:
             return line.replace("功能：", "").strip()
         elif line.startswith("Function:"):
             return line.replace("Function:", "").strip()
-    return "无详细描述"
+    return "无详细描述" if lang == "Chinese" else "No description available"
 
 # ====================== 命令分类映射 ======================
 COMMAND_CATEGORIES: Dict[str, List[str]] = {
@@ -271,7 +271,7 @@ def handle_help(cmd_parts: List[str], request_id: str) -> None:
             color_key = CATEGORY_COLORS.get(cat_key, "WHITE")
             print(f"\n  {G(color_key)}{cat_names[cat_key]}{RESET}")
             for cmd_name in visible_cmds:
-                summary = extract_summary(cmd_help_info["命令"][cmd_name][lang])
+                summary = extract_summary(cmd_help_info["命令"][cmd_name][lang], lang)
                 snote = " (Linux)" if cmd_name in linux_only_cmds else ""
                 print(f"    {G('GREEN')}{cmd_name:<14}{RESET}{summary}{snote}")
         
@@ -445,5 +445,9 @@ def main(cmd_parts: List[str], request_id: str) -> None:
     except Exception as e:
         request_id = request_id or str(uuid.uuid4())
         log_error(f"帮助命令执行异常：{str(e)}", request_id)
-        print(get_color_attr("RED") + f"帮助命令执行异常：{str(e)}" + get_color_attr("RESET", ""))
+        try:
+            _lang = get_current_language()
+        except Exception:
+            _lang = "Chinese"
+        print(get_color_attr("RED") + (f"帮助命令执行异常：{str(e)}" if _lang == "Chinese" else f"Help command error: {str(e)}") + get_color_attr("RESET", ""))
 

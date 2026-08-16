@@ -45,6 +45,51 @@ def abort_active_response(session_id: str = "") -> None:
         except Exception:
             pass
 
+
+def strip_empty_assistant_messages(messages: List[Dict]) -> Tuple[List[Dict], int]:
+    """剔除 content 与 tool_calls 均为空的 assistant 消息（400 防御）。
+
+    思考截断轮（finish_reason=length）可能只输出 reasoning_content——
+    content=None 且无 tool_calls 的 assistant 消息回传会被服务器以
+    400 "Invalid assistant message: content or tool_calls must be set" 拒绝。
+
+    返回 (清洗后消息列表, 剔除条数)。
+    """
+    clean: List[Dict] = []
+    removed = 0
+    for _m in messages:
+        if (_m.get("role") == "assistant"
+                and not _m.get("tool_calls")
+                and not _m.get("content")):
+            removed += 1
+            continue
+        clean.append(_m)
+    return clean, removed
+
+
+def _resolve_thinking(user_val: Any, plat_default: Any) -> Any:
+    """解析 thinking 参数：key.conf params 可覆盖平台默认。
+
+    - user_val 为 None → 平台默认（falsy 表示不发送）
+    - 布尔: True → {"type": "enabled"}；False → None（关闭思考）
+    - 字符串: on/true/1/yes/enabled → 开启；off/false/0/no/disabled/none → 关闭
+    - dict → 原样透传
+    返回 None 表示不发送 thinking 字段。
+    """
+    if user_val is None:
+        return plat_default or None
+    if isinstance(user_val, dict):
+        return user_val
+    if isinstance(user_val, bool):
+        return {"type": "enabled"} if user_val else None
+    if isinstance(user_val, str):
+        _v = user_val.strip().lower()
+        if _v in ("off", "false", "0", "no", "disabled", "none"):
+            return None
+        if _v in ("on", "true", "1", "yes", "enabled"):
+            return {"type": "enabled"}
+    return plat_default or None
+
 # ── 持久记忆缓存（模块级，避免每轮读盘）──
 _ONYX_AI_PROMPT_CACHE: Optional[Tuple[str, float]] = None  # (content, mtime)
 
@@ -169,6 +214,53 @@ _DEBUG_FILE_LOCK = threading.Lock()
 
 
 from . import mcp_state as _mcp_state
+
+import re as _re_mod
+
+
+def _parse_xml_tool_calls(text: str) -> List[Dict]:
+    """从模型输出文本中解析 XML 风格工具调用 `<invoke name="..."><parameter ...>`。
+
+    部分模型（deepseek 系等）在 tools 为空或特定场景下会把工具调用写成 XML 文本而非
+    标准 JSON tool_calls；这里把它们提取为统一的 native_tools 结构，供调用方执行。
+    返回 [{name, params_str, id, raw_arguments, _native}]；无匹配返回 []。
+    """
+    if not text or "<invoke" not in text:
+        return []
+    tools: List[Dict] = []
+    pattern = _re_mod.compile(
+        r'<invoke\s+name\s*=\s*"([^"]+)"[^>]*>(.*?)</invoke>',
+        _re_mod.DOTALL | _re_mod.IGNORECASE,
+    )
+    for m in pattern.finditer(text):
+        name = m.group(1).strip()
+        body = m.group(2)
+        if not name:
+            continue
+        params: Dict = {}
+        for pm in _re_mod.finditer(
+            r'<parameter\s+name\s*=\s*"([^"]+)"[^>]*>(.*?)</parameter>',
+            body, _re_mod.DOTALL | _re_mod.IGNORECASE,
+        ):
+            pname = pm.group(1).strip()
+            pval = pm.group(2).strip()
+            # 尝试 JSON 解析（参数值可能是 JSON 对象/数组），失败则保留原文本
+            try:
+                pval = json.loads(pval)
+            except Exception:
+                pass
+            params[pname] = pval
+        if not params:
+            continue
+        args_json = json.dumps(params, ensure_ascii=False)
+        tools.append({
+            "name": name,
+            "params_str": args_json,
+            "id": f"xml_{name}_{len(tools)}",
+            "raw_arguments": args_json,
+            "_native": True,
+        })
+    return tools
 
 
 def _convert_tools_for_anthropic(openai_tools: list) -> list:
@@ -399,6 +491,11 @@ Onyx Mode: {onyx_mode}
         else:
             _messages.extend(messages)
 
+    # ── 防御：剔除 content 与 tool_calls 均为空的 assistant 消息 ──
+    # 思考截断轮（finish_reason=length）可能只输出 reasoning_content；
+    # 这类消息回传会被服务器以 400 "Invalid assistant message" 拒绝。
+    _messages, _ = strip_empty_assistant_messages(_messages)
+
     # 保留 reasoning_content（DeepSeek thinking 模式要求回传）
     # 仅对不支持 thinking 的平台剥离该字段
     if not plat_info.get("thinking"):
@@ -519,8 +616,11 @@ Onyx Mode: {onyx_mode}
         if p.get("top_p") is not None:
             payload["top_p"] = p["top_p"]
 
-    if plat_info.get("thinking"):
-        payload["thinking"] = plat_info["thinking"]
+    # ── thinking / reasoning_effort：key.conf params 可覆盖平台默认 ──
+    # key.json: {"params": {"thinking": false}} → 关闭思考（不发送 thinking 字段）
+    _thinking_cfg = _resolve_thinking(user_params.get("thinking"), plat_info.get("thinking"))
+    if _thinking_cfg:
+        payload["thinking"] = _thinking_cfg
     _effort = user_params.get("reasoning_effort") or plat_info.get("reasoning_effort")
     if _effort:
         payload["reasoning_effort"] = _effort
@@ -649,7 +749,7 @@ Onyx Mode: {onyx_mode}
                 except Exception:
                     pass
                 console.print(f"[red]❌ API 请求错误 ({response.status_code})[/]")
-                console.print(f"[dim]   调试文件: {_deb_path}[/]")
+                console.print(f"[dim]   调试文件: {_deb_path} | Debug file: {_deb_path}[/]")
                 if _detail:
                     console.print(f"[red]   {_detail[:300]}[/]")
                 return {
@@ -667,7 +767,7 @@ Onyx Mode: {onyx_mode}
                 last_error = "请求过于频繁 (429)"
                 if retry < max_retries - 1:
                     _wait = base_delay * (retry + 1) * 2
-                    console.print(f"[yellow]⚠️ API 限流 (429)，{_wait}秒后重试 (第 {retry+1}/{max_retries} 次)...[/]")
+                    console.print(f"[yellow]⚠️ API 限流 (429)，{_wait}秒后重试 (第 {retry+1}/{max_retries} 次)...[/]" if lang == "chinese" else f"[yellow]⚠️ API rate limited (429), retrying in {_wait}s ({retry+1}/{max_retries})...[/]")
                     threading.Event().wait(_wait)  # 可中断重试退避
                     continue
                 return {"error": "请求过于频繁 (429)，请稍后再试 | Rate limit reached, please retry later", "answer": "no", "ask": "", "txt": "", "analysis": ""}
@@ -675,7 +775,7 @@ Onyx Mode: {onyx_mode}
                 last_error = f"AI 服务暂时不可用 ({response.status_code})"
                 if retry < max_retries - 1:
                     _wait = base_delay * (retry + 1) * 3
-                    console.print(f"[yellow]⚠️ AI 服务暂时不可用 ({response.status_code})，{_wait}秒后重试 (第 {retry+1}/{max_retries} 次)...[/]")
+                    console.print(f"[yellow]⚠️ AI 服务暂时不可用 ({response.status_code})，{_wait}秒后重试 (第 {retry+1}/{max_retries} 次)...[/]" if lang == "chinese" else f"[yellow]⚠️ AI service temporarily unavailable ({response.status_code}), retrying in {_wait}s ({retry+1}/{max_retries})...[/]")
                     threading.Event().wait(_wait)  # 可中断重试退避
                     continue
                 return {"error": f"AI 服务暂时不可用 ({response.status_code})，请稍后再试", "answer": "no", "ask": "", "txt": "", "analysis": ""}
@@ -1044,7 +1144,7 @@ def build_stable_prefix(home_dir: str, chat_name: str = None) -> str:
 
 def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
                          referenced_memory_uuid: Optional[str], is_first_interaction: bool,
-                         mode: str = "normal") -> str:
+                         mode: str = "normal", plus_think: str = None) -> str:
     """
     构建瞬态记忆上下文（按需查询型 — 不注入全量内容，由 AI 通过 MemoryRead/MemorySearch 按需拉取）。
     
@@ -1068,21 +1168,17 @@ def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
             return m.group(1) + f"[elided {len(inner)} chars — MemoryRead for full]\n" + m.group(3)
         return _re.sub(r"(```[^\n]*\n)(.*?)(```)", _repl, text, flags=_re.DOTALL)
 
-    if mode == "normal":
-        # ── UUID 链：仅索引（id/session_uuid/question 摘要），非全量内容 ──
-        chat_memory = load_chat_memory_for_context(home_dir, chat_name)
-        if chat_memory:
-            header = (
-                "═══════════════════════════════════════\n"
-                " 历史会话索引 — 使用 MemoryRead(\"library/<uuid>\") 查看完整记录\n"
-                "═══════════════════════════════════════"
-            ) if is_en else (
-                "═══════════════════════════════════════\n"
-                " 历史会话索引 — 使用 MemoryRead(\"library/<uuid>\") 查看完整记录\n"
-                "═══════════════════════════════════════"
-            )
-            parts.append(header + "\n" + chat_memory)
+    # ── 时间线边界摘要（惰性）：跨日/月/年时用最便宜模型生成描述写入 timeline.json ──
+    # 任何失败静默降级；只在真正跨边界时才调用 LLM，平时仅一次 JSON 读取。
+    try:
+        from .timeline import ensure_boundary_summaries as _tl_boundary
+        _tl_boundary(home_dir)
+    except Exception:
+        pass
 
+    if mode == "normal":
+        # ── 时间线按需查询（原自动注入的历史会话索引已移除，省 token）──
+        # AI 需要回顾时用 memory list day=/month=/year= 主动查询。
         previous_uuid = get_previous_session_uuid(home_dir, chat_name, current_session_id, is_first_interaction)
         if previous_uuid:
             if is_en:
@@ -1131,5 +1227,21 @@ def build_memory_context(home_dir: str, chat_name: str, current_session_id: str,
                 "═══════════════════════════════════════"
             )
             parts.append(header + "\n" + _trimmed)
+
+    # ── Plus 思考结果注入：作为干活阶段的附加段（高优先级参考）──
+    if plus_think and str(plus_think).strip():
+        _pt = str(plus_think).strip()
+        if len(_pt) > 6000:
+            _pt = _pt[:6000] + "\n…(plus 思考结果过长，已截断)"
+        header = (
+            "═══════════════════════════════════════\n"
+            " Plus Thinking (pre-task analysis) — follow this plan\n"
+            "═══════════════════════════════════════"
+        ) if is_en else (
+            "═══════════════════════════════════════\n"
+            " Plus 思考结果（任务前分析）— 干活阶段请遵循此规划\n"
+            "═══════════════════════════════════════"
+        )
+        parts.append(header + "\n" + _pt)
 
     return "\n\n".join(parts) if parts else ("No historical memory" if is_en else "无历史记忆")

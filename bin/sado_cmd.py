@@ -370,19 +370,25 @@ def handle_sado_core(
         # ── 4 位 hex 验证码确认（会话级：本会话已验证过一次则跳过）──
         from lib.safe import is_session_captcha_verified, mark_session_captcha_verified
         if is_session_captcha_verified():
-            print(Fore.LIGHTBLACK + "  (本会话已验证，跳过验证码确认)" + Style.RESET_ALL)
+            skip_hint = "  (本会话已验证，跳过验证码确认)" if current_lang == "chinese" else "  (Verified earlier in this session, captcha skipped)"
+            print(Fore.LIGHTBLACK + skip_hint + Style.RESET_ALL)
         else:
             import secrets as _sado_secrets
             captcha = _sado_secrets.token_hex(2).upper()
             print(Fore.RED + msg["need_confirm"].format(original_cmd[:50]) + Style.RESET_ALL)
-            print(Fore.YELLOW + f"验证码: [ {captcha} ]  — 请输入上方验证码以确认执行" + Style.RESET_ALL)
+            if current_lang == "chinese":
+                captcha_prompt = f"验证码: [ {captcha} ]  — 请输入上方验证码以确认执行"
+            else:
+                captcha_prompt = f"Captcha: [ {captcha} ]  — please enter the captcha above to confirm"
+            print(Fore.YELLOW + captcha_prompt + Style.RESET_ALL)
             try:
                 user_in = input("> ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return
             if user_in.upper() != captcha:
-                print(Fore.RED + "验证码错误，已取消" + Style.RESET_ALL)
+                wrong_msg = "验证码错误，已取消" if current_lang == "chinese" else "Wrong captcha, cancelled"
+                print(Fore.RED + wrong_msg + Style.RESET_ALL)
                 return
             mark_session_captcha_verified()
 

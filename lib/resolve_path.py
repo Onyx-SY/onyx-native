@@ -15,7 +15,7 @@ C_LIB = None
 C_LIB_AVAILABLE = False
 C_LIB_PATH = ""
 
-FORBIDDEN_MSG = "You cannot cross root dir"
+FORBIDDEN_MSG = "\"You cannot cross root dir. Onyx has intercepted.\""
 
 PATH_RESOLVE_CACHE: Dict[str, Tuple[str, float, str]] = {}
 PATH_RESOLVE_CACHE_MAX = 1000  # 硬上限，防止内存泄漏

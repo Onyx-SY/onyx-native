@@ -94,7 +94,7 @@ def _restore_cwd(saved: Optional[str]) -> None:
         except Exception:
             pass
         try:
-            print(f"\033[2m  (AI 会话结束，已恢复工作目录: {saved})\033[0m")
+            print(f"\033[2m  (AI 会话结束，已恢复工作目录: {saved}) | (AI session ended, restored working directory: {saved})\033[0m")
         except Exception:
             pass
     except Exception:

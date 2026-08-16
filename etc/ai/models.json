@@ -13,7 +13,7 @@
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
-      "max_tokens": 8192
+      "max_tokens": 32768
     },
     "thinking": {
       "type": "enabled"
@@ -47,7 +47,7 @@
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
-      "max_tokens": 8192
+      "max_tokens": 32768
     },
     "price_per_million_tokens": {
       "gpt-5.5-instant": {
@@ -91,7 +91,7 @@
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
-      "max_tokens": 8192
+      "max_tokens": 32768
     },
     "price_per_million_tokens": {
       "claude-sonnet-4-6": {
@@ -126,7 +126,7 @@
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
-      "max_tokens": 8192
+      "max_tokens": 32768
     },
     "price_per_million_tokens": {
       "kimi-k2.6": {
@@ -157,7 +157,7 @@
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
-      "max_tokens": 8192
+      "max_tokens": 32768
     },
     "price_per_million_tokens": {
       "glm-5-turbo": {
@@ -191,7 +191,7 @@
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
-      "max_tokens": 8192
+      "max_tokens": 32768
     },
     "price_per_million_tokens": {
       "qwen3.5-plus": {
@@ -235,7 +235,7 @@
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
-      "max_tokens": 8192
+      "max_tokens": 32768
     },
     "price_per_million_tokens": {
       "doubao-seed-2.1-turbo": {

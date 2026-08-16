@@ -78,7 +78,7 @@ def test_multi_query_multi_engine_dedup_and_filter():
 def test_fetch_mode_uses_given_urls_only():
     """action=fetch：只抓指定 urls，不搜索、不需要 query。"""
     with mock.patch("requests.get", side_effect=_fake_get), \
-         mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=False):
+         mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=False):
         out = ai_cmd._exec_web_search_multi({
             "action": "fetch",
             "urls": ["https://example.com/docs", "https://10.0.0.1/x"],
@@ -95,7 +95,7 @@ def test_fetch_mode_uses_given_urls_only():
 def test_mixed_with_explicit_urls():
     """action=mixed：搜索 + urls 追加抓取。"""
     with mock.patch("requests.get", side_effect=_fake_get), \
-         mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=False):
+         mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=False):
         out = ai_cmd._exec_web_search_multi({
             "query": "x", "engines": ["bing"],
             "urls": ["https://example.com/docs"],
@@ -135,7 +135,7 @@ def test_fetch_pages_and_max_chars():
         return _FakeResp(long_html)
 
     with mock.patch("requests.get", side_effect=_fake), \
-         mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=False):
+         mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=False):
         out = ai_cmd._exec_web_search_multi({
             "query": "x", "engines": ["bing"],
             "fetch_pages": True, "fetch_limit": 1,
@@ -215,7 +215,7 @@ def test_key_line_compression_keeps_matching_sentences():
         return _FakeResp(html)
 
     with mock.patch("requests.get", side_effect=_fake), \
-         mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=False):
+         mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=False):
         out = ai_cmd._exec_web_search_multi({
             "query": "GPT-5", "engines": ["bing"],
             "fetch_pages": True, "fetch_limit": 1, "max_chars_per_page": 500,
@@ -242,7 +242,7 @@ def test_ai_assist_summarize_long_page():
                     return_value={"txt": summary,
                                   "_usage": {"prompt_tokens": 100, "completion_tokens": 50}}), \
          mock.patch("bin.ai_lib.cost.append_cost_record") as _cost, \
-         mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=False):
+         mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=False):
         out = ai_cmd._exec_web_search_multi({
             "query": "GPT-5", "engines": ["bing"],
             "fetch_pages": True, "fetch_limit": 1, "ai_assist": True,
@@ -266,7 +266,7 @@ def test_ai_assist_fallback_to_compression():
 
     with mock.patch("requests.get", side_effect=_fake), \
          mock.patch("bin.ai_lib.api.call_ai_api_sse", return_value={"error": "未配置 API 密钥"}), \
-         mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=False):
+         mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=False):
         out = ai_cmd._exec_web_search_multi({
             "query": "GPT-5", "engines": ["bing"],
             "fetch_pages": True, "fetch_limit": 1, "ai_assist": True,
@@ -289,7 +289,7 @@ def test_ai_assist_global_flag_and_param_override():
         return _FakeResp(html)
 
     with mock.patch("requests.get", side_effect=_fake), \
-         mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=True), \
+         mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=True), \
          mock.patch("bin.ai_lib.api.call_ai_api_sse", return_value={"txt": summary}):
         out = ai_cmd._exec_web_search_multi({
             "query": "x", "engines": ["bing"],
@@ -298,7 +298,7 @@ def test_ai_assist_global_flag_and_param_override():
     assert "🤖 AI 摘要" in out and summary in out, f"全局开关开启时应走摘要: {out}"
 
     with mock.patch("requests.get", side_effect=_fake), \
-         mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=True), \
+         mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=True), \
          mock.patch("bin.ai_lib.api.call_ai_api_sse", return_value={"txt": summary}):
         out2 = ai_cmd._exec_web_search_multi({
             "query": "x", "engines": ["bing"],
@@ -477,7 +477,7 @@ def test_search_budget_cuts_off_slow_engine():
 
     try:
         with mock.patch("requests.get", side_effect=_fake), \
-             mock.patch("bin.ai_cmd._WEB_SEARCH_BUDGET", 0.05):
+             mock.patch("bin.ai_lib.web_search._WEB_SEARCH_BUDGET", 0.05):
             out = ai_cmd._exec_web_search_multi({"query": "x", "engines": ["duckduckgo", "bing"]})
         assert "Example Docs" in out, f"快引擎结果应照常返回: {out}"
         assert "超时未完成" in out, f"慢引擎应被预算截断并标注: {out}"
@@ -504,7 +504,7 @@ def test_fetch_relevance_prescreen_skips_unrelated():
 
     try:
         with mock.patch("requests.get", side_effect=_fake), \
-             mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=False):
+             mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=False):
             out = ai_cmd._exec_web_search_multi({
                 "query": "example docs", "engines": ["bing"],
                 "fetch_pages": True, "fetch_limit": 2,
@@ -546,7 +546,7 @@ def test_topics_batch_parallel():
 
     try:
         with mock.patch("requests.get", side_effect=_fake), \
-             mock.patch("bin.ai_cmd._load_web_ai_assist_flag", return_value=False):
+             mock.patch("bin.ai_lib.web_search._load_web_ai_assist_flag", return_value=False):
             out = ai_cmd._exec_web_search_multi({
                 "topics": [
                     {"query": "example docs", "engines": ["bing"],

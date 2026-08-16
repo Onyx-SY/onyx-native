@@ -8,6 +8,7 @@ import os
 import json
 import shutil
 import subprocess
+import sys
 
 def _get_available_editors(sys_type: str) -> dict:
     """获取可用编辑器列表（按系统类型分类）"""

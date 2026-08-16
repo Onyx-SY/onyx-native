@@ -7,6 +7,9 @@ import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 from lib.terminal.colors import Fore, Style
+from rich.console import Console
+
+console = Console()
 
 # Windows 环境适配配置
 WINDOWS = os.name == "nt"

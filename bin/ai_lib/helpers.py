@@ -127,6 +127,25 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
             return ("effort_command", effort_val or "", [], auto_exec, new_key, None, None, mode, times)
         elif arg in ("-mid", "-machine-id"):
             return ("machine_id_command", "", [], auto_exec, new_key, None, None, mode, times)
+        elif arg in ("get-key", "get_key", "-get-key"):
+            # ai get-key — 输出当前机器码（配合密钥生成器使用）
+            return ("get_key_command", "", [], auto_exec, new_key, None, None, mode, times)
+        elif arg in ("plugin-add", "plugin_add", "-plugin-add"):
+            # ai plugin-add <动态链接库路径> [key <密钥文件路径>]
+            lib_path = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else None
+            if not lib_path:
+                return ("error", "Usage: ai plugin-add <动态链接库路径> [key <密钥文件路径>] / Usage: ai plugin-add <lib path> [key <key file path>]",
+                        None, auto_exec, new_key, None, None, mode, times)
+            key_path = None
+            j = i + 2
+            while j < len(ai_args) and not ai_args[j].startswith("-"):
+                if ai_args[j] == "key" and j + 1 < len(ai_args) and not ai_args[j + 1].startswith("-"):
+                    key_path = ai_args[j + 1]
+                    j += 2
+                else:
+                    j += 1
+            return ("plugin_add_command", lib_path, [key_path] if key_path else [],
+                    auto_exec, new_key, None, None, mode, times)
         elif arg in ("-plugin", "plugin"):
             sub = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else "list"
             extra = []
@@ -472,15 +491,11 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
     MAX_REFUSE_REASON_LEN = 500
     current_lang = get_current_lang()
 
-    # 上下文估算失败（调用方异常回退 0）→ 保守按强制确认档处理
-    if context_tokens <= 0:
-        context_tokens = _CTX_FORCE_ABOVE + 1
-
-    # ── 第一级：上下文 < 300k → 完全信任，不弹任何提示 ──
-    if context_tokens < _CTX_TRUST_BELOW:
-        if log_info:
-            log_info(f"AI dangerous command auto-allowed (ctx {context_tokens // 1000}k trust zone): {cmd_str}", session_id)
-        return True, "auto", ""
+    # 2026-09：所有危险命令一律自动放行（开发者工具，影响可控）。
+    # 不再弹 y/N 确认；硬安全仍由沙盒边界（路径越界拦截）提供。
+    if log_info:
+        log_info(f"AI dangerous command auto-allowed: {cmd_str}", session_id)
+    return True, "auto", ""
 
     # ── 第二级：300k ≤ 上下文 ≤ 600k → 弹窗询问，10s 无操作默认放行 ──
     if context_tokens <= _CTX_TIMEOUT_BELOW:

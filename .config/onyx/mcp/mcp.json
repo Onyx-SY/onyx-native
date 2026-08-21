@@ -1,0 +1,34 @@
+{
+  "_comment": "Onyx MCP server registry — 默认零 MCP：不注册、不下载、不连接任何 server。需要时用 `ai -mcp install <name>` 显式安装（安装后 server 会写入本文件的 servers 段；全局模板保持为空，避免默认下载）。支持动态变量：{CWD}=当前工作目录, {USER_HOME}=用户主目录。",
+  "_available": {
+    "filesystem": {
+      "package": "@modelcontextprotocol/server-filesystem",
+      "desc": "文件系统操作（内置）"
+    },
+    "puppeteer": {
+      "package": "@modelcontextprotocol/server-puppeteer",
+      "desc": "浏览器自动化、截图、表单"
+    },
+    "github": {
+      "package": "@modelcontextprotocol/server-github",
+      "desc": "GitHub 仓库/Issue/PR 管理"
+    },
+    "postgres": {
+      "package": "@modelcontextprotocol/server-postgres",
+      "desc": "PostgreSQL 数据库查询"
+    },
+    "sqlite": {
+      "package": "@modelcontextprotocol/server-sqlite",
+      "desc": "SQLite 数据库操作"
+    },
+    "brave-search": {
+      "package": "@modelcontextprotocol/server-brave-search",
+      "desc": "Web 搜索（需 API key）"
+    },
+    "fetch": {
+      "package": "@modelcontextprotocol/server-fetch",
+      "desc": "网页抓取、HTTP API 调用"
+    }
+  },
+  "servers": {}
+}

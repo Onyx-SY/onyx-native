@@ -821,6 +821,34 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ["command"], PERM_READONLY,
     ))
 
+    # ── AI 插件工具（~/.ai_s/plugin_tool/index.json 注册的 C 插件）──
+    # 通过各插件的 plugin_tool_schema 接口（已缓存 schema）注入 AI 工具列表，
+    # 使 AI 能感知并调用注册的 C 插件工具（如 mem_proc_monitor）。
+    try:
+        from bin.plugin_loader import plugin_tools_schemas, _index_entry
+    except ImportError:
+        try:
+            from ..plugin_loader import plugin_tools_schemas, _index_entry
+        except Exception:
+            plugin_tools_schemas = None
+            _index_entry = None
+    if plugin_tools_schemas is not None:
+        try:
+            _plugin_schemas = plugin_tools_schemas()
+            for _pname in sorted(_plugin_schemas):
+                _sch = _plugin_schemas[_pname]
+                _pentry = _index_entry(_pname) or {}
+                _perm = _pentry.get("permission", PERM_DANGER_FULL)
+                native.append(_make_tool(
+                    _pname,
+                    _sch.get("description") or f"AI 插件工具 {_pname}",
+                    _sch.get("properties") or {},
+                    _sch.get("required") or [],
+                    _perm,
+                ))
+        except Exception:
+            pass
+
     native.sort(key=lambda t: t.get("function", {}).get("name", ""))
     _mcp_debug_exit("build_native_tools", ok=len(native) > 0,
                     detail=f"{len(native)} native tools")

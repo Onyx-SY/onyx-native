@@ -1183,30 +1183,92 @@ def handle_ai(
             console.print(_mcp_t(f"[red]获取机器 ID 失败: {e}[/]", f"[red]Failed to get machine ID: {e}[/]"))
         return
 
+    if content_type == "get_key_command":
+        # ai get-key — 输出当前机器码（用于授权绑定）
+        try:
+            from bin.plugin_loader import get_machine_id
+            mid = get_machine_id()
+            console.print(_mcp_t(f"机器码: [bold]{mid}[/]", f"Machine code: [bold]{mid}[/]"))
+            console.print(_mcp_t("  请前往官网获取授权密钥",
+                                 "  Visit the official website to obtain a license key"), style="dim")
+        except Exception as e:
+            console.print(_mcp_t(f"[red]获取机器码失败: {e}[/]", f"[red]Failed to get machine code: {e}[/]"))
+        return
+
     if content_type == "plugin_command":
-        # ai -plugin <list|load|sign|verify|compile> [args]
-        sub = content  # "list", "load", "sign", "verify", "compile"
+        # ai -plugin <list|load|sign|verify|compile|add|remove> [args]
+        # 直接模块导入调用（不走子进程命令行）
+        sub = content  # "list", "load", "sign", "verify", "compile", "add", "remove"
         args = extra_info if isinstance(extra_info, list) else []
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        try:
+            from bin.plugin_loader import (
+                plugin_add, plugin_remove, load as pl_load,
+                verify as pl_verify, sign as pl_sign, list_plugins as pl_list,
+                tool_schema as pl_schema, refresh_tool_schemas as pl_refresh,
+            )
+        except ImportError:
+            from .plugin_loader import (
+                plugin_add, plugin_remove, load as pl_load,
+                verify as pl_verify, sign as pl_sign, list_plugins as pl_list,
+                tool_schema as pl_schema, refresh_tool_schemas as pl_refresh,
+            )
         if sub == "list":
-            import subprocess as _sp
-            _sp.run([sys.executable, os.path.join(root, "plugin_loader.py"), "list"])
+            for p in pl_list():
+                icon = "✅" if p["verified"] else "❌"
+                e = f" exp:{p['expires']}" if p.get("expires") else ""
+                key_note = " 🔑" if p.get("key") else ""
+                schema_note = " 📋" if p.get("schema") else ""
+                print(f"  {icon} {p['name']:20s} {p['size']:>8}B  {p['status']}{e}{key_note}{schema_note}")
+        elif sub == "schema" and args:
+            sch = pl_schema(args[0])
+            if sch:
+                print(json.dumps(sch, ensure_ascii=False, indent=2))
+            else:
+                console.print(_mcp_t(f"[red]无法获取 {args[0]} 的工具调用说明 / No schema available for {args[0]}[/]",
+                                     f"[red]No schema available for {args[0]}[/]"))
+        elif sub == "refresh":
+            n = pl_refresh()
+            console.print(_mcp_t(f"已刷新 {n} 个插件的工具调用说明", f"Refreshed tool schemas for {n} plugin(s)"))
         elif sub == "load" and args:
-            import subprocess as _sp
-            _sp.run([sys.executable, os.path.join(root, "plugin_loader.py"), "load", args[0]])
+            pl_load(args[0])
         elif sub == "verify" and args:
-            import subprocess as _sp
-            _sp.run([sys.executable, os.path.join(root, "plugin_loader.py"), "verify", args[0]])
+            ok, reason, payload = pl_verify(args[0])
+            print(f"{'✅' if ok else '❌'} {args[0]}: {reason}")
+            if ok and payload and payload.get("expires"):
+                print(f"  exp: {payload['expires']}")
         elif sub == "sign" and args:
-            import subprocess as _sp
-            cmd = [sys.executable, os.path.join(root, "plugin_loader.py"), "sign"] + args
-            _sp.run(cmd)
+            ver = args[1] if len(args) > 1 else "1.0.0"
+            exp = args[2] if len(args) > 2 else ""
+            pl_sign(args[0], ver, exp)
         elif sub == "compile" and args:
-            import subprocess as _sp
-            _sp.run([sys.executable, os.path.join(root, "plugin_compile.py"), args[0]])
+            from bin.plugin_compile import compile_c
+            out = compile_c(args[0])
+            if not out:
+                console.print(_mcp_t("[red]编译失败 / Compile failed[/]", "[red]Compile failed[/]"))
+        elif sub == "add" and args:
+            key_path = None
+            if "key" in args[1:]:
+                ki = args.index("key")
+                if ki + 1 < len(args):
+                    key_path = args[ki + 1]
+            plugin_add(args[0], key_path)
+        elif sub == "remove" and args:
+            plugin_remove(args[0])
         else:
-            console.print(_mcp_t("用法: ai -plugin list | load <名称> | verify <名称> | sign <名称> [版本] | compile <文件.c>",
-                                 "Usage: ai -plugin list | load <name> | verify <name> | sign <name> [ver] | compile <file.c>"))
+            console.print(_mcp_t("用法: ai -plugin list | add <库> [key <密钥>] | remove <名称> | load <名称> | verify <名称> | sign <名称> [版本] | compile <文件.c>",
+                                 "Usage: ai -plugin list | add <lib> [key <keyfile>] | remove <name> | load <name> | verify <name> | sign <name> [ver] | compile <file.c>"))
+        return
+
+    if content_type == "plugin_add_command":
+        # ai plugin-add <动态链接库路径> [key <密钥路径或内容>]
+        # 直接模块导入调用（不走子进程命令行）
+        try:
+            from bin.plugin_loader import plugin_add
+        except ImportError:
+            from .plugin_loader import plugin_add
+        lib_path = content
+        key_path = extra_info[0] if isinstance(extra_info, list) and extra_info else None
+        plugin_add(lib_path, key_path)
         return
 
     if content_type == "chat_only":

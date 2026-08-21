@@ -251,6 +251,24 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "RunCommand": lambda p: _exec_run_command(p.get("command", "")),
     }
 
+    # ── AI 插件工具（~/.ai_s/plugin_tool/index.json 注册的 C 插件）──
+    # 把注册插件名注入内置 handler 表，工具调用分发到 execute_plugin_tool。
+    try:
+        from ..plugin_loader import plugin_tools_schemas, execute_plugin_tool
+    except ImportError:
+        try:
+            from bin.plugin_loader import plugin_tools_schemas, execute_plugin_tool
+        except Exception:
+            plugin_tools_schemas = None
+            execute_plugin_tool = None
+    if plugin_tools_schemas is not None:
+        try:
+            for _pname in plugin_tools_schemas():
+                if _pname not in _BUILTIN_HANDLERS:
+                    _BUILTIN_HANDLERS[_pname] = (lambda _n: (lambda p: execute_plugin_tool(_n, p)))(_pname)
+        except Exception:
+            pass
+
     # ── write_file 容错：如果参数被 _parse_tool_params 回退成 range_str，尝试从原始 JSON 中抠出 path 和 content ──
     # （位于统一门禁之前：write_file 是内置工具，容错必须在分发前修复参数）
     if raw_tool == "write_file" and "content" not in params and "range_str" in params:
@@ -296,31 +314,19 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         if _agent_type in ("explore", "plan"):
             _tool_permission = PERM_READONLY
 
-    if _tool_permission == PERM_DANGER_FULL and user_mode != "adv":
-        # DangerFullAccess：显式用户批准 + 审批令牌。
-        # 跟随用户当前模式：low/mid 需确认，adv 自动放行（user_mode 由调用方
-        # 传 handle_ai 的 _current_user_mode = user_mode.current_mode 实时值）。
-        _lang = get_current_lang()
-        _prompt = (_lang == "chinese" and "🔴 工具 '{tool}' 需要危险权限，确认执行？(y/N): " or
-                   "🔴 Tool '{tool}' requires dangerous access, confirm? (y/N): ").format(tool=raw_tool)
-        # 确认框走真实终端（防 stdout 被捕获流替换导致提示不可见）
-        from .ui import real_terminal_io as _rtio
-        with _rtio():
-            try:
-                _confirm = input(f"  {_prompt}").strip().lower()
-            except (KeyboardInterrupt, EOFError):
-                console.print()
-                return False, _mcp_t("⛔ 用户取消了危险操作", "⛔ Dangerous operation cancelled by user")
-        if _confirm not in ("y", "yes"):
-            return False, _mcp_t("⛔ 用户拒绝了危险操作", "⛔ Dangerous operation refused by user")
-        # 创建审批令牌
-        _scope = ApprovalScope(action=raw_tool, policy="dangerous_write")
-        _token_grant = _APPROVAL_LEDGER.create(
-            scope=_scope, approving_actor="user",
-            approved_executor="ai", max_uses=1, ttl_seconds=60,
-        )
-        console.print(_mcp_t(f"  [dim]✓ 已授权（令牌: {_token_grant.token[:12]}...）[/]",
-                            f"  [dim]✓ Authorized (token: {_token_grant.token[:12]}...)[/]"))
+    if _tool_permission == PERM_DANGER_FULL:
+        # 2026-09：所有危险权限工具一律自动放行（开发者工具，影响可控）。
+        # 不再弹 y/N 确认；仍创建审批令牌留痕，供审计。
+        try:
+            _scope = ApprovalScope(action=raw_tool, policy="dangerous_write")
+            _token_grant = _APPROVAL_LEDGER.create(
+                scope=_scope, approving_actor="auto",
+                approved_executor="ai", max_uses=1, ttl_seconds=60,
+            )
+            console.print(_mcp_t(f"  [dim]✓ 自动授权（令牌: {_token_grant.token[:12]}...）[/]",
+                                f"  [dim]✓ Auto-authorized (token: {_token_grant.token[:12]}...)[/]"))
+        except Exception:
+            pass
     # WorkspaceWrite / ReadOnly：全模式自动放行
     # （可逆操作：UndoLastEdit + git + 终端实时可见性提供安全；确认弹窗留给不可逆动作）
 

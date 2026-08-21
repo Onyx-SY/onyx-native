@@ -1,5 +1,5 @@
 {
-  "_comment": "Onyx AI I18n 翻译数据 — 免费/开源模块。双语模式: i18n.t(key, 'bilingual') 返回 中文 / English",
+  "_comment": "Onyx AI I18n 翻译数据 — 免费/开源模块。'bilingual' 模式按当前配置语言（language 文件）自动切换中文或英文单语",
   "_schema": 2,
   "chinese": {
     "title": "AI 对话模式",

@@ -3,7 +3,8 @@
 """
 I18n 国际化模块
 
-为 Onyx AI 系统提供双语（中/英）文本加载与查询。
+为 Onyx AI 系统提供按语言（中/英）文本加载与查询。
+'bilingual' 模式按当前配置语言（language 文件）自动切换单语，不再中英同时显示。
 
 架构:
   翻译数据存储在 lang.json 中，按 语言→键名 组织。
@@ -129,7 +130,7 @@ class I18n:
         参数:
           key:  文本键名
           lang: 语言代码（'chinese' / 'english' 或 'zh' / 'en'）
-                'bilingual' / 'both' 返回中英双语 "中文 / English"
+                'bilingual' / 'both' 按当前配置语言（language 文件）返回单语（中文或英文）
           **fmt: 用于 {placeholder} 格式化的值
 
         返回:
@@ -138,18 +139,9 @@ class I18n:
         self.load()
         lang = _normalize(lang)
         if lang in ("bilingual", "both", "zh_en", "cn_en"):
-            zh = self._data.get("chinese", {}).get(key)
-            en = self._data.get("english", {}).get(key)
-            if zh and en:
-                text = f"{zh} / {en}"
-            else:
-                text = zh or en or key
-            if fmt:
-                try:
-                    text = text.format(**fmt)
-                except (KeyError, IndexError):
-                    pass
-            return text
+            # 双语模式：不再中英同时显示，改为按当前配置语言（language 文件）切换单语
+            from .config import get_current_lang  # 延迟导入避免循环依赖
+            lang = get_current_lang()
         lang_data = self._data.get(lang) or self._data.get(_DEFAULT_LANG, {})
         text = lang_data.get(key, key)
         if fmt:

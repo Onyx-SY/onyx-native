@@ -294,19 +294,28 @@ def sync_to_termux() -> bool:
 
     os.makedirs(REAL_PLUGIN_DIR, exist_ok=True)
     import shutil
-    count = 0
     for f in os.listdir(PLUGIN_DIR):
+        # 只同步动态链接库（.so），其他文件（二进制/密钥/临时）一概不动
+        if not f.endswith('.so'):
+            continue
         src = os.path.join(PLUGIN_DIR, f)
         if not os.path.isfile(src):
             continue
         dst = os.path.join(REAL_PLUGIN_DIR, f)
         try:
-            shutil.copy2(src, dst)
-            count += 1
+            # 内容未变（大小 + mtime 一致）→ 跳过：避免每次启动都覆盖
+            # 正在 dlopen 的 .so（覆盖已映射 inode 会导致段错误）
+            if (os.path.isfile(dst)
+                    and os.path.getsize(dst) == os.path.getsize(src)
+                    and os.path.getmtime(dst) >= os.path.getmtime(src)):
+                continue
+            # 原子替换：先写临时文件再 rename，已 dlopen 的旧 inode 不受影响
+            tmp = dst + ".sync_tmp"
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
         except Exception:
             pass
-    if count:
-        print(f"📱 Termux: 已同步 {count} 个文件到 {REAL_PLUGIN_DIR}")
+    # 静默：同步成功不打印任何内容
     return True
 
 
@@ -566,20 +575,114 @@ def load(name: str) -> Optional[ctypes.CDLL]:
                     if rc != 0:
                         print(f"❌ {mid} 密钥校验失败（rc={rc}） / Key validation failed (rc={rc})", file=sys.stderr)
                         return None
-                    if kdata:
-                        shown = str(kvalue)
-                        print(f"🔑 {mid} 密钥内容已注入 (Key data injected: {shown[:24]}{'...' if len(shown) > 24 else ''})")
-                    else:
-                        print(f"🔑 {mid} 密钥已注入: {kvalue} (Key injected: {kvalue})")
+                    # 密钥注入成功：静默，不显示
                 except Exception as e:
                     print(f"⚠️ plugin_set_key 调用异常: {e} (plugin_set_key exception: {e})", file=sys.stderr)
         _CACHE[mid] = lib
         exp = f" (exp:{payload['expires']})" if payload.get("expires") else ""
-        print(f"✅ {mid} loaded{exp}")
         return lib
     except Exception as e:
         print(f"❌ ctypes load failed: {e}", file=sys.stderr)
         return None
+
+
+# ── 持久化守护（daemon）接口 ────────────────────────────────────────
+# Rust 版 system_monitor 导出：
+#   plugin_is_daemon()              → c_int（1 = 支持持久化）
+#   plugin_daemon(cmd: c_char_p)    → c_char_p（JSON {"ok":bool,"out":"..."}）
+# cmd ∈ {"start","stop","status"}
+# 二进制路径：优先 index.daemon_bin → 插件同目录可执行文件 → src 同目录可执行文件
+
+def _daemon_bin(name: str) -> Optional[str]:
+    """定位守护二进制（system_monitor 可执行文件）。"""
+    entry = _index_entry(name) or {}
+    cand = entry.get("daemon_bin")
+    if cand and os.path.isfile(cand):
+        return cand
+    for base in (entry.get("lib"), entry.get("src")):
+        if not base:
+            continue
+        d = os.path.dirname(base)
+        for cand_name in ("system_monitor", "system_monitor.bin", "mpm_daemon"):
+            p = os.path.join(d, cand_name)
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+    return None
+
+
+def _daemon_call(name: str, cmd: str) -> dict:
+    """调用插件 plugin_daemon 接口，返回 dict（失败返回 {"ok":False,"out":err}）。"""
+    try:
+        lib = load(name)
+        if lib is None:
+            return {"ok": False, "out": f"plugin load failed: {name}"}
+        is_daemon = getattr(lib, "plugin_is_daemon", None)
+        if is_daemon is None:
+            return {"ok": False, "out": "plugin does not export plugin_is_daemon"}
+        is_daemon.restype = ctypes.c_int
+        if is_daemon() != 1:
+            return {"ok": False, "out": "plugin is not a persistent daemon"}
+        fn = getattr(lib, "plugin_daemon", None)
+        if fn is None:
+            return {"ok": False, "out": "plugin does not export plugin_daemon"}
+        fn.argtypes = [ctypes.c_char_p]
+        fn.restype = ctypes.c_char_p
+        raw = fn(cmd.encode("utf-8", "surrogateescape"))
+        if not raw:
+            return {"ok": False, "out": "plugin_daemon returned empty"}
+        try:
+            return json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            return {"ok": False, "out": raw.decode("utf-8", "replace")}
+    except Exception as e:
+        return {"ok": False, "out": f"daemon call exception: {e}"}
+
+
+def daemon_status(name: str) -> dict:
+    """探测插件是否为持久化服务 + 返回当前状态（不启动）。"""
+    return _daemon_call(name, "status")
+
+
+def daemon_start(name: str) -> dict:
+    """调用插件持久化接口，让它持久化起来（传二进制路径环境变量）。"""
+    try:
+        bin_path = _daemon_bin(name)
+        if bin_path:
+            os.environ["MPM_DAEMON_BIN"] = bin_path
+        return _daemon_call(name, "start")
+    finally:
+        os.environ.pop("MPM_DAEMON_BIN", None)
+
+
+def daemon_stop(name: str) -> dict:
+    """停止插件持久化服务。"""
+    return _daemon_call(name, "stop")
+
+
+def ensure_plugin_daemons() -> dict:
+    """AI 启动时调用：遍历注册插件，主动探测是否为持久化服务；
+    是 → 调用其持久化接口让它持久化起来。
+
+    全程静默（任何异常都不影响 AI 启动），返回 {插件名: {"ok":bool,"out":str}}。
+    """
+    out: Dict[str, dict] = {}
+    for name in _registered_plugins():
+        try:
+            # 先轻量探测：未导出 plugin_is_daemon 的插件直接跳过
+            lib = load(name)
+            if lib is None:
+                continue
+            is_daemon = getattr(lib, "plugin_is_daemon", None)
+            if is_daemon is None:
+                continue
+            is_daemon.restype = ctypes.c_int
+            if is_daemon() != 1:
+                continue
+            # 是持久化服务 → 启动（幂等：已在运行会返回 ok）
+            out[name] = daemon_start(name)
+        except Exception:
+            continue
+    return out
 
 
 def sign(name: str, version: str = "1.0.0", expires: str = "",
@@ -767,11 +870,84 @@ def _capture_stdout(fn):
     return rc, b"".join(chunks).decode("utf-8", "replace")
 
 
+def _plugin_bin_path(entry: dict) -> Optional[str]:
+    """定位插件同款二进制（子进程隔离执行用，优先 index.daemon_bin）。"""
+    cand = entry.get("daemon_bin")
+    if cand and os.path.isfile(cand):
+        return cand
+    d = os.path.dirname(entry.get("lib") or "")
+    for cand_name in ("system_monitor", "system_monitor.bin", "mpm_daemon"):
+        p = os.path.join(d, cand_name)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def _exec_mode(entry: dict) -> str:
+    """执行模式：subprocess（进程隔离，默认）| ctypes（进程内，信号保护兜底）。"""
+    return (entry.get("exec_mode") or "subprocess").lower()
+
+
+def _execute_ctypes(fp: str, argv: List[str]) -> str:
+    """进程内执行（ctypes + 信号隔离兜底）：仅作为二进制缺失时的 fallback。"""
+    try:
+        lib = ctypes.CDLL(fp)
+        fn = getattr(lib, "plugin_run", None)
+        if fn is None:
+            return "错误: 插件未导出 plugin_run (plugin does not export plugin_run)"
+        fn.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
+        fn.restype = ctypes.c_int
+        argv_b = [a.encode("utf-8", "surrogateescape") for a in argv]
+        arr = (ctypes.c_char_p * len(argv_b))(*argv_b)
+        rc, out = _capture_stdout(lambda: fn(len(argv_b), arr))
+        if rc == 6:
+            return "(exit=6) 插件内存违规已隔离（ctypes 模式信号保护） (plugin crash isolated)"
+        if out.strip():
+            return out if rc == 0 else f"(exit={rc})\n{out}"
+        return f"(exit={rc})"
+    except Exception as e:
+        return f"错误: 插件执行异常: {e} (plugin execution exception: {e})"
+
+
+def _execute_subprocess(entry: dict, argv: List[str]) -> str:
+    """子进程隔离执行：spawn 独立二进制 + --key + 参数。
+    插件崩溃/被杀只影响子进程，Python 主进程零影响。
+    """
+    bin_path = _plugin_bin_path(entry)
+    if not bin_path:
+        # 二进制缺失 → 降级进程内执行（信号保护兜底）
+        return _execute_ctypes(entry.get("lib") or "", argv)
+    cmd = [bin_path] + argv[1:]  # argv[0] 是插件名，二进制不需要
+    try:
+        timeout = float(os.environ.get("MPM_PLUGIN_TIMEOUT", "0") or 0)
+        if timeout > 0:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        else:
+            proc = subprocess.run(cmd, capture_output=True)
+        out = proc.stdout.decode("utf-8", "replace")
+        err = proc.stderr.decode("utf-8", "replace")
+        if proc.returncode == 6:
+            return "(exit=6) 插件内存违规已隔离（子进程模式） (plugin crash isolated in subprocess)"
+        if out.strip():
+            return out if proc.returncode == 0 else f"(exit={proc.returncode})\n{out}"
+        if err.strip():
+            return f"(exit={proc.returncode})\n{err}"
+        return f"(exit={proc.returncode})"
+    except subprocess.TimeoutExpired as e:
+        partial = ""
+        if e.stdout:
+            partial = e.stdout.decode("utf-8", "replace")[:500]
+        return f"(exit=timeout) 插件执行超时 (plugin timeout); 输出: {partial}"
+    except FileNotFoundError:
+        return f"错误: 插件二进制不可执行: {bin_path} (plugin binary not executable)"
+
+
 def execute_plugin_tool(name: str, arguments: dict = None) -> str:
     """执行注册的 C 插件工具（AI function-calling 入口）。
 
-    把 AI 参数字典转命令行参数，自动补 --key（index 里的密钥），
-    调用 .so 的 plugin_run()，fd 重定向捕获 C 库 stdout 返回给 AI。
+    把 AI 参数字典转命令行参数，自动补 --key（index 里的密钥）。
+    默认以子进程隔离模式执行（插件崩溃不影响 Python 主进程）；
+    二进制缺失时降级 ctypes 进程内执行（Rust 侧信号保护兜底）。
     """
     entry = _index_entry(name)
     if not entry or not entry.get("lib"):
@@ -783,22 +959,23 @@ def execute_plugin_tool(name: str, arguments: dict = None) -> str:
     # 自动补密钥（index 里的路径或内容）
     kinfo = _key_info(name)
     if kinfo and not any(a == "--key" for a in argv):
-        argv += ["--key", kinfo[0]]
-    try:
-        lib = ctypes.CDLL(fp)
-        fn = getattr(lib, "plugin_run", None)
-        if fn is None:
-            return "错误: 插件未导出 plugin_run (plugin does not export plugin_run)"
-        fn.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
-        fn.restype = ctypes.c_int
-        argv_b = [a.encode("utf-8", "surrogateescape") for a in argv]
-        arr = (ctypes.c_char_p * len(argv_b))(*argv_b)
-        rc, out = _capture_stdout(lambda: fn(len(argv_b), arr))
-        if out.strip():
-            return out if rc == 0 else f"(exit={rc})\n{out}"
-        return f"(exit={rc})"
-    except Exception as e:
-        return f"错误: 插件执行失败: {e} (plugin execution failed)"
+        _kval, _is_data = kinfo
+        if _is_data:
+            # 密钥内容是文本：写临时文件供子进程 --key 读取
+            # （ctypes 模式仍走 plugin_set_key 内存注入，不受影响）
+            try:
+                import tempfile
+                _tf = tempfile.NamedTemporaryFile("w", suffix=".lic", delete=False, encoding="utf-8")
+                _tf.write(_kval)
+                _tf.close()
+                argv += ["--key", _tf.name]
+            except Exception:
+                argv += ["--key", _kval]
+        else:
+            argv += ["--key", _kval]
+    if _exec_mode(entry) == "subprocess":
+        return _execute_subprocess(entry, argv)
+    return _execute_ctypes(fp, argv)
 
 
 _CACHE: Dict[str, ctypes.CDLL] = {}

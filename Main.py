@@ -1439,6 +1439,15 @@ class UltraFastEnvironmentChecker:
             
             self.ensure_c_files_for_termux()
 
+            # 持久化插件守护：探测已注册插件是否为持久化服务，是则拉起（全静默，失败不影响启动）
+            try:
+                from bin.plugin_loader import ensure_plugin_daemons
+                _daemon_results = ensure_plugin_daemons()
+                if _daemon_results:
+                    log_print(f"[插件守护] 已拉起持久化服务: {', '.join(_daemon_results)} (daemons ensured)")
+            except Exception:
+                pass
+
             # _ensure_rich 已移除（不阻塞启动，缺失时直接放行）
             onyx_import_start = time.perf_counter()
             from Onyx import main_loop

@@ -92,3 +92,7 @@ RunCommand results come back structured as `命令:` / `退出码:` / `执行结
 ## Environment (dynamic — do not re-read)
 
 OS, user, working directory, time, git status, instruction files, and available tools are injected before each interaction. Do not waste turns confirming what is already there.
+
+
+
+If you see the message “You cannot cross root dir. Onyx has intercepted.” while running a command, it’s likely that your previous command attempted to bypass Onyx’s virtual root directory, causing Onyx to replace the corresponding path with that message.

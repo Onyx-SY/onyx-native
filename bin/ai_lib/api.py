@@ -276,6 +276,273 @@ def _convert_tools_for_anthropic(openai_tools: list) -> list:
     return result
 
 
+def _convert_messages_to_responses(messages: list, tools: Optional[list], p: dict, model: str) -> dict:
+    """将 Onyx 内部 OpenAI 格式 messages 转换为 OpenAI Responses API 请求体（原生）。
+
+    - system → instructions（顶层字段）
+    - user/assistant → input 数组（text 项）
+    - assistant.tool_calls → function_call 项
+    - tool → function_call_output 项
+    - tools（OpenAI function 格式）→ 扁平 {type,name,description,parameters}
+    """
+    instructions = []
+    responses_input = []
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "system":
+            if content:
+                instructions.append(str(content))
+            continue
+        if role == "user":
+            responses_input.append({"role": "user", "content": str(content)})
+        elif role == "assistant":
+            tc = m.get("tool_calls")
+            if tc:
+                if content:
+                    responses_input.append({"role": "assistant", "content": str(content)})
+                for t in tc:
+                    try:
+                        args = json.loads(t.get("function", {}).get("arguments", "{}"))
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        args = {}
+                    responses_input.append({
+                        "type": "function_call",
+                        "call_id": t.get("id", ""),
+                        "name": t.get("function", {}).get("name", ""),
+                        "arguments": json.dumps(args, ensure_ascii=False),
+                    })
+            else:
+                responses_input.append({"role": "assistant", "content": str(content)})
+        elif role == "tool":
+            responses_input.append({
+                "type": "function_call_output",
+                "call_id": m.get("tool_call_id", ""),
+                "output": str(m.get("content", "")),
+            })
+    payload = {
+        "model": model,
+        "input": responses_input if responses_input else " ",
+        "stream": True,
+        "max_output_tokens": p.get("max_tokens", 4096),
+    }
+    if instructions:
+        payload["instructions"] = "\n\n".join(instructions)
+    if p.get("temperature") is not None:
+        payload["temperature"] = p["temperature"]
+    if p.get("top_p") is not None:
+        payload["top_p"] = p["top_p"]
+    if tools:
+        payload["tools"] = [{
+            "type": "function",
+            "name": t.get("function", {}).get("name", ""),
+            "description": t.get("function", {}).get("description", ""),
+            "parameters": t.get("function", {}).get("parameters", {}),
+        } for t in tools]
+    return payload
+
+
+def _convert_messages_to_google(messages: list, tools: Optional[list], p: dict) -> dict:
+    """将 Onyx 内部 OpenAI 格式 messages 转换为 Google Gemini GenerateContent 请求体（原生）。
+
+    - system → systemInstruction.parts
+    - user/assistant → contents（role: user/model）
+    - assistant.tool_calls → functionCall parts
+    - tool → functionResponse parts
+    - tools → tools[0].functionDeclarations
+    """
+    contents = []
+    system_parts = []
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "system":
+            if content:
+                system_parts.append(str(content))
+            continue
+        if role == "user":
+            contents.append({"role": "user", "parts": [{"text": str(content)}]})
+        elif role == "assistant":
+            tc = m.get("tool_calls")
+            if tc:
+                parts = []
+                if content:
+                    parts.append({"text": str(content)})
+                for t in tc:
+                    try:
+                        args = json.loads(t.get("function", {}).get("arguments", "{}"))
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        args = {}
+                    parts.append({"functionCall": {
+                        "name": t.get("function", {}).get("name", ""),
+                        "args": args,
+                    }})
+                contents.append({"role": "model", "parts": parts})
+            else:
+                contents.append({"role": "model", "parts": [{"text": str(content)}]})
+        elif role == "tool":
+            try:
+                out = json.loads(m.get("content", "")) if isinstance(m.get("content"), str) else m.get("content")
+            except Exception:
+                out = str(m.get("content", ""))
+            contents.append({"role": "user", "parts": [{"functionResponse": {
+                "name": m.get("tool_call_id", ""),
+                "response": {"result": out},
+            }}]})
+    generation_config = {
+        "maxOutputTokens": p.get("max_tokens", 4096),
+    }
+    if p.get("temperature") is not None:
+        generation_config["temperature"] = p["temperature"]
+    if p.get("top_p") is not None:
+        generation_config["topP"] = p["top_p"]
+    payload = {
+        "contents": contents if contents else [{"role": "user", "parts": [{"text": " "}]}],
+        "generationConfig": generation_config,
+    }
+    if system_parts:
+        payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
+    if tools:
+        payload["tools"] = [{"functionDeclarations": [{
+            "name": t.get("function", {}).get("name", ""),
+            "description": t.get("function", {}).get("description", ""),
+            "parameters": t.get("function", {}).get("parameters", {}),
+        } for t in tools]}]
+    return payload
+
+
+def _parse_sse_openai_responses(lines, on_content=None, on_tool_call=None, should_stop=None):
+    """解析 OpenAI Responses API SSE 流（原生）。
+
+    事件：response.output_text.delta（文本）、response.output_item.added /
+          response.function_call_arguments.delta / response.output_item.done（function_call）、
+          response.completed（usage）。
+    返回 (full_content, usage, tool_calls, reasoning_display)。
+    tool_calls: Dict[call_id, {id, type, function:{name, arguments}}]
+    """
+    full_content = ""
+    usage = {}
+    tool_calls = {}
+    reasoning_display = []
+    for line in lines:
+        if should_stop and should_stop():
+            break
+        if not line or not line.startswith("data: "):
+            continue
+        data_str = line[6:]
+        try:
+            chunk = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        etype = chunk.get("type", "")
+        if etype == "response.completed":
+            _resp = chunk.get("response") or {}
+            u = _resp.get("usage") or {}
+            if u:
+                inp = u.get("input_tokens") or u.get("input_token_count") or 0
+                outp = u.get("output_tokens") or u.get("output_token_count") or 0
+                usage = {"prompt_tokens": inp, "completion_tokens": outp,
+                         "total_tokens": (inp or 0) + (outp or 0)}
+        elif etype == "response.output_text.delta":
+            d = chunk.get("delta")
+            if isinstance(d, str) and d:
+                full_content += d
+                if on_content:
+                    on_content(d)
+        elif etype == "response.output_item.added":
+            item = chunk.get("item") or {}
+            if item.get("type") == "function_call":
+                cid = item.get("call_id") or item.get("id") or ""
+                name = item.get("name") or ""
+                if cid and cid not in tool_calls:
+                    tool_calls[cid] = {"id": cid, "type": "function",
+                                       "function": {"name": name, "arguments": ""}}
+                    if name and on_tool_call:
+                        on_tool_call(name)
+        elif etype == "response.function_call_arguments.delta":
+            cid = chunk.get("item_id") or chunk.get("call_id") or ""
+            d = chunk.get("delta")
+            if cid in tool_calls and isinstance(d, str):
+                tool_calls[cid]["function"]["arguments"] += d
+        elif etype == "response.output_item.done":
+            item = chunk.get("item") or {}
+            if item.get("type") == "function_call":
+                cid = item.get("call_id") or item.get("id") or ""
+                if cid:
+                    acc = tool_calls.setdefault(cid, {"id": cid, "type": "function",
+                                                      "function": {"name": item.get("name") or "", "arguments": ""}})
+                    if not acc["function"]["name"] and item.get("name"):
+                        acc["function"]["name"] = item["name"]
+                        if on_tool_call:
+                            on_tool_call(item["name"])
+                    args = item.get("arguments")
+                    if args and not acc["function"]["arguments"]:
+                        acc["function"]["arguments"] = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
+    return full_content, usage, tool_calls, reasoning_display
+
+
+def _parse_sse_google(lines, on_content=None, on_tool_call=None, should_stop=None):
+    """解析 Google Gemini streamGenerateContent SSE 流（原生）。
+
+    块结构：data: {"candidates": [{"content": {"parts": [{"text": ...} / {"functionCall": {...}}]}}],
+             "usageMetadata": {...}}
+    返回 (full_content, usage, tool_calls, reasoning_display)。
+    tool_calls: list of {"name", "args"}
+    """
+    full_content = ""
+    usage = {}
+    tool_calls = []
+    reasoning_display = []
+    for line in lines:
+        if should_stop and should_stop():
+            break
+        if not line or not line.startswith("data: "):
+            continue
+        data_str = line[6:]
+        try:
+            chunk = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        um = chunk.get("usageMetadata") or {}
+        if um:
+            inp = um.get("promptTokenCount") or 0
+            outp = um.get("candidatesTokenCount") or 0
+            usage = {"prompt_tokens": inp, "completion_tokens": outp,
+                     "total_tokens": (inp or 0) + (outp or 0)}
+        candidates = chunk.get("candidates") or []
+        if not candidates or not isinstance(candidates[0], dict):
+            continue
+        content = candidates[0].get("content") or {}
+        for part in content.get("parts") or []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("text"):
+                full_content += part["text"]
+                if on_content:
+                    on_content(part["text"])
+            fc = part.get("functionCall")
+            if isinstance(fc, dict):
+                tool_calls.append({"name": fc.get("name") or "", "args": fc.get("args") or {}})
+                if fc.get("name") and on_tool_call:
+                    on_tool_call(fc["name"])
+    return full_content, usage, tool_calls, reasoning_display
+
+
+def _resolve_api_url(plat_info: dict, stream_fmt: str, model: str) -> str:
+    """按模型协议选择端点（统一平台如 zen 用 protocol_api_urls），并替换 {model} 占位符。"""
+    api_url = plat_info.get("api_url", "")
+    proto_urls = plat_info.get("protocol_api_urls") or {}
+    if isinstance(proto_urls, dict) and stream_fmt in proto_urls:
+        api_url = proto_urls[stream_fmt]
+    if "{model}" in api_url:
+        api_url = api_url.replace("{model}", requests.utils.quote(model, safe="-._"))
+    return api_url
+
+
 def call_ai_api_sse(question: str = "", type: Optional[str] = None,
                     new_key: Optional[str] = None,
                     debug_mode: bool = False, onyx_module=None,
@@ -301,16 +568,28 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
                   （Explore 子代理用「X Pro」= 当前系列最便宜模型）。
     """
     # 惰性导入避免循环引用
-    from .config import get_current_lang, get_prompt_text, load_key_conf
+    from .config import get_current_lang, get_prompt_text, load_key_conf, resolve_model_protocol
 
     lang = get_current_lang()
     prompts = get_prompt_text(lang)
 
     # ── 加载直连配置 ──
     conf = load_key_conf()
+    plat_key = platform_override or (conf or {}).get("platform", "deepseek")
+    if not conf or not conf.get("api_key"):
+        # OpenCode Zen 生态兼容：zen 系平台未在 key.json 配置密钥时，
+        # 自动复用 opencode 登录凭据（~/.local/share/opencode/auth.json → zen.api.key）
+        if plat_key.startswith("zen"):
+            try:
+                from .config import load_zen_key_from_opencode as _load_zen_key
+                _zen_key = _load_zen_key()
+                if _zen_key:
+                    conf = dict(conf or {})
+                    conf["api_key"] = _zen_key
+            except Exception:
+                pass
     if not conf or not conf.get("api_key"):
         return {"error": prompts.get("license_invalid_or_quota", "未配置 API 密钥，请重新运行 ai 命令"), "answer": "no", "ask": "", "txt": "", "analysis": ""}
-    plat_key = platform_override or conf.get("platform", "deepseek")
     api_key = conf["api_key"]
     if plat_key == "custom":
         plat_info = {
@@ -330,6 +609,9 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
         model = _resolve_alias(plat_key, model)
     except Exception:
         pass
+    # 统一平台（如 OpenCode Zen）下不同模型走不同协议：按模型解析 stream_format；
+    # 对普通平台结果与 plat_info["stream_format"] 完全一致（protocols 映射镜像 stream_format）。
+    stream_fmt = resolve_model_protocol(plat_key, model)
     user_params = conf.get("params", {})
 
     tool_list = []
@@ -506,9 +788,11 @@ Onyx Mode: {onyx_mode}
     }
     headers["Accept"] = "text/event-stream"
 
-    if plat_key == "anthropic":
+    if stream_fmt == "anthropic":
         headers["x-api-key"] = api_key
         headers["anthropic-version"] = "2023-06-01"
+    elif stream_fmt == "google":
+        headers["x-goog-api-key"] = api_key
     else:
         headers["Authorization"] = f"Bearer {api_key}"
 
@@ -518,7 +802,7 @@ Onyx Mode: {onyx_mode}
     p = {**default_params, **model_overrides, **user_params}
 
     payload: dict
-    if plat_key == "anthropic":
+    if stream_fmt == "anthropic":
         # ── 将 OpenAI 格式 _messages 正确转换为 Anthropic 格式 ──
         system_parts = []
         anthropic_msgs = []
@@ -595,6 +879,12 @@ Onyx Mode: {onyx_mode}
             payload["top_p"] = p["top_p"]
         if tools:
             payload["tools"] = _convert_tools_for_anthropic(tools)
+    elif stream_fmt == "openai_responses":
+        # ── OpenAI Responses API（原生）：input/instructions/扁平 tools ──
+        payload = _convert_messages_to_responses(_messages, tools, p, model)
+    elif stream_fmt == "google":
+        # ── Google Gemini GenerateContent（原生）：contents/parts/functionDeclarations ──
+        payload = _convert_messages_to_google(_messages, tools, p)
     else:
         # ── OpenAI/DeepSeek 分支：tools 置于 messages 之前（前缀缓存优化）──
         # DeepSeek 缓存按"完整前缀单元"匹配，且公共前缀检测基于请求 token 流：
@@ -619,10 +909,10 @@ Onyx Mode: {onyx_mode}
     # ── thinking / reasoning_effort：key.conf params 可覆盖平台默认 ──
     # key.json: {"params": {"thinking": false}} → 关闭思考（不发送 thinking 字段）
     _thinking_cfg = _resolve_thinking(user_params.get("thinking"), plat_info.get("thinking"))
-    if _thinking_cfg:
+    if _thinking_cfg and stream_fmt in ("openai", "anthropic"):
         payload["thinking"] = _thinking_cfg
     _effort = user_params.get("reasoning_effort") or plat_info.get("reasoning_effort")
-    if _effort:
+    if _effort and stream_fmt in ("openai", "anthropic"):
         payload["reasoning_effort"] = _effort
 
     # ⚠️ 不要在这里再次 payload["tools"] = tools：
@@ -630,7 +920,7 @@ Onyx Mode: {onyx_mode}
     #     此处覆盖会还原成 OpenAI 格式 → Anthropic API 校验失败/工具失效；
     #   - OpenAI/DeepSeek 分支已在分支内赋值（tools 前置，前缀缓存优化）。
     # stream_options 是 OpenAI 兼容字段；Anthropic 对未知顶层字段返回 400，不能发送。
-    if plat_key != "anthropic":
+    if stream_fmt == "openai":
         payload["stream_options"] = {"include_usage": True}
 
     # ── 写入 AI 真实看到的完整内容到 <home>/.ai_s/tmp/（每次覆盖）──
@@ -669,8 +959,7 @@ Onyx Mode: {onyx_mode}
     except Exception:
         pass
 
-    api_url = plat_info["api_url"]
-    stream_fmt = plat_info["stream_format"]
+    api_url = _resolve_api_url(plat_info, stream_fmt, model)
 
     max_retries = 3
     base_delay = 2
@@ -787,6 +1076,8 @@ Onyx Mode: {onyx_mode}
             _usage = {}
             _tool_calls_acc: Dict[int, Dict] = {}
             _anthropic_tool_acc: Dict[int, Dict] = {}
+            _resp_fc_acc: Dict[str, Dict] = {}
+            _google_fc_acc: list = []
             _reasoning_display: List[str] = []
 
             # 保存活跃 response 引用（允许 Ctrl+C 强制关闭；按 session 隔离，
@@ -854,6 +1145,26 @@ Onyx Mode: {onyx_mode}
                                     tcc["function"]["arguments"] += func_delta["arguments"]
                     except json.JSONDecodeError:
                         continue
+            elif stream_fmt == "openai_responses":
+                # ── OpenAI Responses API SSE 解析（原生）──
+                full_content, _usage, _resp_fc_acc, _reasoning_display = _parse_sse_openai_responses(
+                    response.iter_lines(decode_unicode=True),
+                    on_content=on_content, on_tool_call=on_tool_call,
+                    should_stop=lambda: _mcp_state._AI_INTERRUPTED)
+                if _mcp_state._AI_INTERRUPTED:
+                    response.close()
+                    _ACTIVE_RESPONSES.pop(session_id or "_default", None)
+                    return {"txt": "", "analysis": "", "answer": "yes", "ask": "", "_interrupted": True}
+            elif stream_fmt == "google":
+                # ── Google Gemini SSE 解析（原生）──
+                full_content, _usage, _google_fc_acc, _reasoning_display = _parse_sse_google(
+                    response.iter_lines(decode_unicode=True),
+                    on_content=on_content, on_tool_call=on_tool_call,
+                    should_stop=lambda: _mcp_state._AI_INTERRUPTED)
+                if _mcp_state._AI_INTERRUPTED:
+                    response.close()
+                    _ACTIVE_RESPONSES.pop(session_id or "_default", None)
+                    return {"txt": "", "analysis": "", "answer": "yes", "ask": "", "_interrupted": True}
             else:
                 # Anthropic SSE 格式解析，支持 tool_use
                 for line in response.iter_lines(decode_unicode=True):
@@ -980,6 +1291,44 @@ Onyx Mode: {onyx_mode}
                         # 缓存字节一致性：同 OpenAI 分支，保留原始 id / input_json 字节
                         "id": tc.get("id", ""),
                         "raw_arguments": tc.get("input_json", ""),
+                        "_native": True,
+                    })
+                existing = result.get("tool_calls", [])
+                if not isinstance(existing, list):
+                    existing = []
+                result["tool_calls"] = existing + native_tools
+
+            # ── Responses API function_call（统一为 Onyx native 格式）──
+            if stream_fmt == "openai_responses" and _resp_fc_acc:
+                native_tools = []
+                for cid in sorted(_resp_fc_acc.keys()):
+                    tc = _resp_fc_acc[cid]
+                    try:
+                        args = json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {}
+                    except (json.JSONDecodeError, ValueError):
+                        args = tc["function"]["arguments"]
+                    native_tools.append({
+                        "name": tc["function"]["name"],
+                        "params_str": json.dumps(args) if isinstance(args, dict) else str(args),
+                        "id": tc.get("id", ""),
+                        "raw_arguments": tc["function"]["arguments"],
+                        "_native": True,
+                    })
+                existing = result.get("tool_calls", [])
+                if not isinstance(existing, list):
+                    existing = []
+                result["tool_calls"] = existing + native_tools
+
+            # ── Google functionCall（统一为 Onyx native 格式）──
+            if stream_fmt == "google" and _google_fc_acc:
+                native_tools = []
+                for fc in _google_fc_acc:
+                    args = fc.get("args") or {}
+                    native_tools.append({
+                        "name": fc.get("name", ""),
+                        "params_str": json.dumps(args) if isinstance(args, dict) else str(args),
+                        "id": "",
+                        "raw_arguments": json.dumps(args) if isinstance(args, dict) else str(args),
                         "_native": True,
                     })
                 existing = result.get("tool_calls", [])

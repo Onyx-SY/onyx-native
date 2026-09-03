@@ -9,6 +9,10 @@
       "deepseek-v4-pro",
       "deepseek-v4-flash"
     ],
+    "protocols": {
+      "deepseek-v4-pro": "openai",
+      "deepseek-v4-flash": "openai"
+    },
     "default_model": "deepseek-v4-pro",
     "params": {
       "temperature": 0.1,
@@ -43,6 +47,14 @@
       "gpt-5.6-terra",
       "gpt-5.6-luna"
     ],
+    "protocols": {
+      "gpt-5.5": "openai",
+      "gpt-5.5-instant": "openai",
+      "gpt-5.5-pro": "openai",
+      "gpt-5.6-sol": "openai",
+      "gpt-5.6-terra": "openai",
+      "gpt-5.6-luna": "openai"
+    },
     "default_model": "gpt-5.5",
     "params": {
       "temperature": 0.1,
@@ -82,25 +94,79 @@
     "stream_format": "anthropic",
     "supports_prompt_cache": true,
     "models": [
+      "claude-sonnet-5",
       "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-sonnet-4",
+      "claude-opus-5",
       "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-haiku-4-5",
       "claude-fable-5",
       "claude-mythos-5"
     ],
-    "default_model": "claude-sonnet-4-6",
+    "protocols": {
+      "claude-sonnet-5": "anthropic",
+      "claude-sonnet-4-6": "anthropic",
+      "claude-sonnet-4-5": "anthropic",
+      "claude-sonnet-4": "anthropic",
+      "claude-opus-5": "anthropic",
+      "claude-opus-4-8": "anthropic",
+      "claude-opus-4-7": "anthropic",
+      "claude-opus-4-6": "anthropic",
+      "claude-opus-4-5": "anthropic",
+      "claude-haiku-4-5": "anthropic",
+      "claude-fable-5": "anthropic",
+      "claude-mythos-5": "anthropic"
+    },
+    "default_model": "claude-sonnet-5",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
       "max_tokens": 32768
     },
     "price_per_million_tokens": {
+      "claude-sonnet-5": {
+        "input": 2.0,
+        "output": 10.0
+      },
       "claude-sonnet-4-6": {
         "input": 3.0,
         "output": 15.0
       },
+      "claude-sonnet-4-5": {
+        "input": 3.0,
+        "output": 15.0
+      },
+      "claude-sonnet-4": {
+        "input": 3.0,
+        "output": 15.0
+      },
+      "claude-opus-5": {
+        "input": 5.0,
+        "output": 25.0
+      },
       "claude-opus-4-8": {
         "input": 5.0,
         "output": 25.0
+      },
+      "claude-opus-4-7": {
+        "input": 5.0,
+        "output": 25.0
+      },
+      "claude-opus-4-6": {
+        "input": 5.0,
+        "output": 25.0
+      },
+      "claude-opus-4-5": {
+        "input": 5.0,
+        "output": 25.0
+      },
+      "claude-haiku-4-5": {
+        "input": 1.0,
+        "output": 5.0
       },
       "claude-fable-5": {
         "input": 10.0,
@@ -122,6 +188,11 @@
       "kimi-k2.7-code",
       "kimi-k3"
     ],
+    "protocols": {
+      "kimi-k2.6": "openai",
+      "kimi-k2.7-code": "openai",
+      "kimi-k3": "openai"
+    },
     "default_model": "kimi-k3",
     "params": {
       "temperature": 0.1,
@@ -153,6 +224,11 @@
       "glm-5-turbo",
       "glm-5.2"
     ],
+    "protocols": {
+      "glm-5": "openai",
+      "glm-5-turbo": "openai",
+      "glm-5.2": "openai"
+    },
     "default_model": "glm-5.2",
     "params": {
       "temperature": 0.1,
@@ -187,6 +263,14 @@
       "qwen3.8-max",
       "qwen3-coder-next"
     ],
+    "protocols": {
+      "qwen3.5-plus": "openai",
+      "qwen3.6-plus": "openai",
+      "qwen3.7-plus": "openai",
+      "qwen3.7-flash": "openai",
+      "qwen3.8-max": "openai",
+      "qwen3-coder-next": "openai"
+    },
     "default_model": "qwen3.7-plus",
     "params": {
       "temperature": 0.1,
@@ -231,6 +315,12 @@
       "doubao-seed-thinking-v1.5",
       "doubao-code"
     ],
+    "protocols": {
+      "doubao-seed-2.1-turbo": "openai",
+      "doubao-seed-2.1-pro": "openai",
+      "doubao-seed-thinking-v1.5": "openai",
+      "doubao-code": "openai"
+    },
     "default_model": "doubao-seed-2.1-pro",
     "params": {
       "temperature": 0.1,
@@ -253,6 +343,403 @@
       "doubao-code": {
         "input": 1.2,
         "output": 5.5
+      }
+    }
+  },
+  "zen": {
+    "name": "OpenCode Zen",
+    "api_url": "https://opencode.ai/zen/v1/chat/completions",
+    "stream_format": "openai",
+    "protocol_api_urls": {
+      "openai": "https://opencode.ai/zen/v1/chat/completions",
+      "anthropic": "https://opencode.ai/zen/v1/messages",
+      "openai_responses": "https://opencode.ai/zen/v1/responses",
+      "google": "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse"
+    },
+    "supports_prompt_cache": false,
+    "_note": "OpenCode Zen 网关（opencode.ai/zen）统一平台：62 个模型按各自协议自动路由（选模型时标签显示协议，端点见 protocol_api_urls）。密钥：https://opencode.ai/zen 控制台获取，或复用 opencode 登录（~/.local/share/opencode/auth.json → zen.api.key，Onyx 会自动兜底读取）。4 种原生协议：openai→/v1/chat/completions、anthropic→/v1/messages、openai_responses→/v1/responses、google→/v1/models/{model}:streamGenerateContent?alt=sse。免费模型（价格 0/0，选模型时带『免费』标记）：big-pickle / laguna-s-2.1-free / mimo-v2.5-free / ling-3.0-flash-fin-free / nemotron-3-ultra-free / nemotron-3.5-lightning-free / muse-spark-1.2-contributor-free。付费模型需 Zen 账号绑定支付方式（否则 401 CreditsError）；deepseek-v4-flash-free 上游暂不可用未收录。修改模型：models 增删 id、protocols 标注协议、price_per_million_tokens 维护价格（USD/1M tokens）。",
+    "models": [
+      "deepseek-v4-pro",
+      "deepseek-v4-flash",
+      "glm-5.2",
+      "glm-5.1",
+      "glm-5",
+      "minimax-m3",
+      "minimax-m2.7",
+      "minimax-m2.5",
+      "kimi-k3",
+      "kimi-k2.7-code",
+      "kimi-k2.6",
+      "kimi-k2.5",
+      "big-pickle",
+      "mimo-v2.5-free",
+      "ling-3.0-flash-fin-free",
+      "nemotron-3-ultra-free",
+      "nemotron-3.5-lightning-free",
+      "laguna-s-2.1-free",
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-sonnet-4",
+      "claude-opus-5",
+      "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-haiku-4-5",
+      "claude-fable-5",
+      "qwen3.6-plus",
+      "qwen3.5-plus",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.5-pro",
+      "gpt-5.4",
+      "gpt-5.4-pro",
+      "gpt-5.4-mini",
+      "gpt-5.4-nano",
+      "gpt-5.3-codex-spark",
+      "gpt-5.3-codex",
+      "gpt-5.2",
+      "gpt-5.2-codex",
+      "gpt-5.1",
+      "gpt-5.1-codex-max",
+      "gpt-5.1-codex",
+      "gpt-5.1-codex-mini",
+      "gpt-5",
+      "gpt-5-codex",
+      "gpt-5-nano",
+      "grok-build-0.1",
+      "grok-4.6",
+      "grok-4.5",
+      "muse-spark-1.2",
+      "muse-spark-1.2-contributor-free",
+      "gemini-3.7-flash",
+      "gemini-3.6-flash",
+      "gemini-3.5-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-pro",
+      "gemini-3-flash"
+    ],
+    "protocols": {
+      "deepseek-v4-pro": "openai",
+      "deepseek-v4-flash": "openai",
+      "glm-5.2": "openai",
+      "glm-5.1": "openai",
+      "glm-5": "openai",
+      "minimax-m3": "openai",
+      "minimax-m2.7": "openai",
+      "minimax-m2.5": "openai",
+      "kimi-k3": "openai",
+      "kimi-k2.7-code": "openai",
+      "kimi-k2.6": "openai",
+      "kimi-k2.5": "openai",
+      "big-pickle": "openai",
+      "mimo-v2.5-free": "openai",
+      "ling-3.0-flash-fin-free": "openai",
+      "nemotron-3-ultra-free": "openai",
+      "nemotron-3.5-lightning-free": "openai",
+      "laguna-s-2.1-free": "openai",
+      "claude-sonnet-5": "anthropic",
+      "claude-sonnet-4-6": "anthropic",
+      "claude-sonnet-4-5": "anthropic",
+      "claude-sonnet-4": "anthropic",
+      "claude-opus-5": "anthropic",
+      "claude-opus-4-8": "anthropic",
+      "claude-opus-4-7": "anthropic",
+      "claude-opus-4-6": "anthropic",
+      "claude-opus-4-5": "anthropic",
+      "claude-haiku-4-5": "anthropic",
+      "claude-fable-5": "anthropic",
+      "qwen3.6-plus": "anthropic",
+      "qwen3.5-plus": "anthropic",
+      "gpt-5.6-sol": "openai_responses",
+      "gpt-5.6-terra": "openai_responses",
+      "gpt-5.6-luna": "openai_responses",
+      "gpt-5.5": "openai_responses",
+      "gpt-5.5-pro": "openai_responses",
+      "gpt-5.4": "openai_responses",
+      "gpt-5.4-pro": "openai_responses",
+      "gpt-5.4-mini": "openai_responses",
+      "gpt-5.4-nano": "openai_responses",
+      "gpt-5.3-codex-spark": "openai_responses",
+      "gpt-5.3-codex": "openai_responses",
+      "gpt-5.2": "openai_responses",
+      "gpt-5.2-codex": "openai_responses",
+      "gpt-5.1": "openai_responses",
+      "gpt-5.1-codex-max": "openai_responses",
+      "gpt-5.1-codex": "openai_responses",
+      "gpt-5.1-codex-mini": "openai_responses",
+      "gpt-5": "openai_responses",
+      "gpt-5-codex": "openai_responses",
+      "gpt-5-nano": "openai_responses",
+      "grok-build-0.1": "openai_responses",
+      "grok-4.6": "openai_responses",
+      "grok-4.5": "openai_responses",
+      "muse-spark-1.2": "openai_responses",
+      "muse-spark-1.2-contributor-free": "openai_responses",
+      "gemini-3.7-flash": "google",
+      "gemini-3.6-flash": "google",
+      "gemini-3.5-flash": "google",
+      "gemini-3.5-flash-lite": "google",
+      "gemini-3.1-pro": "google",
+      "gemini-3-flash": "google"
+    },
+    "default_model": "deepseek-v4-pro",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 32768
+    },
+    "price_per_million_tokens": {
+      "deepseek-v4-pro": {
+        "input": 1.32,
+        "output": 3.96
+      },
+      "deepseek-v4-flash": {
+        "input": 0.44,
+        "output": 1.32
+      },
+      "glm-5.2": {
+        "input": 1.4,
+        "output": 4.4
+      },
+      "glm-5.1": {
+        "input": 1.4,
+        "output": 4.4
+      },
+      "glm-5": {
+        "input": 1.0,
+        "output": 3.2
+      },
+      "minimax-m3": {
+        "input": 0.3,
+        "output": 1.2
+      },
+      "minimax-m2.7": {
+        "input": 0.3,
+        "output": 1.2
+      },
+      "minimax-m2.5": {
+        "input": 0.3,
+        "output": 1.2
+      },
+      "kimi-k3": {
+        "input": 3.0,
+        "output": 15.0
+      },
+      "kimi-k2.7-code": {
+        "input": 0.95,
+        "output": 4.0
+      },
+      "kimi-k2.6": {
+        "input": 0.95,
+        "output": 4.0
+      },
+      "kimi-k2.5": {
+        "input": 0.6,
+        "output": 3.0
+      },
+      "big-pickle": {
+        "input": 0.0,
+        "output": 0.0
+      },
+      "mimo-v2.5-free": {
+        "input": 0.0,
+        "output": 0.0
+      },
+      "ling-3.0-flash-fin-free": {
+        "input": 0.0,
+        "output": 0.0
+      },
+      "nemotron-3-ultra-free": {
+        "input": 0.0,
+        "output": 0.0
+      },
+      "nemotron-3.5-lightning-free": {
+        "input": 0.0,
+        "output": 0.0
+      },
+      "laguna-s-2.1-free": {
+        "input": 0.0,
+        "output": 0.0
+      },
+      "claude-sonnet-5": {
+        "input": 2.0,
+        "output": 10.0
+      },
+      "claude-sonnet-4-6": {
+        "input": 3.0,
+        "output": 15.0
+      },
+      "claude-sonnet-4-5": {
+        "input": 3.0,
+        "output": 15.0
+      },
+      "claude-sonnet-4": {
+        "input": 3.0,
+        "output": 15.0
+      },
+      "claude-opus-5": {
+        "input": 5.0,
+        "output": 25.0
+      },
+      "claude-opus-4-8": {
+        "input": 5.0,
+        "output": 25.0
+      },
+      "claude-opus-4-7": {
+        "input": 5.0,
+        "output": 25.0
+      },
+      "claude-opus-4-6": {
+        "input": 5.0,
+        "output": 25.0
+      },
+      "claude-opus-4-5": {
+        "input": 5.0,
+        "output": 25.0
+      },
+      "claude-haiku-4-5": {
+        "input": 1.0,
+        "output": 5.0
+      },
+      "claude-fable-5": {
+        "input": 10.0,
+        "output": 50.0
+      },
+      "qwen3.6-plus": {
+        "input": 0.5,
+        "output": 3.0
+      },
+      "qwen3.5-plus": {
+        "input": 0.2,
+        "output": 1.2
+      },
+      "gpt-5.6-sol": {
+        "input": 2.0,
+        "output": 10.0
+      },
+      "gpt-5.6-terra": {
+        "input": 2.0,
+        "output": 12.0
+      },
+      "gpt-5.6-luna": {
+        "input": 0.2,
+        "output": 1.2
+      },
+      "gpt-5.5": {
+        "input": 5.0,
+        "output": 30.0
+      },
+      "gpt-5.5-pro": {
+        "input": 30.0,
+        "output": 180.0
+      },
+      "gpt-5.4": {
+        "input": 2.5,
+        "output": 15.0
+      },
+      "gpt-5.4-pro": {
+        "input": 30.0,
+        "output": 180.0
+      },
+      "gpt-5.4-mini": {
+        "input": 0.75,
+        "output": 4.5
+      },
+      "gpt-5.4-nano": {
+        "input": 0.2,
+        "output": 1.25
+      },
+      "gpt-5.3-codex-spark": {
+        "input": 1.75,
+        "output": 14.0
+      },
+      "gpt-5.3-codex": {
+        "input": 1.75,
+        "output": 14.0
+      },
+      "gpt-5.2": {
+        "input": 1.75,
+        "output": 14.0
+      },
+      "gpt-5.2-codex": {
+        "input": 1.75,
+        "output": 14.0
+      },
+      "gpt-5.1": {
+        "input": 1.07,
+        "output": 8.5
+      },
+      "gpt-5.1-codex-max": {
+        "input": 1.25,
+        "output": 10.0
+      },
+      "gpt-5.1-codex": {
+        "input": 1.07,
+        "output": 8.5
+      },
+      "gpt-5.1-codex-mini": {
+        "input": 0.25,
+        "output": 2.0
+      },
+      "gpt-5": {
+        "input": 1.07,
+        "output": 8.5
+      },
+      "gpt-5-codex": {
+        "input": 1.07,
+        "output": 8.5
+      },
+      "gpt-5-nano": {
+        "input": 0.05,
+        "output": 0.4
+      },
+      "grok-build-0.1": {
+        "input": 1.0,
+        "output": 2.0
+      },
+      "grok-4.6": {
+        "input": 2.0,
+        "output": 6.0
+      },
+      "grok-4.5": {
+        "input": 2.0,
+        "output": 6.0
+      },
+      "muse-spark-1.2": {
+        "input": 1.25,
+        "output": 4.25
+      },
+      "muse-spark-1.2-contributor-free": {
+        "input": 0.0,
+        "output": 0.0
+      },
+      "gemini-3.7-flash": {
+        "input": 1.5,
+        "output": 7.5
+      },
+      "gemini-3.6-flash": {
+        "input": 1.5,
+        "output": 7.5
+      },
+      "gemini-3.5-flash": {
+        "input": 1.5,
+        "output": 9.0
+      },
+      "gemini-3.5-flash-lite": {
+        "input": 0.3,
+        "output": 2.5
+      },
+      "gemini-3.1-pro": {
+        "input": 2.0,
+        "output": 12.0
+      },
+      "gemini-3-flash": {
+        "input": 0.5,
+        "output": 3.0
       }
     }
   }

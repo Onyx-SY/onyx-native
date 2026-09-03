@@ -57,6 +57,7 @@ def _load_ai_models() -> dict:
             "stream_format": "openai",
             "supports_prompt_cache": True,
             "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
+            "protocols": {"deepseek-v4-pro": "openai", "deepseek-v4-flash": "openai"},
             "default_model": "deepseek-v4-pro",
             "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
             "thinking": {"type": "enabled"},
@@ -73,6 +74,8 @@ def _load_ai_models() -> dict:
             "supports_prompt_cache": True,
             "models": ["gpt-5.5", "gpt-5.5-instant", "gpt-5.5-pro",
                        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            "protocols": {"gpt-5.5": "openai", "gpt-5.5-instant": "openai", "gpt-5.5-pro": "openai",
+                          "gpt-5.6-sol": "openai", "gpt-5.6-terra": "openai", "gpt-5.6-luna": "openai"},
             "default_model": "gpt-5.6-terra",
             "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
             "price_per_million_tokens": {
@@ -89,16 +92,238 @@ def _load_ai_models() -> dict:
             "api_url": "https://api.anthropic.com/v1/messages",
             "stream_format": "anthropic",
             "supports_prompt_cache": True,
-            "models": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-fable-5",
-                       "claude-mythos-5", "claude-sonnet-5"],
-            "default_model": "claude-fable-5",
+            "models": [
+                "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4",
+                "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
+                "claude-haiku-4-5", "claude-fable-5", "claude-mythos-5",
+            ],
+            "protocols": {m: "anthropic" for m in [
+                "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4",
+                "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
+                "claude-haiku-4-5", "claude-fable-5", "claude-mythos-5",
+            ]},
+            "default_model": "claude-sonnet-5",
             "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 8192},
             "price_per_million_tokens": {
+                "claude-sonnet-5": {"input": 2.0, "output": 10.0},
                 "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+                "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
+                "claude-sonnet-4": {"input": 3.0, "output": 15.0},
+                "claude-opus-5": {"input": 5.0, "output": 25.0},
                 "claude-opus-4-8": {"input": 5.0, "output": 25.0},
+                "claude-opus-4-7": {"input": 5.0, "output": 25.0},
+                "claude-opus-4-6": {"input": 5.0, "output": 25.0},
+                "claude-opus-4-5": {"input": 5.0, "output": 25.0},
+                "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
                 "claude-fable-5": {"input": 10.0, "output": 50.0},
                 "claude-mythos-5": {"input": 12.0, "output": 60.0},
+            },
+        },
+
+        "zen": {
+            "name": "OpenCode Zen",
+            "api_url": "https://opencode.ai/zen/v1/chat/completions",
+            "stream_format": "openai",
+            "protocol_api_urls": {
+                "openai": "https://opencode.ai/zen/v1/chat/completions",
+                "anthropic": "https://opencode.ai/zen/v1/messages",
+                "openai_responses": "https://opencode.ai/zen/v1/responses",
+                "google": "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse",
+            },
+            "supports_prompt_cache": False,
+            "models": [
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "glm-5.2",
+                "glm-5.1",
+                "glm-5",
+                "minimax-m3",
+                "minimax-m2.7",
+                "minimax-m2.5",
+                "kimi-k3",
+                "kimi-k2.7-code",
+                "kimi-k2.6",
+                "kimi-k2.5",
+                "big-pickle",
+                "mimo-v2.5-free",
+                "ling-3.0-flash-fin-free",
+                "nemotron-3-ultra-free",
+                "nemotron-3.5-lightning-free",
+                "laguna-s-2.1-free",
+                "claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "claude-sonnet-4-5",
+                "claude-sonnet-4",
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-opus-4-6",
+                "claude-opus-4-5",
+                "claude-haiku-4-5",
+                "claude-fable-5",
+                "qwen3.6-plus",
+                "qwen3.5-plus",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.5-pro",
+                "gpt-5.4",
+                "gpt-5.4-pro",
+                "gpt-5.4-mini",
+                "gpt-5.4-nano",
+                "gpt-5.3-codex-spark",
+                "gpt-5.3-codex",
+                "gpt-5.2",
+                "gpt-5.2-codex",
+                "gpt-5.1",
+                "gpt-5.1-codex-max",
+                "gpt-5.1-codex",
+                "gpt-5.1-codex-mini",
+                "gpt-5",
+                "gpt-5-codex",
+                "gpt-5-nano",
+                "grok-build-0.1",
+                "grok-4.6",
+                "grok-4.5",
+                "muse-spark-1.2",
+                "muse-spark-1.2-contributor-free",
+                "gemini-3.7-flash",
+                "gemini-3.6-flash",
+                "gemini-3.5-flash",
+                "gemini-3.5-flash-lite",
+                "gemini-3.1-pro",
+                "gemini-3-flash",
+            ],
+            "protocols": {
+                "deepseek-v4-pro": "openai",
+                "deepseek-v4-flash": "openai",
+                "glm-5.2": "openai",
+                "glm-5.1": "openai",
+                "glm-5": "openai",
+                "minimax-m3": "openai",
+                "minimax-m2.7": "openai",
+                "minimax-m2.5": "openai",
+                "kimi-k3": "openai",
+                "kimi-k2.7-code": "openai",
+                "kimi-k2.6": "openai",
+                "kimi-k2.5": "openai",
+                "big-pickle": "openai",
+                "mimo-v2.5-free": "openai",
+                "ling-3.0-flash-fin-free": "openai",
+                "nemotron-3-ultra-free": "openai",
+                "nemotron-3.5-lightning-free": "openai",
+                "laguna-s-2.1-free": "openai",
+                "claude-sonnet-5": "anthropic",
+                "claude-sonnet-4-6": "anthropic",
+                "claude-sonnet-4-5": "anthropic",
+                "claude-sonnet-4": "anthropic",
+                "claude-opus-5": "anthropic",
+                "claude-opus-4-8": "anthropic",
+                "claude-opus-4-7": "anthropic",
+                "claude-opus-4-6": "anthropic",
+                "claude-opus-4-5": "anthropic",
+                "claude-haiku-4-5": "anthropic",
+                "claude-fable-5": "anthropic",
+                "qwen3.6-plus": "anthropic",
+                "qwen3.5-plus": "anthropic",
+                "gpt-5.6-sol": "openai_responses",
+                "gpt-5.6-terra": "openai_responses",
+                "gpt-5.6-luna": "openai_responses",
+                "gpt-5.5": "openai_responses",
+                "gpt-5.5-pro": "openai_responses",
+                "gpt-5.4": "openai_responses",
+                "gpt-5.4-pro": "openai_responses",
+                "gpt-5.4-mini": "openai_responses",
+                "gpt-5.4-nano": "openai_responses",
+                "gpt-5.3-codex-spark": "openai_responses",
+                "gpt-5.3-codex": "openai_responses",
+                "gpt-5.2": "openai_responses",
+                "gpt-5.2-codex": "openai_responses",
+                "gpt-5.1": "openai_responses",
+                "gpt-5.1-codex-max": "openai_responses",
+                "gpt-5.1-codex": "openai_responses",
+                "gpt-5.1-codex-mini": "openai_responses",
+                "gpt-5": "openai_responses",
+                "gpt-5-codex": "openai_responses",
+                "gpt-5-nano": "openai_responses",
+                "grok-build-0.1": "openai_responses",
+                "grok-4.6": "openai_responses",
+                "grok-4.5": "openai_responses",
+                "muse-spark-1.2": "openai_responses",
+                "muse-spark-1.2-contributor-free": "openai_responses",
+                "gemini-3.7-flash": "google",
+                "gemini-3.6-flash": "google",
+                "gemini-3.5-flash": "google",
+                "gemini-3.5-flash-lite": "google",
+                "gemini-3.1-pro": "google",
+                "gemini-3-flash": "google",
+            },
+            "default_model": "deepseek-v4-pro",
+            "params": {"temperature": 0.1, "top_p": 0.2, "max_tokens": 32768},
+            "price_per_million_tokens": {
+                "deepseek-v4-pro": {"input": 1.32, "output": 3.96},
+                "deepseek-v4-flash": {"input": 0.44, "output": 1.32},
+                "glm-5.2": {"input": 1.4, "output": 4.4},
+                "glm-5.1": {"input": 1.4, "output": 4.4},
+                "glm-5": {"input": 1.0, "output": 3.2},
+                "minimax-m3": {"input": 0.3, "output": 1.2},
+                "minimax-m2.7": {"input": 0.3, "output": 1.2},
+                "minimax-m2.5": {"input": 0.3, "output": 1.2},
+                "kimi-k3": {"input": 3.0, "output": 15.0},
+                "kimi-k2.7-code": {"input": 0.95, "output": 4.0},
+                "kimi-k2.6": {"input": 0.95, "output": 4.0},
+                "kimi-k2.5": {"input": 0.6, "output": 3.0},
+                "big-pickle": {"input": 0.0, "output": 0.0},
+                "mimo-v2.5-free": {"input": 0.0, "output": 0.0},
+                "ling-3.0-flash-fin-free": {"input": 0.0, "output": 0.0},
+                "nemotron-3-ultra-free": {"input": 0.0, "output": 0.0},
+                "nemotron-3.5-lightning-free": {"input": 0.0, "output": 0.0},
+                "laguna-s-2.1-free": {"input": 0.0, "output": 0.0},
                 "claude-sonnet-5": {"input": 2.0, "output": 10.0},
+                "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+                "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
+                "claude-sonnet-4": {"input": 3.0, "output": 15.0},
+                "claude-opus-5": {"input": 5.0, "output": 25.0},
+                "claude-opus-4-8": {"input": 5.0, "output": 25.0},
+                "claude-opus-4-7": {"input": 5.0, "output": 25.0},
+                "claude-opus-4-6": {"input": 5.0, "output": 25.0},
+                "claude-opus-4-5": {"input": 5.0, "output": 25.0},
+                "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+                "claude-fable-5": {"input": 10.0, "output": 50.0},
+                "qwen3.6-plus": {"input": 0.5, "output": 3.0},
+                "qwen3.5-plus": {"input": 0.2, "output": 1.2},
+                "gpt-5.6-sol": {"input": 2.0, "output": 10.0},
+                "gpt-5.6-terra": {"input": 2.0, "output": 12.0},
+                "gpt-5.6-luna": {"input": 0.2, "output": 1.2},
+                "gpt-5.5": {"input": 5.0, "output": 30.0},
+                "gpt-5.5-pro": {"input": 30.0, "output": 180.0},
+                "gpt-5.4": {"input": 2.5, "output": 15.0},
+                "gpt-5.4-pro": {"input": 30.0, "output": 180.0},
+                "gpt-5.4-mini": {"input": 0.75, "output": 4.5},
+                "gpt-5.4-nano": {"input": 0.2, "output": 1.25},
+                "gpt-5.3-codex-spark": {"input": 1.75, "output": 14.0},
+                "gpt-5.3-codex": {"input": 1.75, "output": 14.0},
+                "gpt-5.2": {"input": 1.75, "output": 14.0},
+                "gpt-5.2-codex": {"input": 1.75, "output": 14.0},
+                "gpt-5.1": {"input": 1.07, "output": 8.5},
+                "gpt-5.1-codex-max": {"input": 1.25, "output": 10.0},
+                "gpt-5.1-codex": {"input": 1.07, "output": 8.5},
+                "gpt-5.1-codex-mini": {"input": 0.25, "output": 2.0},
+                "gpt-5": {"input": 1.07, "output": 8.5},
+                "gpt-5-codex": {"input": 1.07, "output": 8.5},
+                "gpt-5-nano": {"input": 0.05, "output": 0.4},
+                "grok-build-0.1": {"input": 1.0, "output": 2.0},
+                "grok-4.6": {"input": 2.0, "output": 6.0},
+                "grok-4.5": {"input": 2.0, "output": 6.0},
+                "muse-spark-1.2": {"input": 1.25, "output": 4.25},
+                "muse-spark-1.2-contributor-free": {"input": 0.0, "output": 0.0},
+                "gemini-3.7-flash": {"input": 1.5, "output": 7.5},
+                "gemini-3.6-flash": {"input": 1.5, "output": 7.5},
+                "gemini-3.5-flash": {"input": 1.5, "output": 9.0},
+                "gemini-3.5-flash-lite": {"input": 0.3, "output": 2.5},
+                "gemini-3.1-pro": {"input": 2.0, "output": 12.0},
+                "gemini-3-flash": {"input": 0.5, "output": 3.0},
             },
         },
     }
@@ -108,8 +333,8 @@ _SUPPORTED_PLATFORMS = _load_ai_models()
 # ── 模型别名（opus / sonnet / haiku → 平台具体模型）──
 _MODEL_ALIASES: Dict[str, Dict[str, str]] = {
     "anthropic": {
-        "opus": "claude-opus-4-8",
-        "sonnet": "claude-sonnet-4-6",
+        "opus": "claude-opus-5",
+        "sonnet": "claude-sonnet-5",
         "haiku": "claude-haiku-4-5",
     },
 }
@@ -124,6 +349,75 @@ def resolve_model_alias(platform: str, model: str) -> str:
     if key in alias_map:
         return alias_map[key]
     return model
+
+
+def resolve_model_protocol(platform: str, model: str) -> str:
+    """解析模型使用的流式协议：openai / anthropic / openai_responses / google。
+
+    三级回退：
+      1. models.json 中该平台 protocols 映射的逐模型标注（zen 等网关平台）
+      2. 平台级 stream_format（所有平台都有，是权威字段）
+      3. 模型名前缀推断（claude-* → anthropic），未知 → openai
+    """
+    _KNOWN_PROTOCOLS = ("openai", "anthropic", "openai_responses", "google")
+    plat_info = _SUPPORTED_PLATFORMS.get(platform or "", {})
+    if model:
+        protocols = plat_info.get("protocols") or {}
+        if isinstance(protocols, dict) and model in protocols:
+            p = protocols.get(model)
+            if p in _KNOWN_PROTOCOLS:
+                return p
+    sf = plat_info.get("stream_format")
+    if sf in _KNOWN_PROTOCOLS:
+        return sf
+    if model and model.strip().lower().startswith("claude-"):
+        return "anthropic"
+    return "openai"
+
+
+def is_model_free(platform: str, model: str) -> bool:
+    """判断模型是否免费：price_per_million_tokens 中 input/output 均为 0 视为免费。
+
+    未收录价格或非数字时返回 False（保守：不标免费）。
+    """
+    plat_info = _SUPPORTED_PLATFORMS.get(platform or "", {})
+    price_map = plat_info.get("price_per_million_tokens") or {}
+    if not isinstance(price_map, dict):
+        return False
+    price = price_map.get(model)
+    if not isinstance(price, dict):
+        return False
+    try:
+        inp = float(price.get("input", 0) or 0)
+        outp = float(price.get("output", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return inp == 0.0 and outp == 0.0
+
+
+# ── OpenCode Zen 生态兼容：复用 opencode 已登录的 zen 凭据 ──
+def load_zen_key_from_opencode() -> Optional[str]:
+    """从 OpenCode 的 auth.json 读取 Zen API Key（`opencode auth login zen` 写入）。
+
+    路径：$XDG_DATA_HOME/opencode/auth.json（默认 ~/.local/share/opencode/auth.json）
+    结构：{"zen": {"type": "api", "key": "sk-..."}}
+    读取失败/缺失返回 None。
+    """
+    try:
+        data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+        auth_path = os.path.join(data_home, "opencode", "auth.json")
+        if not os.path.exists(auth_path):
+            return None
+        with open(auth_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        zen = data.get("zen") or {}
+        if isinstance(zen, dict):
+            key = zen.get("key")
+            if isinstance(key, str) and key.strip():
+                return key.strip()
+    except Exception:
+        pass
+    return None
 
 
 # ── API Key 简单混淆（防意外明文泄露，非加密）──
@@ -216,10 +510,21 @@ def _setup_key_conf_interactive(lang: str = "chinese") -> dict:
     if not key:
         return {}
 
-    # 选择模型
+    # 选择模型（标签带协议与免费标记，如 big-pickle (openai) 免费 / claude-sonnet-5 (anthropic)）
+    model_labels = []
+    model_value = {}
+    for _m in info["models"]:
+        _label = f"{_m} ({resolve_model_protocol(platform, _m)})"
+        if is_model_free(platform, _m):
+            _label += " 免费"
+        model_labels.append(_label)
+        model_value[_label] = _m
+    _default_label = f"{info['default_model']} ({resolve_model_protocol(platform, info['default_model'])})"
+    if is_model_free(platform, info["default_model"]):
+        _default_label += " 免费"
     model_prompt = f"选择模型（默认 {info['default_model']}）" if lang == "chinese" else f"Select model (default: {info['default_model']})"
-    model_choice = select_option(model_prompt, info["models"], default=info["default_model"], lang=lang)
-    model = model_choice if model_choice else info["default_model"]
+    model_choice = select_option(model_prompt, model_labels, default=_default_label, lang=lang)
+    model = model_value.get(model_choice) or info["default_model"]
 
     # 参数（可选自定义）
     params = dict(info["params"])

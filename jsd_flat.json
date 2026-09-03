@@ -1,0 +1,7 @@
+{
+	"status": 400,
+	"message": "Bad Request.",
+	"links": {
+		"documentation": "https://www.jsdelivr.com/docs/data.jsdelivr.com"
+	}
+}

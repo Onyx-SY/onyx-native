@@ -465,11 +465,13 @@ def _run_doctor(ctx: Dict[str, Any]) -> None:
 
     try:
         from bin.ai_cmd import load_key_conf
+        from bin.ai_lib.config import resolve_model_protocol as _resolve_protocol
         conf = load_key_conf()
         if conf and conf.get("api_key"):
             plat = conf.get("platform", "?")
             model = conf.get("model", "未设置")
-            _item(True, "AI 密钥", f"平台={plat} 模型={model}")
+            proto = _resolve_protocol(plat, model)
+            _item(True, "AI 密钥", f"平台={plat} 模型={model} 协议={proto}")
         else:
             _item(False, "AI 密钥", "未配置（运行 ai 命令引导配置）")
     except Exception as e:

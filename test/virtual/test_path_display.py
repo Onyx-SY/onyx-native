@@ -23,6 +23,7 @@ if _ONYX_DIR not in sys.path:
     sys.path.insert(0, _ONYX_DIR)
 
 import bin.ai_cmd as m  # noqa: E402
+import bin.ai_lib.memory_tools as mt  # noqa: E402
 from bin.ai_lib.ui import render_tool_table  # noqa: E402
 
 
@@ -73,8 +74,8 @@ class TestToolTableParams(unittest.TestCase):
 class TestMemorySearchPathNotTruncated(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="onyx_test_path_display_")
-        self._old_home = os.environ.get("HOME")
-        os.environ["HOME"] = self.home
+        self._old_mem_home = mt._MEM_HOME
+        mt.set_memory_home(self.home)
         base = os.path.join(self.home, ".ai_s")
         os.makedirs(os.path.join(base, "library"), exist_ok=True)
         self.u = "abc-def-123"
@@ -85,10 +86,7 @@ class TestMemorySearchPathNotTruncated(unittest.TestCase):
     def tearDown(self):
         import shutil
         shutil.rmtree(self.home)
-        if self._old_home is None:
-            os.environ.pop("HOME", None)
-        else:
-            os.environ["HOME"] = self._old_home
+        mt.set_memory_home(self._old_mem_home)
         m._MEMORY_QUERY_CACHE.clear()
 
     def test_memory_search_returns_full_path(self):

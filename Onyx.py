@@ -2541,6 +2541,7 @@ BUILTIN_COMMANDS: Dict[str, Callable[[List[str], str], None]] = {
     # 基础TBS命令
     "clear": handle_clear,
     "pwd": handle_pwd,
+    "cd": handle_cd,
     "exit": handle_exit,
     "refresh": lambda cmd_parts, req_id: executor.submit(
         lambda: generate_tool_alias_commands(str(uuid.uuid4())), req_id

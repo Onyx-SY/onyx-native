@@ -610,6 +610,7 @@ def _sync_cwd_from_shell(log_info_func=None, request_id: str = None, cmd_type: s
                 pass  # resolve_path 模块不可用时退化为无边界检查
 
             if current_cwd != shell_cwd:
+                os.environ['OLDPWD'] = current_cwd  # shell 内 cd 同步到 Python 时维护 OLDPWD，保证 cd - 可用
                 os.chdir(shell_cwd)
                 # 失效 exe 模块的 CWD 缓存，防止 _get_cwd_cached 读到旧值
                 try:

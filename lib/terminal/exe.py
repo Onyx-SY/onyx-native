@@ -629,6 +629,12 @@ class PersistentShell:
 
             fd_stdin = sys.stdin.fileno()
 
+            # 命令执行前无条件刷新 PTY 尺寸：
+            # 提示符期间 resize 终端不会触发本函数的 SIGWINCH handler，
+            # 不在此刷新会导致 TUI 按旧尺寸绘制（形变/错位）。
+            if not is_windows:
+                update_pty_size(self.master_fd)
+
             # 排空 PTY 残留输出（单次 drain，无 sleep — PTY 已就绪时 drain 为 O(1)）
             self._drain_output()
             _echo_pending = True  # 需要跳过 shell 回显的命令文本
@@ -641,6 +647,19 @@ class PersistentShell:
             except OSError as e:
                 debug_log(f"Failed to write: {e}", 'error')
                 return -1, full_raw_output
+
+            def _emit(_b: bytes):
+                """把 PTY 原始字节直接写终端（保留 CRLF；避免 UTF-8 往返损坏）。"""
+                _buf = getattr(sys.stdout, 'buffer', None)
+                try:
+                    if _buf is not None:
+                        _buf.write(_b)
+                        _buf.flush()
+                    else:
+                        sys.stdout.write(_b.decode('utf-8', errors='replace'))
+                        sys.stdout.flush()
+                except Exception:
+                    pass
 
             while True:
                 if not is_windows and self.master_fd is not None:
@@ -686,6 +705,7 @@ class PersistentShell:
                     full_raw_output += text
 
                     # 跳过 shell 回显的命令文本（仅匹配首部，不吞 TUI 输出）
+                    _echo_was_active = _echo_pending
                     if _echo_pending:
                         # TUI 程序可能长时间输出无 \n 字节（如全屏控制码），
                         # 超时 200ms 则视为已过 echo 阶段，直接转发全部累积数据
@@ -722,11 +742,9 @@ class PersistentShell:
                             debug_log(f"PS1 done marker, exit={return_code}")
                             before_marker = text[:done_match.start()]
                             if before_marker:
-                                clean = before_marker.replace('\r\n', '\n')
-                                sys.stdout.write(clean)
-                                sys.stdout.flush()
+                                _emit(before_marker.encode('utf-8', errors='replace'))
                                 if output_buffer is not None:
-                                    output_buffer.append(clean)
+                                    output_buffer.append(before_marker.replace('\r\n', '\n'))
                             break
 
                     # ── 不再使用 fallback prompt pattern 检测 ──
@@ -736,12 +754,12 @@ class PersistentShell:
                     # 直通直到用户 Ctrl+C 或程序自己退出（产生 PTY EOF）。
                     # 只有 shell 的 PS1（__DONE__:exit_code）才是命令完成的可靠信号。
 
-                    # Real-time output forwarding
-                    clean = text.replace('\r\n', '\n')
-                    sys.stdout.write(clean)
-                    sys.stdout.flush()
+                    # Real-time output forwarding —— 原样写原始字节：
+                    # 不改写 CRLF（改写依赖终端 ONLCR，OPOST 关闭时换行不回车 → TUI 形变），
+                    # 也不做 decode/encode 往返（避免跨 4096 边界截断的多字节 UTF-8 被破坏）。
+                    _emit(text.encode('utf-8', errors='replace') if _echo_was_active else data)
                     if output_buffer is not None:
-                        output_buffer.append(clean)
+                        output_buffer.append(text.replace('\r\n', '\n'))
 
                 # --- Forward stdin to PTY (for TUI programs) ---
                 if stdin_data is not None and len(stdin_data) > 0:
@@ -942,6 +960,9 @@ class PersistentShell:
                             struct.pack('HHHH', rows, cols, 0, 0))
             except Exception:
                 pass
+        # 同步全局记录：避免 update_pty_size 误判"尺寸未变"而跳过刷新
+        global _current_pty_size
+        _current_pty_size = (rows, cols)
         # 预热 shell 二进制到 page cache，加速 os.execvpe()
         try:
             with open(self.shell, 'rb') as _f:
@@ -955,6 +976,12 @@ class PersistentShell:
             try:
                 os.close(master_fd)
                 os.setsid()
+                # 建立控制终端（真 tty 语义：作业控制 / tcsetpgrp / Ctrl+Z）
+                if HAVE_FCNTL_TERMIOS:
+                    try:
+                        fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+                    except Exception:
+                        pass
                 os.dup2(slave_fd, 0)
                 os.dup2(slave_fd, 1)
                 os.dup2(slave_fd, 2)
@@ -965,8 +992,9 @@ class PersistentShell:
 
                 env = os.environ.copy()
                 env['TERM'] = env.get('TERM', 'xterm-256color')
-                env['LINES'] = str(rows)
-                env['COLUMNS'] = str(cols)
+                # 不导出 LINES/COLUMNS：真实 tty 下二者是 shell 变量、不导出。
+                # 导出会让 ncurses（use_env 默认开）优先用 env 而非 TIOCGWINSZ，
+                # resize 后即拿到过期尺寸 → 形变。
                 env['PS1'] = f'{self._done_marker}:$?\\n'
                 env['PROMPT'] = '$P$G'
                 # For zsh compatibility: disable prompt and other features

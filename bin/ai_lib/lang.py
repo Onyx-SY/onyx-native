@@ -11,11 +11,11 @@ from typing import Dict
 def get_lang_text(lang: str) -> Dict[str, str]:
     if lang == "english":
         return {
-            "param_error": "Missing parameter! Usage:\n  ai [options] <question>\nOptions:\n  -cmd true/false  Auto-execute commands (default: true)\n  -t <text>       Input long text\n  -f <file>       Load file content\n  -key <32-bit key>  Set AI license key (adv mode only)\n  -c switch/list/new  Chat memory management\n  --debug         Enable debug mode (default: false)",
+            "param_error": "Missing parameter! Usage:\n  ai [options] <question>\nOptions:\n  -cmd true/false  Auto-execute commands (default: true)\n  -t <text>       Input long text\n  -f <file>       Load file content\n  -key <API key>     Set API key for current platform\n  -c switch/list/new  Chat memory management\n  --debug         Enable debug mode (default: false)",
             "text_usage": "Usage: ai -t <text_content> (e.g. ai -t Explain nmap -sV)",
             "file_usage": "Usage: ai -f <file_path> (e.g. ai -f ./scan.log)",
             "cmd_option_usage": "Invalid -cmd option! Must be 'true' or 'false'",
-            "key_format_error": "❌ Invalid key format! Must be 32-character string",
+            "key_usage": "Usage: ai -key <API key> — set API key for current platform",
             "sandbox_block": "Sandbox blocked: Path not allowed → {}",
             "file_not_exist": "File not exists: {}",
             "file_no_perm": "No read permission: {}",
@@ -60,7 +60,7 @@ def get_lang_text(lang: str) -> Dict[str, str]:
             "cache_save_success": "✅ AI commands saved to cache: {}",
             "license_valid": "✅ AI license verified successfully",
             "license_invalid": "❌ Invalid AI license",
-            "key_set_success": "✅ AI license key set successfully",
+            "key_set_success": "✅ AI API key set successfully",
             "server_url_info": "Server URL: {}",
             "ai_ask": "🤔 AI Question:",
             "chat_list_header": "📋 Available chat memories:",
@@ -139,11 +139,11 @@ def get_lang_text(lang: str) -> Dict[str, str]:
             "time_off": "⏱️ Timing display OFF",
         }
     return {
-            "param_error": "缺少参数！用法：\n  ai [选项] <问题>\n选项：\n  -cmd true/false  命令自动执行（默认：true）\n  -t <文本>       输入长文本\n  -f <文件>       加载文件内容\n  -key <32位密钥>  快速设置AI许可证密钥（仅adv模式）\n  -c switch/list/new  聊天记忆管理\n  --debug         启用调试模式（默认：false）",
+            "param_error": "缺少参数！用法：\n  ai [选项] <问题>\n选项：\n  -cmd true/false  命令自动执行（默认：true）\n  -t <文本>       输入长文本\n  -f <文件>       加载文件内容\n  -key <API Key>   快速设置当前平台 API Key\n  -c switch/list/new  聊天记忆管理\n  --debug         启用调试模式（默认：false）",
             "text_usage": "用法：ai -t <文本内容>（例：ai -t 解释nmap -sV参数）",
             "file_usage": "用法：ai -f <文件路径>（例：ai -f ./scan.log）",
             "cmd_option_usage": "无效的 -cmd 选项！必须是 'true' 或 'false'",
-            "key_format_error": "❌ 密钥格式错误！必须是32位字符串",
+            "key_usage": "用法：ai -key <API Key> — 设置当前 AI 平台的 API Key",
             "sandbox_block": "沙箱拦截：路径不允许 → {}",
             "file_not_exist": "文件不存在：{}",
             "file_no_perm": "无读取权限：{}",
@@ -188,7 +188,7 @@ def get_lang_text(lang: str) -> Dict[str, str]:
             "cache_save_success": "✅ AI命令已保存到缓存：{}",
             "license_valid": "✅ AI许可证验证成功",
             "license_invalid": "❌ 无效的AI许可证",
-            "key_set_success": "✅ AI许可证密钥设置成功",
+            "key_set_success": "✅ AI API Key 设置成功",
             "server_url_info": "服务器地址：{}",
             "ai_ask": "🤔 AI 询问：",
             "chat_list_header": "📋 可用的聊天记忆：",

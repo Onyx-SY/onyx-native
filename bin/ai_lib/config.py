@@ -20,7 +20,10 @@ from .ui import select_option, text_input as ui_text_input
 # ── 核心路径配置 ──
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 USER = os.getlogin() if hasattr(os, "getlogin") else os.getenv("USER", "default")
-USER_HOME_DIR = os.path.join(ROOT_DIR, "root") if USER == "root" else os.path.join(ROOT_DIR, "home", USER)
+# 运行时 $HOME 优先（Onyx 沙箱开=虚拟 home / 关=OS 真实 home，AI 配置读/写必须跟随同一 home）；
+# 缺失时回退到按代码位置推导的静态 home（模块独立运行场景）
+_STATIC_USER_HOME_DIR = os.path.join(ROOT_DIR, "root") if USER == "root" else os.path.join(ROOT_DIR, "home", USER)
+USER_HOME_DIR = os.environ.get("HOME") or _STATIC_USER_HOME_DIR
 LANGUAGE_CONFIG_PATH = os.path.join(USER_HOME_DIR, ".config", "onyx", "language")
 help_info_path = os.path.join(ROOT_DIR, "onyx", "bin", "help", "help_info.json")
 onyx_config_path = os.path.join(ROOT_DIR, "onyx", "etc", "config.json")
@@ -30,6 +33,29 @@ KEY_CONF_PATH = os.path.join(USER_HOME_DIR, ".config", "onyx", "ai", "key.json")
 KEY_CONF_LEGACY_PATH = os.path.join(USER_HOME_DIR, ".config", "onyx", "ai", "key.conf")
 MOOD_PATH = os.path.join(USER_HOME_DIR, ".ai_s", "mood.json")
 SERVER_URL_FILE = os.path.join(ROOT_DIR, "onyx", "etc", ".url")
+
+
+def sync_home(home: Optional[str] = None) -> None:
+    """把 AI 配置相关路径常量重绑到运行时用户主目录。
+
+    Onyx 沙箱开：HOME = 虚拟 home；沙箱关（真实根模式）：HOME = OS 真实 home。
+    模块常量在 import 时用代码位置/静态用户名推导，可能与运行时 HOME 不一致，
+    导致 key.json 等配置“写一个路径、读另一个路径”。AI 会话入口调用本函数后，
+    所有 load/save 使用同一份运行时 home 下的文件。
+    """
+    global USER_HOME_DIR, LANGUAGE_CONFIG_PATH, AI_KEY_DIR
+    global AI_KEY_PATH, KEY_CONF_PATH, KEY_CONF_LEGACY_PATH, MOOD_PATH
+    home = home or os.environ.get("HOME") or USER_HOME_DIR
+    if not home:
+        return
+    USER_HOME_DIR = home
+    LANGUAGE_CONFIG_PATH = os.path.join(home, ".config", "onyx", "language")
+    AI_KEY_DIR = os.path.join(home, ".config", "onyx", "ai")
+    AI_KEY_PATH = os.path.join(AI_KEY_DIR, "key.key")
+    KEY_CONF_PATH = os.path.join(AI_KEY_DIR, "key.json")
+    KEY_CONF_LEGACY_PATH = os.path.join(AI_KEY_DIR, "key.conf")
+    MOOD_PATH = os.path.join(home, ".ai_s", "mood.json")
+
 
 # 延迟初始化
 AI_KEY = None
@@ -652,8 +678,6 @@ def get_prompt_text(lang: str) -> Dict[str, str]:
             "request_failed": "Request failed: {}",
             "parse_response_failed": "Parse response failed: {}",
             "unknown_error": "Unknown error: {}",
-            "only_adv_mode_key": "Only adv mode can use -key parameter",
-            "incorrect_adv_password": "Incorrect adv password",
         }
     return {
         "no_key_found": "⚠️ 未找到AI许可证密钥",
@@ -683,8 +707,6 @@ def get_prompt_text(lang: str) -> Dict[str, str]:
         "request_failed": "请求失败：{}",
         "parse_response_failed": "解析响应失败：{}",
         "unknown_error": "未知错误：{}",
-        "only_adv_mode_key": "仅adv模式可使用 -key 参数",
-        "incorrect_adv_password": "adv密码错误",
     }
 
 # -------------------------- 许可证验证 --------------------------

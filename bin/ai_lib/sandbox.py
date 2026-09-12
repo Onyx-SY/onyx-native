@@ -131,6 +131,30 @@ def get_root() -> Optional[str]:
     return _root
 
 
+def is_sandbox_enabled(onyx_module=None) -> bool:
+    """AI 虚拟沙盒总开关，跟随 Onyx 的 manage set sandbox。
+
+    - 读取 onyx_module._SANDBOX_ENABLED（Onyx 启动时从 etc/onyx/sandbox 加载；
+      False = OS 真实根模式，AI 虚拟根应设为文件系统根 /）
+    - 宿主缺失时默认 True（保持旧行为 / 安全优先）
+    """
+    if onyx_module is not None:
+        v = getattr(onyx_module, "_SANDBOX_ENABLED", None)
+        if isinstance(v, bool):
+            return v
+    return True
+
+
+def _is_fs_root(path: Optional[str]) -> bool:
+    """路径是否为文件系统根（真实根模式：虚拟根 == 真实根，等同无沙盒限制）。"""
+    if not path:
+        return False
+    try:
+        return os.path.realpath(os.path.normpath(path)) == os.path.realpath(os.path.abspath(os.sep))
+    except Exception:
+        return False
+
+
 # ────────────────── 判定 ──────────────────
 
 def is_within(phys_path: str) -> bool:
@@ -143,6 +167,9 @@ def is_within(phys_path: str) -> bool:
     if not root:
         return True
     root = os.path.realpath(root)
+    # 真实根模式（沙箱关 → 虚拟根 = 文件系统根）：任何真实路径都在范围内
+    if _is_fs_root(root):
+        return True
     try:
         # realpath 不要求路径存在：非存在路径也会解析已存在的符号链接前缀，
         # 封死「工作区内 symlink → 外部」逃逸（exists() 检查会跟随链接，
@@ -182,6 +209,8 @@ def resolve(vpath: str) -> str:
     if not vpath:
         return vpath
 
+    fs_root = _is_fs_root(_root)
+
     # ~ 映射到用户主目录
     if vpath == "~":
         joined = os.path.join(_user_home or os.path.expanduser("~"), "")
@@ -196,8 +225,9 @@ def resolve(vpath: str) -> str:
         rel = vpath.lstrip("/")
         joined = os.path.join(_root, rel) if rel else _root
     # 相对路径（x、./x、../x）→ 以 cwd 为基准
+    # 真实根模式：以进程真实 cwd 为基准（与 Onyx/RunCommand 的 shell 语义一致）
     else:
-        joined = os.path.join(_root, vpath)
+        joined = os.path.abspath(vpath) if fs_root else os.path.join(_root, vpath)
 
     norm = os.path.normpath(joined)
     if not is_within(norm):
@@ -243,6 +273,9 @@ def display(phys_path: str) -> str:
     """
     if _root is None:
         return phys_path
+    # 真实根模式：路径本就是真实路径，直接返回（不做虚拟化，避免与命令输出分裂）
+    if _is_fs_root(_root):
+        return phys_path
     try:
         p = os.path.normpath(os.path.abspath(phys_path))
     except Exception:
@@ -273,6 +306,9 @@ def display_text(text: str) -> str:
     """
     root = _root
     if not root or not text:
+        return text
+    # 真实根模式：输出已是真实路径，原样返回（不把 home 改写为 ~，保持与命令输出一致）
+    if _is_fs_root(root):
         return text
     root = os.path.realpath(root)
     home = os.path.realpath(_user_home) if _user_home else None

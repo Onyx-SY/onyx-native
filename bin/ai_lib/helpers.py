@@ -238,12 +238,12 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
             except Exception as e:
                 return ("error", lang_text["file_read_fail"].format(str(e)[:20]), None, auto_exec, new_key, None, None, mode, times)
         elif arg == "-key":
-            if i + 1 >= len(ai_args):
-                return ("error", lang_text["key_format_error"], None, auto_exec, new_key, None, None, mode, times)
-            new_key = ai_args[i+1].strip()
-            if len(new_key) != 32:
-                return ("error", lang_text["key_format_error"], None, auto_exec, new_key, None, None, mode, times)
-            i += 2
+            # ai -key <API Key>：快速设置当前 AI 平台的 API Key（写入 key.json）。
+            # 旧语义是 32 位许可证密钥（仅 adv 模式可用），已随直连平台配置废弃。
+            key_val = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else None
+            if not key_val:
+                return ("error", lang_text["key_usage"], None, auto_exec, new_key, None, None, mode, times)
+            return ("key_only", "", None, auto_exec, key_val, None, None, mode, times)
         elif arg in ("new", "switch", "list"):
             chat_action = arg
             if arg in ("new", "switch"):

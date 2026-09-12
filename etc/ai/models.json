@@ -357,10 +357,11 @@
       "google": "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse"
     },
     "supports_prompt_cache": false,
-    "_note": "OpenCode Zen 网关（opencode.ai/zen）统一平台：62 个模型按各自协议自动路由（选模型时标签显示协议，端点见 protocol_api_urls）。密钥：https://opencode.ai/zen 控制台获取，或复用 opencode 登录（~/.local/share/opencode/auth.json → zen.api.key，Onyx 会自动兜底读取）。4 种原生协议：openai→/v1/chat/completions、anthropic→/v1/messages、openai_responses→/v1/responses、google→/v1/models/{model}:streamGenerateContent?alt=sse。免费模型（价格 0/0，选模型时带『免费』标记）：big-pickle / laguna-s-2.1-free / mimo-v2.5-free / ling-3.0-flash-fin-free / nemotron-3-ultra-free / nemotron-3.5-lightning-free / muse-spark-1.2-contributor-free。付费模型需 Zen 账号绑定支付方式（否则 401 CreditsError）；deepseek-v4-flash-free 上游暂不可用未收录。修改模型：models 增删 id、protocols 标注协议、price_per_million_tokens 维护价格（USD/1M tokens）。",
+    "_note": "OpenCode Zen 网关（opencode.ai/zen）统一平台：62 个模型按各自协议自动路由（选模型时标签显示协议，端点见 protocol_api_urls）。密钥：https://opencode.ai/zen 控制台获取，或复用 opencode 登录（~/.local/share/opencode/auth.json → zen.api.key，Onyx 会自动兜底读取）。4 种原生协议：openai→/v1/chat/completions、anthropic→/v1/messages、openai_responses→/v1/responses、google→/v1/models/{model}:streamGenerateContent?alt=sse。免费模型（价格 0/0，选模型时带『免费』标记）：big-pickle / laguna-s-2.1-free / mimo-v2.5-free / ling-3.0-flash-fin-free / nemotron-3-ultra-free / nemotron-3.5-lightning-free / muse-spark-1.2-contributor-free。注意：muse-spark-1.2-contributor-free 在部分地区返回 403 RegionError，若调用 403 请换 big-pickle / laguna-s-2.1-free 等免费模型。付费模型需 Zen 账号绑定支付方式（否则 401 CreditsError）。修改模型：models 增删 id、protocols 标注协议、price_per_million_tokens 维护价格（USD/1M tokens）。",
     "models": [
       "deepseek-v4-pro",
       "deepseek-v4-flash",
+      "deepseek-v4-flash-free",
       "glm-5.2",
       "glm-5.1",
       "glm-5",

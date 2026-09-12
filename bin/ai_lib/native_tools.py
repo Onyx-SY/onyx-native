@@ -682,7 +682,7 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
 
     native.append(_make_tool(
         "MemoryRead",
-        "读取记忆文件，支持行号范围。路径示例：chat/first、library/<uuid>、onyx_ai。结果自动缓存。",
+        "读取记忆文件，支持行号范围（严格校验）。路径示例：chat/first、library/<uuid>、onyx_ai。支持多记忆根；超长自动截断并给续读 range。结果按文件指纹缓存。",
         {
             "path": {"type": "string", "description": "记忆路径（如 chat/first, library/<uuid>, onyx_ai）"},
             "range": {"type": "string", "description": "可选行号范围，如 '1-30' 或 '50'（单行）"},
@@ -691,12 +691,13 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
     ))
     native.append(_make_tool(
         "MemorySearch",
-        "在记忆文件中搜关键字，默认显示匹配行上下各 3 行（含行号）；uuid 指定单个会话或 all 全范围。结果自动缓存。",
+        "在记忆文件中搜关键字，默认显示匹配行上下各 3 行（含行号）；uuid 指定单个会话或 all；scope 限定范围（all=library+chat+onyx_ai，不含 tmp/time/projects）。结果按 TTL 缓存。",
         {
             "pattern": {"type": "string", "description": "搜索关键字或正则"},
             "uuid": {"type": "string", "description": "目标记忆 UUID，或 'all' 表示全范围查找（默认 all）"},
             "context": {"type": "integer", "description": "可选上下文行数，默认 3"},
             "-i": {"type": "boolean", "description": "可选忽略大小写，默认 true"},
+            "scope": {"type": "string", "description": "可选搜索范围：all(默认, library+chat+onyx_ai) / library / chat"},
         },
         ["pattern"], PERM_READONLY,
     ))

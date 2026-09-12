@@ -235,7 +235,7 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "MemoryRead":     lambda p: _exec_memory_read(p.get("path", ""), p.get("range")),
         "MemorySearch":   lambda p: _exec_memory_search(
             p.get("pattern", ""), p.get("uuid", "all"), int(p.get("context", 3)),
-            p.get("-i", True)),
+            p.get("-i", True), p.get("scope", "all")),
         "UndoLastEdit":   lambda p: _exec_undo_last_edit(),
 
         # ── 目录浏览工具 ──

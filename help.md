@@ -13,17 +13,6 @@ User keyboard input → Onyx (Input + Parse + Security + AI) → PTY → bash/zs
 用户键盘输入 → Onyx（输入 + 解析 + 安全 + AI）→ PTY → bash/zsh → 内核
 ```
 
-## Quick Start / 快速开始
-
-```bash
-pip install prompt_toolkit colorama rich requests msgpack
-
-python3 Onyx.py          # Start terminal / 启动终端
-python3 Main.py -l       # Login mode / 登录模式
-python3 cmd.py "ls -la"  # Single execution / 单次执行
-python3 man.py           # Rebuild man index / 重建 man 命令索引
-```
-
 ## Builtin Commands / 内建命令
 
 | Command / 命令 | Description / 说明 |

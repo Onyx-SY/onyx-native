@@ -11,8 +11,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from bin.ai_cmd import _resolve_memory_path  # noqa: E402
-import bin.ai_cmd as ai_cmd_mod  # noqa: E402
+import bin.ai_lib.memory_tools as mt  # noqa: E402
+from bin.ai_lib.memory_tools import _resolve_memory_path  # noqa: E402
 
 
 class TestMemoryPathHardening(unittest.TestCase):
@@ -20,11 +20,11 @@ class TestMemoryPathHardening(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="onyx_mem_")
         os.makedirs(os.path.join(self.tmp, ".ai_s", "library"), exist_ok=True)
         os.makedirs(os.path.join(self.tmp, ".ai_s", "chat"), exist_ok=True)
-        self._orig_home = ai_cmd_mod.get_memory_home
-        ai_cmd_mod.get_memory_home = lambda: self.tmp
+        self._orig_home = mt._MEM_HOME
+        mt.set_memory_home(self.tmp)
 
     def tearDown(self):
-        ai_cmd_mod.get_memory_home = self._orig_home
+        mt.set_memory_home(self._orig_home)
         shutil.rmtree(self.tmp)
 
     def test_library_uuid_ok(self):

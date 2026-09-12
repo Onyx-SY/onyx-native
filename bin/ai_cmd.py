@@ -94,7 +94,7 @@ from .ai_lib.tools import code_analysis  # 代码分析工具（py_*/Lsp*，独�
 # 提取至 bin/ai_lib/memory_tools.py；记忆根 set/get_memory_home 亦在其中）
 from .ai_lib.memory_tools import (
     set_memory_home, get_memory_home,
-    _resolve_memory_path, _get_file_uuid, _cache_query,
+    _resolve_memory_path, _get_file_uuid, _cache_query, _MEMORY_QUERY_CACHE,
     _exec_memory_read, _exec_memory_search,
     _exec_remember_session, _exec_forget_session,
     _exec_search_library, _exec_list_hippocampus,
@@ -804,6 +804,13 @@ def handle_ai(
 
     if user_home_dir is None:
         user_home_dir = USER_HOME_DIR
+    # ── AI 配置路径统一跟随运行时 home（沙箱开=虚拟 home / 关=OS 真实 home）──
+    # 否则 key.json 等配置 load/save 因模块静态路径与运行时 HOME 分裂而“改了不生效”
+    try:
+        from .ai_lib.config import sync_home as _sync_home
+        _sync_home(user_home_dir)
+    except Exception:
+        pass
     # ── 记忆根目录：记忆模式（global=user_home_dir / project=<项目专属文件夹>）──
     # memory_base_dir 由 ai_interactive 传入；为空则跟随 user_home_dir（兼容旧调用）
     _mem_home = memory_base_dir or user_home_dir
@@ -819,9 +826,13 @@ def handle_ai(
     except Exception:
         pass
     # ── AI 虚拟沙盒：把虚拟根 / 映射为当前 cwd（AI 文件工具路径拦截 + 输出脱敏）──
-    # 每次 AI 会话启动时初始化，工具执行前路径自动经 sandbox.resolve() 转换。
+    # 总开关跟随 Onyx 沙箱配置（manage set sandbox true/false → etc/onyx/sandbox）：
+    #   开启 → 虚拟根 = 启动时 cwd（现状）；
+    #   关闭（OS 真实根模式）→ 虚拟根 = 文件系统根 /，绝对路径直通、相对路径以真实
+    #   cwd 为基准，AI 文件工具与 RunCommand 使用同一套真实路径，不再分裂。
     try:
-        sandbox.init(os.getcwd(), user_home_dir or USER_HOME_DIR)
+        _sb_root = os.getcwd() if sandbox.is_sandbox_enabled(onyx_module) else os.path.abspath(os.sep)
+        sandbox.init(_sb_root, user_home_dir or USER_HOME_DIR)
     except Exception:
         pass
     if AI_TOOL_OUTPUT_CACHE is None:
@@ -1305,12 +1316,33 @@ def handle_ai(
             return
     
     if content_type == "key_only":
-        result = call_ai_api_sse(question="", new_key=new_key, debug_mode=debug_mode, onyx_module=onyx_module, user_home_dir=user_home_dir)
-        if "error" in result:
-            console.print(f"❌ {result['error']}", style="bold red")
-        elif "key_set" in result and result["key_set"]:
-            console.print(lang_text["key_set_success"], style="bold green")
+        # ai -key <API Key>：快速设置当前 AI 平台的 API Key（写入 key.json，混淆存储）。
+        # 旧语义：32 位许可证密钥 + 许可证服务器验证（call_ai_api_sse + new_key），已废弃。
+        if not new_key:
+            console.print(f"❌ {lang_text.get('key_usage', 'Usage: ai -key <API Key>')}", style="bold red")
             return
+        conf = load_key_conf()
+        if not conf or not conf.get("platform"):
+            console.print(_mcp_t(
+                "[yellow]未检测到平台配置：请先运行 ai 完成初始化向导，或在 ai 内用 /config 选择平台后再执行 ai -key。[/]",
+                "[yellow]No platform configured: run ai to finish the setup wizard, or use /config inside ai first.[/]",
+            ), style="bold yellow")
+            return
+        platform = conf.get("platform")
+        plat_name = _SUPPORTED_PLATFORMS.get(platform, {}).get("name", platform)
+        try:
+            save_key_conf(
+                platform,
+                new_key,
+                model=conf.get("model", "") or "",
+                params=conf.get("params") or {},
+                api_url=conf.get("api_url", "") or "",
+            )
+            key_len = len(new_key)
+            masked = new_key[:4] + "*" * 8 + new_key[-4:] if key_len > 16 else new_key[:4] + "****"
+            console.print(f"[green]{plat_name} — {lang_text['key_set_success']}: {masked}[/]")
+        except Exception as e:
+            console.print(f"❌ 保存 API Key 失败: {e}", style="bold red")
         return
     
     if content_type == "error":

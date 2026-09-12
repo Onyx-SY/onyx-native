@@ -2164,6 +2164,24 @@ class SmartCompleter(Completer):
 
         start_pos = -len(current_word)
 
+        # ── 变量补全：$VAR / ${VAR}（cmd 终端 %VAR%）──
+        # 变量后已跟路径（如 $HOME/foo）时交回路径补全引擎处理（其内部会展开已完整变量）
+        try:
+            if current_word.startswith('$'):
+                _sigil = 2 if current_word.startswith('${') else 1
+                _var_prefix = current_word[_sigil:]
+                if _var_prefix and ('/' in _var_prefix or '\\' in _var_prefix or '}' in _var_prefix):
+                    pass  # 非纯变量词 → 走原有路径/其它上下文
+                else:
+                    return "variable", current_word, start_pos, ""
+            elif current_word.startswith('%') and '%' not in current_word[1:]:
+                # cmd 终端 %VAR% 风格
+                _term_type_var = get_detected_terminal_type()
+                if _term_type_var == 'cmd':
+                    return "variable", current_word, start_pos, ""
+        except Exception:
+            pass
+
         text_before_word_in_segment = segment_text[:word_start_in_segment].strip()
         if not text_before_word_in_segment:
             # 检测路径形式的首个词：./a.sh, /usr/bin/foo, ~/script, ../tool 等
@@ -2371,6 +2389,44 @@ class SmartCompleter(Completer):
                         return sub
         return subcmds[0] if subcmds else None
 
+    def _complete_variable(self, current_word: str, start_pos: int):
+        """环境变量补全：$VAR / ${VAR}（cmd 终端 %VAR%）"""
+        if not current_word:
+            return
+        try:
+            keys = list(dict.fromkeys(list(os.environ.keys()) + ["PWD", "OLDPWD", "HOME", "PATH", "USER", "SHELL", "TERM"]))
+        except Exception:
+            keys = []
+        if not keys:
+            return
+        keys.sort(key=str.lower)
+        term_type = get_detected_terminal_type()
+        if term_type == 'cmd':
+            # cmd 终端 %VAR% 风格（检测阶段已保证无内嵌 %）
+            prefix = current_word[1:]
+            for name in keys:
+                if name.lower().startswith(prefix.lower()):
+                    yield Completion(
+                        f"%{name}%",
+                        start_position=start_pos,
+                        display_meta="env",
+                        style=META_COLORS.get('variable', 'ansicyan'),
+                    )
+            return
+        # posix 风格 $VAR / ${VAR}
+        brace = current_word.startswith('${')
+        sigil_len = 2 if brace else 1
+        prefix = current_word[sigil_len:]
+        for name in keys:
+            if name.lower().startswith(prefix.lower()):
+                text = f"${{{name}}}" if brace else f"${name}"
+                yield Completion(
+                    text,
+                    start_position=start_pos,
+                    display_meta="env",
+                    style=META_COLORS.get('variable', 'ansicyan'),
+                )
+
     def get_completions(self, document: Document, complete_event):
         self._update_cmd_list_order()
         ctx_type, current_word, start_pos, cmd = self._get_context(document)
@@ -2390,6 +2446,8 @@ class SmartCompleter(Completer):
             yield from self._complete_option(current_word, start_pos, cmd, document)
         elif ctx_type == "argument":
             yield from self._complete_argument(current_word, start_pos, cmd, document)
+        elif ctx_type == "variable":
+            yield from self._complete_variable(current_word, start_pos)
         elif ctx_type == "code" and self._multiline_completer:
             # 使用多行补全器提供代码补全
             yield from self._multiline_completer.get_completions(document, complete_event)

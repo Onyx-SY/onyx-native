@@ -18,7 +18,8 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Callable, List, Tuple
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.key_binding.defaults import load_key_bindings
@@ -36,10 +37,11 @@ console = Console()
 
 _SLASH_COMMANDS_CN: Dict[str, str] = {
     "/help":   "显示此帮助",
-    "/plus":   "🧠 一次性高级模式：下次任务先跑 4 步思考（分析→模拟→自检→规划），用完自动失效",
+    "/plus":   "🧠 一次性高级模式：下次任务先跑 4 步思考（侦察→方案→验证→规划），用完自动失效",
     "/exit":   "退出 AI 对话，返回 shell",
     "/quit":   "同 /exit",
     "/clear":  "清屏",
+    "/cd":     "切换 AI 会话工作目录 (cd <路径>，支持 ~ / - / 相对/绝对)",
     "/quiet":  "切换精简模式（隐藏 token/耗时等辅助信息）",
     "/tokens": "显示当前会话累计 token 用量",
     "/stats":  "显示会话统计（轮数、token、耗时）",
@@ -67,10 +69,11 @@ _SLASH_COMMANDS_CN: Dict[str, str] = {
 
 _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/help":   "Show this help",
-    "/plus":   "🧠 One-shot advanced mode: next task runs 4-step thinking (analyze→simulate→self-check→plan), auto-expires",
+    "/plus":   "🧠 One-shot advanced mode: next task runs 4-step thinking (recon→approach→verify→plan), auto-expires",
     "/exit":   "Exit AI mode, return to shell",
     "/quit":   "Same as /exit",
     "/clear":  "Clear screen",
+    "/cd":     "Switch AI session working directory (cd <path>, supports ~ / - / relative / absolute)",
     "/quiet":  "Toggle quiet mode (hide token/timing info)",
     "/tokens": "Show cumulative token usage for this session",
     "/stats":  "Show session statistics (rounds, tokens, time)",
@@ -161,18 +164,109 @@ _AI_PROMPT_STYLE = PromptStyle.from_dict({
     "prompt": "bold cyan",
     "separator": "dim",
     "toolbar": "reverse bold",
+    # 补全菜单样式（对齐 lib/terminal 的 comp_style）
+    "completion-menu": "bg:#2d2d30 #cccccc",
+    "completion-menu.completion": "bg:#2d2d30 #aaaaaa",
+    "completion-menu.completion.current": "bg:#007acc #ffffff",
+    "completion-menu.meta.completion": "bg:#3d3d40 #888888",
+    "completion-menu.meta.completion.current": "bg:#007acc #cccccc",
+    "scrollbar.background": "bg:#1e1e1e",
+    "scrollbar.button": "bg:#555555",
 })
 
 
+# ─────────────────── 输入补全（复合：斜杠命令 + 文件系统路径） ───────────────────
+
+def _current_word(text: str) -> str:
+    """取光标前最后一个以空白分隔的词（用于补全）。"""
+    i = len(text)
+    while i > 0 and not text[i - 1].isspace():
+        i -= 1
+    return text[i:]
+
+
+def _iter_path_completions(word: str):
+    """文件系统路径补全：目录追加 '/'，隐藏项仅在前缀为 '.' 时给出。"""
+    if not word:
+        return
+    expanded = os.path.expanduser(word) if word.startswith("~") else word
+    if expanded.endswith(os.sep) or expanded.endswith("/"):
+        search_dir, base = expanded, ""
+    else:
+        search_dir, base = os.path.split(expanded)
+    if not search_dir:
+        search_dir = "."
+    try:
+        entries = os.listdir(search_dir)
+    except OSError:
+        return
+    # 回写前缀：把展开后的目录部分映射回用户原始输入形式（保留 ~ 写法）
+    if word.endswith("/"):
+        pass
+    show_hidden = base.startswith(".")
+    for name in sorted(entries):
+        if not show_hidden and name.startswith("."):
+            continue
+        if not name.startswith(base):
+            continue
+        full = os.path.join(search_dir, name)
+        is_dir = os.path.isdir(full)
+        yield Completion(
+            name + ("/" if is_dir else ""),
+            start_position=-len(base),
+            display=name + ("/" if is_dir else ""),
+            display_meta="dir" if is_dir else "",
+        )
+
+
+class _AICompleter(Completer):
+    """AI REPL 复合补全器：`/` 开头补斜杠命令，否则补文件系统路径。
+
+    对齐 lib/terminal 的 SmartCompleter 效果（命令 + 路径统一补全、带 meta 描述）。
+    """
+
+    # 参数位置需要路径补全的斜杠命令
+    _PATH_ARG_CMDS = ("/cd", "/resume", "/save", "/export", "/load")
+
+    def __init__(self, slash_cmds: Dict[str, str], lang: str = "chinese"):
+        self._slash = slash_cmds
+        self._lang = lang
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        stripped = text.lstrip()
+        word = _current_word(text)
+
+        # 1) 斜杠命令头补全（尚未输入空格时）
+        if stripped.startswith("/") and " " not in stripped:
+            for cmd, desc in self._slash.items():
+                if cmd.startswith(stripped):
+                    yield Completion(cmd, start_position=-len(word),
+                                     display=cmd, display_meta=desc)
+            return
+
+        # 2) 斜杠命令的参数位置（如 /cd <path>）→ 路径补全
+        if stripped.startswith("/") and " " in stripped:
+            head = stripped.split(None, 1)[0]
+            if head in self._PATH_ARG_CMDS:
+                yield from _iter_path_completions(word)
+            return
+
+        # 3) 普通输入：词看起来像路径才补（对齐 shell 的路径补全）
+        if word and (word.startswith(("~", ".", "/")) or "/" in word):
+            yield from _iter_path_completions(word)
+
+
 def _make_ai_prompt() -> str:
-    """生成 AI 模式提示符（显示当前目录）"""
+    """生成 AI 模式提示符（显示当前目录，多行格式防止长路径挤占输入区）"""
     try:
         cwd = os.getcwd()
         home = os.path.expanduser("~")
         shown = cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd
     except Exception:
         shown = "."
-    return f"{shown} 🤖 > "
+    # 多行格式：路径占一行，提示符占一行，防止长路径占满输入区
+    return f"{shown}\n🤖 > "
 
 
 # ─────────────────────────────── 配置写入辅助 ───────────────────────────────
@@ -180,7 +274,11 @@ def _make_ai_prompt() -> str:
 def _save_conf(conf: dict, ctx: Dict[str, Any]) -> None:
     """将配置 dict 完整写入 key.conf（api_key 混淆存储）"""
     import json as _json
-    key_conf_path = os.path.join(ctx["user_home_dir"], ".config", "onyx", "ai", "key.json")
+    # 写路径必须与 load_key_conf 读路径同源：config.KEY_CONF_PATH 已在会话入口经
+    # sync_home 重绑到运行时 home（不能用 ctx["user_home_dir"] 手拼——沙箱开关会
+    # 改变会话传入 home，导致写/读分裂、改动不生效）
+    from bin.ai_lib import config as _cfg
+    key_conf_path = _cfg.KEY_CONF_PATH
     os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
     # 混淆 api_key 后再写入
     write_conf = dict(conf)
@@ -576,8 +674,8 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         console.print(
             "[bold cyan]🧠 Plus 高级模式已开启[/]\n" if lang == "chinese" else
             "[bold cyan]🧠 Plus advanced mode enabled[/]\n"
-            "[dim]" + ("下一次任务将先运行「分析→模拟→自检→规划」4 步思考（当前系列最贵模型），完成后自动恢复普通模式。[/]" if lang == "chinese" else
-            "The next task will run the 4-step thinking pipeline (Analyze → Simulate → Self-check → Plan) with the most expensive model, then auto-revert to normal mode.[/]")
+            "[dim]" + ("下一次任务将先运行「侦察→方案→验证→规划」4 步思考（当前系列最贵模型），完成后自动恢复普通模式。[/]" if lang == "chinese" else
+            "The next task will run the 4-step thinking pipeline (Recon → Approach → Verify → Plan) with the most expensive model, then auto-revert to normal mode.[/]")
         )
         return True
 
@@ -587,6 +685,62 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
 
     elif cmd == "/clear":
         console.clear()
+        return True
+
+    elif cmd == "/cd":
+        # ── /cd [路径]：切换 AI 会话工作目录（沙盒根随之移动，会话结束自动恢复）──
+        # 无参 → 显示当前目录；- → OLDPWD；~ / 相对 / 绝对 → 解析为物理路径
+        arg = " ".join(args).strip()
+        home = ctx.get("user_home_dir") or os.path.expanduser("~")
+        if not arg:
+            try:
+                from bin.ai_lib import sandbox as _sb_show
+                shown = _sb_show.display(os.getcwd()) if _sb_show.is_active() else os.getcwd()
+            except Exception:
+                shown = os.getcwd()
+            console.print(f"[dim]{'当前目录' if lang == 'chinese' else 'Current dir'}: {shown}[/]")
+            return True
+        if arg == "-":
+            target = os.environ.get("OLDPWD", "")
+            if not target:
+                console.print("[yellow]OLDPWD 未设置，无法 cd -[/]" if lang == "chinese" else "[yellow]OLDPWD not set, cannot cd -[/]")
+                return True
+        elif arg == "~":
+            target = home
+        elif arg.startswith("~/"):
+            target = os.path.join(home, arg[2:])
+        else:
+            target = os.path.abspath(os.path.expanduser(arg))
+        if not os.path.isdir(target):
+            console.print(f"[red]{'目录不存在' if lang == 'chinese' else 'No such directory'}: {arg}[/]")
+            return True
+        old = os.getcwd()
+        try:
+            os.chdir(target)
+        except OSError as e:
+            console.print(f"[red]{e}[/]")
+            return True
+        os.environ["OLDPWD"] = old
+        os.environ["PWD"] = target
+        ctx["cwd"] = target
+        # 重定 AI 沙盒根（会话内显式切换；退出会话由 session_guard 恢复原 cwd）
+        try:
+            from bin.ai_lib import sandbox as _sb_cd
+            _sb_cd.init(target, home, force=True)
+        except Exception:
+            pass
+        # 失效持久 shell 的 CWD 缓存，保证后续命令跟随新目录
+        try:
+            from lib.terminal.exe import invalidate_cwd_cache
+            invalidate_cwd_cache()
+        except Exception:
+            pass
+        try:
+            from bin.ai_lib import sandbox as _sb_cd2
+            shown = _sb_cd2.display(target) if _sb_cd2.is_active() else target
+        except Exception:
+            shown = target
+        console.print(f"[green]📂 {shown}[/]")
         return True
 
     elif cmd == "/key":
@@ -1254,6 +1408,15 @@ def ai_interactive_session(
     if global_config:
         current_lang = global_config.get("display_info", {}).get("language", {}).get("current", "chinese")
 
+    # ── AI 配置路径统一跟随运行时 home（与 load_key_conf 读路径同源）──
+    # 否则沙箱关（OS 真实 home）时 /config /model /param 写入 ctx home 而读取仍在
+    # 模块静态推导的虚拟 home → 平台/模型改动不生效。
+    try:
+        from bin.ai_lib.config import sync_home as _sync_home
+        _sync_home(user_home_dir)
+    except Exception:
+        pass
+
     # ── Key 检查 ──
     key = _check_and_setup_key(user_home_dir, current_lang)
     if key is None:
@@ -1294,9 +1457,12 @@ def ai_interactive_session(
     console.print(f"[dim]   记忆根目录: {mem_root}[/]" if current_lang == "chinese" else f"[dim]   Memory root: {mem_root}[/]")
 
     # ── / 指令补全 ──
-    # 补全列表 = 命令表 key（与 _dispatch_slash 分支一一对应，不会出现"补全里有但实际不存在"的命令）
-    slash_cmds = sorted((_SLASH_COMMANDS_CN if current_lang == "chinese" else _SLASH_COMMANDS_EN).keys())
-    completer = WordCompleter(slash_cmds, ignore_case=True, sentence=True)
+    # 复合补全器：`/` 开头补斜杠命令（带描述 meta），否则补文件系统路径
+    # （对齐 lib/terminal 的 SmartCompleter 效果）。
+    completer = _AICompleter(
+        _SLASH_COMMANDS_CN if current_lang == "chinese" else _SLASH_COMMANDS_EN,
+        current_lang,
+    )
 
     # ── 输入历史（FileHistory 持久化到用户配置目录，跨会话保留）──
     _hist_dir = os.path.join(user_home_dir, ".config", "onyx", "ai")
@@ -1405,6 +1571,12 @@ def ai_interactive_session(
             multiline=True,
             key_bindings=_key_bindings,
             bottom_toolbar=_bottom_toolbar,
+            # ── 输入体验对齐 lib/terminal ──
+            auto_suggest=AutoSuggestFromHistory(),   # 幽灵补全（历史虚影）
+            complete_while_typing=True,              # 边打字边补全
+            complete_in_thread=True,                 # 补全不卡输入
+            reserve_space_for_menu=6,                # 补全菜单预留行
+            enable_history_search=True,              # 上下键按前缀过滤历史
         )
 
         # ── 粘贴合并探测会话：独立 app（DummyOutput 零渲染），共享主会话 input ──
@@ -1495,7 +1667,7 @@ def _call_ai_engine(
             ctx["plus_pending"] = False  # 一次性：立即消费，防连续任务都走 plus
             try:
                 from bin.ai_lib.plus import run_plus_think
-                console.print("[bold cyan]🧠 Plus 思考流水线运行中（分析→模拟→自检→规划）…[/]" if ctx.get("lang", "chinese") == "chinese" else "[bold cyan]🧠 Plus thinking pipeline running (analyze→simulate→self-check→plan)…[/]")
+                console.print("[bold cyan]🧠 Plus 思考流水线运行中（侦察→方案→验证→规划）…[/]" if ctx.get("lang", "chinese") == "chinese" else "[bold cyan]🧠 Plus thinking pipeline running (recon→approach→verify→plan)…[/]")
                 _plus_result = run_plus_think(
                     question,
                     _mem_base if ctx.get("memory_mode") == "project" else user_home_dir,
@@ -1504,6 +1676,15 @@ def _call_ai_engine(
                 if _plus_result.get("plan"):
                     _plus_think = _plus_result["plan"]
                     console.print("[bold green]🧠 Plus 思考完成，规划已注入干活阶段[/]" if ctx.get("lang", "chinese") == "chinese" else "[bold green]🧠 Plus thinking done, plan injected[/]")
+                    # 展示最终规划（透明可审，替代纯静默注入）
+                    try:
+                        console.print(Panel(
+                            Markdown(_plus_think),
+                            title=("🧠 Plus 执行规划" if ctx.get("lang", "chinese") == "chinese" else "🧠 Plus Plan"),
+                            border_style="cyan",
+                        ))
+                    except Exception:
+                        console.print(_plus_think)
                 else:
                     console.print("[yellow]⚠️ Plus 思考未产出规划，按普通模式继续[/]" if ctx.get("lang", "chinese") == "chinese" else "[yellow]⚠️ Plus produced no plan, continuing normal[/]")
             except Exception as e:

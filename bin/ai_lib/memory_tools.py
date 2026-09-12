@@ -9,7 +9,10 @@ MemoryRead / MemorySearch / remember / forget / memory / compact_stats
 storage / number_lines 保持延迟导入（与 ai_cmd 原行为一致）。
 """
 import os
+import re
 import json
+import time
+from collections import OrderedDict
 from typing import Callable, Optional
 
 from .i18n import _ as _i18n  # 双语文本（中英）
@@ -32,61 +35,135 @@ def get_memory_home() -> str:
     return _MEM_HOME or os.path.expanduser("~")
 
 
-# ── 记忆查询缓存（避免重复查询）──
-_MEMORY_QUERY_CACHE: dict[str, str] = {}
+# ── 记忆查询缓存（LRU；读缓存带文件指纹、搜索缓存带 TTL）──
+_MEMORY_QUERY_CACHE: "OrderedDict[str, tuple]" = OrderedDict()
 _MEMORY_CACHE_MAX = 50
+_MEMORY_SEARCH_TTL = 30.0  # 搜索缓存有效期（秒）
 
 
-def _cache_query(key: str, result: str) -> str:
-    """缓存查询结果。"""
-    global _MEMORY_QUERY_CACHE
-    if len(_MEMORY_QUERY_CACHE) >= _MEMORY_CACHE_MAX:
-        # 淘汰最旧的
-        old_key = next(iter(_MEMORY_QUERY_CACHE))
-        _MEMORY_QUERY_CACHE.pop(old_key, None)
-    _MEMORY_QUERY_CACHE[key] = result
+def _file_fingerprint(file_path: str):
+    """文件指纹 (mtime_ns, size)；取不到返回 None。"""
+    try:
+        st = os.stat(file_path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _cache_lookup(key: str):
+    """命中则刷新 LRU 顺序并返回条目 (kind, stamp, result)，否则 None。"""
+    entry = _MEMORY_QUERY_CACHE.get(key)
+    if entry is None:
+        return None
+    _MEMORY_QUERY_CACHE.move_to_end(key)
+    return entry
+
+
+def _cache_fresh(entry, fp=None) -> bool:
+    """条目是否有效：'fp' 比对文件指纹；'ttl' 比对过期时间。"""
+    kind, stamp, _res = entry
+    if kind == "fp":
+        return stamp is not None and stamp == fp
+    if kind == "ttl":
+        return time.time() < stamp
+    return False
+
+
+def _cache_store(key: str, kind: str, stamp, result: str) -> str:
+    """写入缓存（真 LRU：超限淘汰最久未用）。"""
+    _MEMORY_QUERY_CACHE[key] = (kind, stamp, result)
+    _MEMORY_QUERY_CACHE.move_to_end(key)
+    while len(_MEMORY_QUERY_CACHE) > _MEMORY_CACHE_MAX:
+        _MEMORY_QUERY_CACHE.popitem(last=False)
     return result
 
 
-def _resolve_memory_path(path: str) -> str:
-    """将记忆路径简写解析为完整文件路径。
+def _cache_query(key: str, result: str) -> str:
+    """兼容旧接口：按 TTL 写入缓存并返回结果。"""
+    return _cache_store(key, "ttl", time.time() + _MEMORY_SEARCH_TTL, result)
 
-    接受格式:
-      library/<uuid>       → ~/.ai_s/library/<uuid>.txt
-      library/<uuid>.txt   → ~/.ai_s/library/<uuid>.txt  (兼容旧格式)
-      chat/<name>          → ~/.ai_s/chat/<name>.json
-      onyx_ai              → ~/.ai_s/onyx_ai.md
-    记忆根跟随 get_memory_home()（project 模式 → ~/.ai_s/projects/<id>/）
 
-    边界守卫：任何路径（含 ../ 穿越与绝对路径）必须落在记忆根内，
-    越界抛 ValueError（防任意文件读取）。
+def _candidate_bases() -> list:
+    """返回所有已知记忆根下的 `.ai_s` 基目录（按优先级、去重）。
+
+    第 1 个 = 当前会话记忆根（handle_ai 注入）；
+    若当前根形如 `<X>/.ai_s/projects/<id>`，再补上祖先 `<X>/.ai_s`（global 根），
+    使 project 模式也能读到全局记忆。
     """
     home = get_memory_home()
-    base = os.path.join(home, ".ai_s")
+    bases: list = []
+    cur = os.path.normpath(os.path.join(home, ".ai_s"))
+    bases.append(cur)
+    parts = cur.split(os.sep)
+    for i, seg in enumerate(parts):
+        if seg == ".ai_s" and i + 1 < len(parts) and parts[i + 1] == "projects":
+            gbase = os.sep.join(parts[:i + 1])
+            if gbase and gbase not in bases:
+                bases.append(gbase)
+            break
+    return bases
+
+
+def _path_in_base(path: str, base: str) -> str:
+    """在指定记忆根 base 下，把简写 path 展开为具体文件路径。"""
     if path.startswith("chat/"):
         name = path[5:]
         if name.endswith(".json"):
             name = name[:-5]
-        _cand = os.path.join(base, "chat", name + ".json")
-    elif path.startswith("library/"):
+        return os.path.join(base, "chat", name + ".json")
+    if path.startswith("library/"):
         uuid_part = path[8:]
         if uuid_part.endswith(".txt"):
             uuid_part = uuid_part[:-4]
-        _cand = os.path.join(base, "library", uuid_part + ".txt")
-    elif path == "onyx_ai" or path == "onyx_ai.md":
-        _cand = os.path.join(base, "onyx_ai.md")
-    elif os.path.isabs(path):
-        _cand = path
-    else:
-        _cand = os.path.join(base, path)
+        return os.path.join(base, "library", uuid_part + ".txt")
+    if path in ("onyx_ai", "onyx_ai.md"):
+        return os.path.join(base, "onyx_ai.md")
+    if os.path.isabs(path):
+        return path
+    return os.path.join(base, path)
 
-    # ── 边界守卫：realpath 后必须在记忆根内，否则拒绝 ──
-    _base_real = os.path.realpath(base)
-    _norm = os.path.normpath(_cand)
-    _p_real = os.path.realpath(_norm) if os.path.exists(_norm) else os.path.abspath(_norm)
-    if _p_real == _base_real or _p_real.startswith(_base_real + os.sep):
-        return _norm
-    raise ValueError(f"⛔ 记忆路径越界: '{path}' 不在记忆根 {base} 内")
+
+def _inside_any_root(p: str, allowed) -> bool:
+    """p（abspath / realpath 任一形态）是否落在任一允许根内。"""
+    forms = {os.path.abspath(p), os.path.realpath(p)}
+    for a in allowed:
+        for c in forms:
+            if c == a or c.startswith(a + os.sep):
+                return True
+    return False
+
+
+def _resolve_memory_path(path: str) -> str:
+    """将记忆路径简写解析为完整文件路径（支持多记忆根）。
+
+    接受格式:
+      library/<uuid>       → <root>/.ai_s/library/<uuid>.txt
+      library/<uuid>.txt   → <root>/.ai_s/library/<uuid>.txt  (兼容旧格式)
+      chat/<name>          → <root>/.ai_s/chat/<name>.json
+      onyx_ai              → <root>/.ai_s/onyx_ai.md
+    依次在 _candidate_bases() 的各个记忆根中查找，返回**首个存在者**；
+    都不存在时返回首个合法候选（供 not-found 报错定位）。
+
+    边界守卫：任何路径（含 ../ 穿越与绝对路径）必须落在**任一记忆根**内，
+    越界抛 ValueError（防任意文件读取）。
+    """
+    bases = _candidate_bases()
+    allowed = []
+    for b in bases:
+        allowed.append(os.path.abspath(b))
+        allowed.append(os.path.realpath(b))
+
+    candidates = [os.path.normpath(_path_in_base(path, b)) for b in bases]
+    # 1) 首个"不越界且存在"的候选
+    for cand in candidates:
+        if _inside_any_root(cand, allowed) and os.path.exists(cand):
+            return cand
+    # 2) 都不存在：返回首个不越界候选（not-found 报错定位用）
+    for cand in candidates:
+        if _inside_any_root(cand, allowed):
+            return cand
+    # 3) 全部越界 → 拒绝
+    raise ValueError(f"⛔ 记忆路径越界: '{path}' 不在任何记忆根内（{', '.join(bases)}）")
 
 
 def _get_file_uuid(file_path: str) -> str:
@@ -110,97 +187,167 @@ def _get_file_uuid(file_path: str) -> str:
     return base
 
 
+_READ_BUDGET = 28000  # 单次返回的字符预算（超出则自截断并给续读指针）
+_RANGE_RE_LINE = re.compile(r"^\s*(\d+)\s*$")
+_RANGE_RE_SPAN = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+
+
+def _parse_range(range_str: str):
+    """严格解析 range：'N' 或 'A-B'。非法抛 ValueError（不再静默降级为全文）。"""
+    s = (range_str or "").strip()
+    m = _RANGE_RE_SPAN.match(s)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a < 1 or a > b:
+            raise ValueError(f"bad span: {s}")
+        return a, b
+    m = _RANGE_RE_LINE.match(s)
+    if m:
+        n = int(m.group(1))
+        if n < 1:
+            raise ValueError(f"bad line: {s}")
+        return n, n
+    raise ValueError(f"bad range: {s}")
+
+
+def _other_root_hint(path: str) -> str:
+    """未命中时，若其它记忆根存在同名文件，附上提示（帮助定位跨根记忆）。"""
+    try:
+        for b in _candidate_bases():
+            cand = os.path.normpath(_path_in_base(path, b))
+            if os.path.exists(cand):
+                return "\n" + _i18n("mem_other_root_hint", "bilingual", path=cand)
+    except Exception:
+        pass
+    return ""
+
+
 def _exec_memory_read(path: str, range_str: str = None) -> str:
-    """读取记忆文件，支持行号范围。返回带行号前缀的内容。"""
+    """读取记忆文件，支持行号范围。返回带行号前缀的内容。
+
+    - range 严格校验（非法明确报错，不再静默返回全文）
+    - 流式逐行读取（不全量 read + split）
+    - 超过字符预算时自截断，并给出「续读 range」指针
+    """
     try:
         file_path = _resolve_memory_path(path)
         if not os.path.exists(file_path):
-            return _i18n("mem_read_not_found", "bilingual", path=path, file_path=file_path)
+            return _i18n("mem_read_not_found", "bilingual", path=path,
+                         file_path=file_path) + _other_root_hint(path)
 
-        # 检查缓存
+        fp = _file_fingerprint(file_path)
         cache_key = f"read:{file_path}:{range_str or 'full'}"
-        if cache_key in _MEMORY_QUERY_CACHE:
-            return _MEMORY_QUERY_CACHE[cache_key] + "\n\n" + _i18n("cached_hint", "bilingual")
-
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-
-        all_lines = content.split("\n")
-        total_lines = len(all_lines)
-        start_line = 1
-        view_mode = "full"
+        entry = _cache_lookup(cache_key)
+        if entry and _cache_fresh(entry, fp):
+            return entry[2] + "\n\n" + _i18n("cached_hint", "bilingual")
 
         if range_str:
             try:
-                if "-" in range_str:
-                    start, end = map(int, range_str.split("-", 1))
-                    start_line = max(1, start)
-                    end_line = min(total_lines, end)
-                    selected = all_lines[start_line - 1:end_line]
-                    view_mode = f"range {start_line}-{end_line}"
-                else:
-                    line_no = int(range_str)
-                    start_line = max(1, min(line_no, total_lines))
-                    selected = [all_lines[start_line - 1]]
-                    view_mode = f"line {start_line}"
-            except (ValueError, IndexError):
-                selected = all_lines
+                start, end = _parse_range(range_str)
+            except ValueError:
+                return _i18n("mem_read_bad_range", "bilingual", value=range_str)
         else:
-            selected = all_lines
+            start, end = 1, None
 
-        # ── 添加行号（与 read_file 一致）──
         from lib.native_fs.panels import number_lines as _num_lines
-        raw = "\n".join(selected)
-        numbered = _num_lines(raw, start=start_line)
+        selected: list = []
+        total_lines = 0
+        used = 0
+        shown_end = start - 1
+        truncated = False
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f, 1):
+                total_lines = i
+                if i < start or (end is not None and i > end):
+                    continue
+                if truncated:
+                    continue
+                ln = line[:-1] if line.endswith("\n") else line
+                if used + len(ln) + 1 > _READ_BUDGET and selected:
+                    truncated = True
+                    continue
+                selected.append(ln)
+                used += len(ln) + 1
+                shown_end = i
 
-        # 不在此处截断 — AI 显式调用 MemoryRead 需要完整内容。
-        # 上层 _MAX_TOOL_OUTPUT (32KB) 统一切断，保证不撑爆上下文。
+        if not selected and total_lines > 0 and start > total_lines:
+            return _i18n("mem_read_out_of_range", "bilingual", start=start, total=total_lines)
+
+        view_mode = "full" if not range_str else (f"line {start}" if start == end else f"range {start}-{end}")
+        raw = "\n".join(selected)
+        numbered = _num_lines(raw, start=start) if selected else ""
         header = f"📄 `{path}` " + _i18n("mem_read_header", "bilingual", mode=view_mode, total=total_lines)
         result = f"{header}\n\n{numbered}"
-        return _cache_query(cache_key, result)
+        if truncated:
+            next_end = shown_end + 500
+            result += "\n\n" + _i18n("mem_read_more", "bilingual",
+                                     shown=f"{start}-{shown_end}", total=total_lines,
+                                     nxt=f"{shown_end + 1}-{next_end}")
+        return _cache_store(cache_key, "fp", fp, result)
     except Exception as e:
         return _i18n("mem_read_failed", "bilingual", err=e)
 
 
 def _exec_memory_search(pattern: str, uuid: str = "all", context: int = 3,
-                        case_insensitive: bool = True) -> str:
+                        case_insensitive: bool = True, scope: str = "all") -> str:
     """在记忆文件中搜索关键字。
 
-    uuid 参数：真实 UUID → 只搜 ~/.ai_s/library/<uuid>.txt；
-              'all'（默认）→ 全范围查找（chat/ + library/ + onyx_ai.md）。
-    本质是文件搜索：复用 grep 文件搜索逻辑（_run_grep_lines），结果带行号
-    （file:line:content）。
+    uuid 参数：真实 UUID → 只搜对应 library/<uuid>.txt（跨记忆根查找）；
+               'all'（默认）→ 按 scope 在语义范围内查找。
+    scope 参数（uuid='all' 时生效）：
+               'all'（默认）→ library/ + chat/ + onyx_ai.md
+               'library'     → 仅会话归档 library/
+               'chat'        → 仅对话 chat/
+    注意：'all' 只搜上述记忆内容，**不含** tmp/（AI 工作文件）、time/、projects/。
+    本质是文件搜索：复用 grep 文件搜索逻辑（_run_grep_lines），结果带行号。
     """
     try:
-        home = get_memory_home()
-        base = os.path.join(home, ".ai_s")
+        bases = _candidate_bases()
+        scope = (scope or "all").strip().lower()
+        if scope not in ("all", "library", "chat"):
+            scope = "all"
 
         # ── 解析 uuid → 搜索目标 ──
-        scope_label = uuid or "all"
         if uuid and uuid != "all":
             uuid_part = uuid
             if uuid_part.startswith("library/"):
                 uuid_part = uuid_part[8:]
             if uuid_part.endswith(".txt"):
                 uuid_part = uuid_part[:-4]
-            file_path = os.path.join(base, "library", uuid_part + ".txt")
-            # ── 边界守卫：uuid 含 ../ 或绝对路径时拒绝（防穿越）──
-            _base_real = os.path.realpath(base)
-            _fp_real = os.path.realpath(file_path) if os.path.exists(file_path) else os.path.abspath(file_path)
-            if not (_fp_real == _base_real or _fp_real.startswith(_base_real + os.sep)):
-                return _i18n("mem_search_uuid_missing", "bilingual", uuid=uuid, path=file_path)
-            if not os.path.exists(file_path):
-                return _i18n("mem_search_uuid_missing", "bilingual", uuid=uuid, path=file_path)
+            _bad = ("/" in uuid_part or "\\" in uuid_part
+                    or uuid_part in ("", ".", "..") or os.path.isabs(uuid_part))
+            if _bad:
+                return _i18n("mem_search_uuid_missing", "bilingual", uuid=uuid,
+                             path=os.path.join(bases[0], "library", uuid_part + ".txt"))
+            file_path = None
+            for b in bases:
+                cand = os.path.join(b, "library", uuid_part + ".txt")
+                if os.path.exists(cand):
+                    file_path = cand
+                    break
+            if file_path is None:
+                return _i18n("mem_search_uuid_missing", "bilingual", uuid=uuid,
+                             path=os.path.join(bases[0], "library", uuid_part + ".txt"))
             search_targets = [file_path]
+            scope_label = uuid_part
         else:
-            if not os.path.isdir(base):
-                return _i18n("mem_search_dir_missing", "bilingual", path=base)
-            search_targets = [base]
-            scope_label = "all"
+            want = {"all": ("library", "chat", "onyx_ai.md"),
+                    "library": ("library",),
+                    "chat": ("chat",)}[scope]
+            search_targets = []
+            for b in bases:
+                for item in want:
+                    p = os.path.join(b, item)
+                    if os.path.exists(p) and p not in search_targets:
+                        search_targets.append(p)
+            if not search_targets:
+                return _i18n("mem_search_dir_missing", "bilingual", path=bases[0])
+            scope_label = scope
 
         cache_key = f"search:{pattern}:{scope_label}:{context}:{case_insensitive}"
-        if cache_key in _MEMORY_QUERY_CACHE:
-            return _MEMORY_QUERY_CACHE[cache_key] + "\n\n" + _i18n("cached_hint", "bilingual")
+        entry = _cache_lookup(cache_key)
+        if entry and _cache_fresh(entry):
+            return entry[2] + "\n\n" + _i18n("cached_hint", "bilingual")
 
         # ── 复用文件搜索逻辑（grep -rn，结果含行号）──
         raw = _run_grep_lines(pattern, search_targets, context=context,
@@ -275,7 +422,8 @@ def _exec_memory_search(pattern: str, uuid: str = "all", context: int = 3,
 
         header = _i18n("mem_search_header", "bilingual", pattern=pattern,
                        scope=scope_label, ctx=context, files=len(groups))
-        return _cache_query(cache_key, f"{header}\n\n{formatted}")
+        return _cache_store(cache_key, "ttl", time.time() + _MEMORY_SEARCH_TTL,
+                            f"{header}\n\n{formatted}")
     except Exception as e:
         return _i18n("mem_search_failed", "bilingual", err=e)
 

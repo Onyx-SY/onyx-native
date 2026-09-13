@@ -8,28 +8,6 @@ if TYPE_CHECKING:
     from core.context import AppContext
 
 
-def handle_clear(cmd_parts: List[str], request_id: str) -> None:
-    """跨平台清屏"""
-    print('\033[2J\033[H', end='')
-    print('\033[3J\033[2J\033[H', end='')
-    from core.log_manager import log_info
-    log_info("Clear screen executed", request_id)
-
-
-def handle_pwd(cmd_parts: List[str], request_id: str) -> None:
-    """pwd 命令：AI 虚拟沙盒激活时显示虚拟根（隐藏真实 cwd），普通场景显示真实工作目录"""
-    # AI 虚拟沙盒激活 → 显示虚拟路径（cwd 映射为 /）
-    try:
-        from bin.ai_lib.sandbox import is_active, display
-        if is_active():
-            print(display(os.getcwd()))
-            return
-    except Exception:
-        pass
-    # 普通场景：保持原生行为
-    print(os.getcwd())
-
-
 def handle_exit(cmd_parts: List[str], request_id: str) -> None:
     """退出程序"""
     from core.context import get_ctx

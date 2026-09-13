@@ -71,7 +71,7 @@ EXPLORE_TOOL_WHITELIST: Tuple[str, ...] = (
 # 只读 git 工具 —— 规划/分析/测试需要了解仓库状态
 GIT_TOOL_WHITELIST: Tuple[str, ...] = ("GitStatus", "GitDiff", "GitLog", "GitBranch")
 # 命令执行工具 —— 所有类型通用：经 Onyx 安全管线执行（危险命令拒绝；
-# Onyx 内置命令如 exit/clear/ai 等不可用，防止子代理篡改 REPL 状态）
+# Onyx 内置命令如 exit/ai 等不可用，防止子代理篡改 REPL 状态）
 COMMAND_TOOL: Tuple[str, ...] = ("RunCommand",)
 # 联网工具 —— web_search_agent 专用（web_search 网络调研全能工具）
 WEB_TOOL_WHITELIST: Tuple[str, ...] = ("web_search",)
@@ -91,7 +91,7 @@ _ROLE_PROMPTS: Dict[str, str] = {
         "- Read-only file tools: get_file_info, read_file, glob_search, grep_search, "
         "search_file, ListDirectory, DirectoryTree. You may also run shell commands via RunCommand "
         "(through Onyx's security pipeline: dangerous commands and Onyx builtin commands like "
-        "exit/clear/ai are denied). You CANNOT modify files, use web tools, or ask the user questions.\n"
+        "exit/ai are denied). You CANNOT modify files, use web tools, or ask the user questions.\n"
         "- Investigate thoroughly but stay on task. Prefer file:line evidence over speculation.\n"
         "- When finished, end your reply with a concise summary under a Markdown heading:\n"
         "  ## Explore Summary\n"
@@ -105,7 +105,7 @@ _ROLE_PROMPTS: Dict[str, str] = {
         "- Read-only tools: get_file_info, read_file, glob_search, grep_search, search_file, "
         "ListDirectory, DirectoryTree, GitStatus, GitDiff, GitLog, GitBranch. You may also run shell "
         "commands via RunCommand (through Onyx's security pipeline: dangerous commands and Onyx "
-        "builtin commands like exit/clear/ai are denied). You CANNOT modify files, use web tools, "
+        "builtin commands like exit/ai are denied). You CANNOT modify files, use web tools, "
         "or ask the user questions.\n"
         "- Read the relevant code first to ground the plan in reality. Do not speculate.\n"
         "- When finished, end your reply with a concise plan under a Markdown heading:\n"
@@ -122,7 +122,7 @@ _ROLE_PROMPTS: Dict[str, str] = {
         "You CANNOT modify files, use web tools, or ask the user questions.\n"
         "- You may run safe analysis/lint commands via RunCommand (e.g. `python -m py_compile <file>`, "
         "`gofmt -l <dir>`, `git diff --check`) — commands go through the same security pipeline as the "
-        "main AI and are denied if dangerous; Onyx builtin commands (exit/clear/ai/...) are unavailable. "
+        "main AI and are denied if dangerous; Onyx builtin commands (exit/ai/...) are unavailable. "
         "Prefer read-only tools for exploration.\n"
         "- Find bugs, style issues, dead code, security smells. Report with file:line references.\n"
         "- When finished, end your reply with a concise report under a Markdown heading:\n"
@@ -139,7 +139,7 @@ _ROLE_PROMPTS: Dict[str, str] = {
         "You CANNOT modify files, use web tools, or ask the user questions.\n"
         "- Run tests via RunCommand (e.g. `pytest`, `go test ./...`, `npm test`) — commands go "
         "through the same security pipeline as the main AI and are denied if dangerous; Onyx builtin "
-        "commands (exit/clear/ai/...) are unavailable.\n"
+        "commands (exit/ai/...) are unavailable.\n"
         "- Diagnose failures by reading the error output and the relevant code; do not blindly retry.\n"
         "- When finished, end your reply with a concise report under a Markdown heading:\n"
         "  ## Test Summary\n"
@@ -152,7 +152,7 @@ _ROLE_PROMPTS: Dict[str, str] = {
         "- You are a **Web Search sub-agent** spawned by the main AI to research external topics on the web.\n"
         "- Tools: web_search (multi-engine mixed research, highly customizable; search/fetch/mixed modes), "
         "read-only file tools, and RunCommand (through Onyx's security pipeline; dangerous commands and "
-        "Onyx builtin commands like exit/clear/ai are denied). You CANNOT modify files or ask the user questions.\n"
+        "Onyx builtin commands like exit/ai are denied). You CANNOT modify files or ask the user questions.\n"
         "- Prefer web_search for research: pass multiple related queries to cover angles, restrict "
         "allowed_domains when appropriate, and set fetch_pages=true to pull page text for key results.\n"
         "- Cross-check important claims across at least two independent sources; cite URLs.\n"
@@ -168,7 +168,7 @@ _RUN_COMMAND_TOOL: Dict = {
     "type": "function",
     "function": {
         "name": "RunCommand",
-        "description": "Run a shell command through Onyx's security pipeline (same checks as the main AI; dangerous commands are denied, and Onyx builtin commands like exit/clear/ai are unavailable to subagents). Use for linters, analyzers, and test suites. Output and exit code are captured and returned.",
+        "description": "Run a shell command through Onyx's security pipeline (same checks as the main AI; dangerous commands are denied, and Onyx builtin commands like exit/ai are unavailable to subagents). Use for linters, analyzers, and test suites. Output and exit code are captured and returned.",
         "parameters": {
             "type": "object",
             "properties": {

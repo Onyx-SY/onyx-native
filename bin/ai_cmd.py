@@ -458,8 +458,8 @@ def build_subagent_blocked_commands(builtin_commands: Optional[Dict] = None,
                                     root_dir: str = None) -> set:
     """子代理禁用的内置命令集合：Onyx BUILTIN_COMMANDS + other_terminal_cmd.json + cd。
 
-    子代理只许执行真实系统/工具命令；内置命令（exit/clear/ai/manage/sado/source、
-    export/sudo/...、cd）会篡改 REPL 状态（退出、清屏、切目录、改环境、提权），
+    子代理只许执行真实系统/工具命令；内置命令（exit/ai/manage/sado/source、
+    export/sudo/...、cd）会篡改 REPL 状态（退出、切目录、改环境、提权），
     一律不暴露。root_dir 为 None 时跳过配置文件加载（调用方传 ROOT_DIR）。
     """
     _blocked: set = set()
@@ -862,7 +862,7 @@ def handle_ai(
     # ── 子代理命令执行器：经与主 AI 相同的安全管线（capture + parse_and_execute）──
     # 危险命令直接拒绝（子代理无法弹用户确认框）；全端子代理命令串行化防共享 PTY 输出交错。
     # 内置命令一律拒绝（见 build_subagent_blocked_commands）：子代理只许执行真实
-    # 系统/工具命令——Onyx 内置命令（exit/clear/ai/manage/sado/source 等）、
+    # 系统/工具命令——Onyx 内置命令（exit/ai/manage/sado/source 等）、
     # other_terminal_cmd.json（export/sudo/...）、shell 内置 cd（会改共享 shell CWD
     # 并同步回主会话），都不暴露给子代理。
     _subagent_blocked_cmds = build_subagent_blocked_commands(BUILTIN_COMMANDS, ROOT_DIR)

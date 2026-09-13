@@ -1,0 +1,64 @@
+{
+  "命令": {
+    "date": {
+      "Chinese": "用法：date [选项] [+格式]\n功能：显示或设置系统日期时间\n核心选项：-u（UTC）、-d（解析指定时间）、+%Y-%m-%d（格式化）、-s（设置时间）\n示例：date +\"%Y-%m-%d %H:%M:%S\" - 格式化输出当前时间\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: date [option] [+format]\nFunction: Display or set the system date and time\nCore options: -u (UTC), -d (parse given time), +%Y-%m-%d (format), -s (set time)\nExample: date +\"%Y-%m-%d %H:%M:%S\" - Formatted current time\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "uname": {
+      "Chinese": "用法：uname [选项]\n功能：显示系统/内核信息\n核心选项：-a（全部）、-r（内核版本）、-m（架构）、-n（主机名）、-s（内核名）\n示例：uname -a - 显示全部系统信息\n适配系统：Windows(Git Bash/WSL)/Linux/Termux（Windows 用 systeminfo）",
+      "English": "Usage: uname [option]\nFunction: Print system/kernel information\nCore options: -a (all), -r (kernel release), -m (machine), -n (nodename), -s (kernel name)\nExample: uname -a - Show all system info\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "whoami": {
+      "Chinese": "用法：whoami\n功能：显示当前有效用户名\n核心选项：无（Windows 下显示 域\\用户名）\n示例：whoami - 我是谁\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: whoami\nFunction: Print the current effective user name\nCore options: none (Windows shows domain\\user)\nExample: whoami - Who am I\nCompatible systems: Windows/Linux/Termux"
+    },
+    "id": {
+      "Chinese": "用法：id [选项] [用户]\n功能：显示用户/组的 UID、GID 与所属组\n核心选项：-u（仅 UID）、-g（仅 GID）、-G（所有组）、-n（显示名称）\n示例：id -u - 显示当前 UID\n适配系统：Linux/Termux（Windows 无内置）",
+      "English": "Usage: id [option] [user]\nFunction: Show UID, GID and group memberships\nCore options: -u (UID only), -g (GID only), -G (all groups), -n (names)\nExample: id -u - Show current UID\nCompatible systems: Linux/Termux"
+    },
+    "env": {
+      "Chinese": "用法：env [选项] [变量=值...] [命令]\n功能：查看环境变量或以修改后的环境运行命令\n核心选项：-i（清空环境）、-u（删除变量）、变量=值（临时设置）\n示例：env | grep PATH - 查看 PATH 变量\n适配系统：Windows(Git Bash/WSL)/Linux/Termux（Windows 用 set）",
+      "English": "Usage: env [option] [name=value...] [command]\nFunction: Show environment variables or run a command with modified env\nCore options: -i (empty env), -u (unset), name=value (temporary set)\nExample: env | grep PATH - Show PATH variable\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "df": {
+      "Chinese": "用法：df [选项] [路径]\n功能：查看文件系统磁盘空间使用情况\n核心选项：-h（人类可读）、-T（显示类型）、-i（inode）、-a（含伪文件系统）\n示例：df -h - 人类可读的磁盘占用\n适配系统：Windows(Git Bash/WSL)/Linux/Termux（Windows 用 wmic/Get-PSDrive）",
+      "English": "Usage: df [option] [path]\nFunction: Report file system disk space usage\nCore options: -h (human-readable), -T (type), -i (inodes), -a (all)\nExample: df -h - Human-readable disk usage\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "mount": {
+      "Chinese": "用法：mount [选项] [设备] [挂载点]\n功能：挂载文件系统/查看已挂载设备\n核心选项：-t（类型）、-o（挂载选项）、-a（按 fstab 全部挂载）、-r（只读）\n示例：mount | grep sd - 查看已挂载磁盘\n适配系统：Linux/Termux（通常需 root）",
+      "English": "Usage: mount [option] [device] [dir]\nFunction: Mount a filesystem / list mounted devices\nCore options: -t (type), -o (options), -a (mount all from fstab), -r (read-only)\nExample: mount | grep sd - List mounted disks\nCompatible systems: Linux/Termux (usually needs root)"
+    },
+    "umount": {
+      "Chinese": "用法：umount [选项] 设备/挂载点\n功能：卸载已挂载的文件系统\n核心选项：-l（延迟卸载）、-f（强制）、-t（类型）\n示例：umount /mnt/usb - 卸载 U 盘\n适配系统：Linux/Termux（通常需 root）",
+      "English": "Usage: umount [option] device/dir\nFunction: Unmount a filesystem\nCore options: -l (lazy), -f (force), -t (type)\nExample: umount /mnt/usb - Unmount USB drive\nCompatible systems: Linux/Termux (usually needs root)"
+    },
+    "lsblk": {
+      "Chinese": "用法：lsblk [选项]\n功能：以树状列出块设备及分区\n核心选项：-f（文件系统信息）、-a（全部）、-p（完整路径）、-o（指定列）\n示例：lsblk -f - 显示磁盘与文件系统\n适配系统：Linux/Termux",
+      "English": "Usage: lsblk [option]\nFunction: List block devices as a tree\nCore options: -f (filesystem info), -a (all), -p (full paths), -o (columns)\nExample: lsblk -f - Show disks and filesystems\nCompatible systems: Linux/Termux"
+    },
+    "lscpu": {
+      "Chinese": "用法：lscpu [选项]\n功能：显示 CPU 架构与核心信息\n核心选项：-e（可解析列表）、-p（并行）、-c（离线 CPU）\n示例：lscpu - 查看 CPU 型号与核心数\n适配系统：Linux/Termux（Windows 用 wmic cpu）",
+      "English": "Usage: lscpu [option]\nFunction: Display CPU architecture and core information\nCore options: -e (extended list), -p (parsable), -c (offline CPUs)\nExample: lscpu - Show CPU model and cores\nCompatible systems: Linux/Termux"
+    },
+    "dmesg": {
+      "Chinese": "用法：dmesg [选项]\n功能：查看内核环形缓冲区消息（硬件/驱动日志）\n核心选项：-T（人类可读时间）、-w（实时跟踪）、-l（按级别过滤）、-H（分页）\n示例：dmesg -T | tail -20 - 查看最近内核日志\n适配系统：Linux/Termux（可能需 root）",
+      "English": "Usage: dmesg [option]\nFunction: Print kernel ring buffer messages (hardware/driver logs)\nCore options: -T (human time), -w (follow), -l (level filter), -H (pager)\nExample: dmesg -T | tail -20 - Recent kernel logs\nCompatible systems: Linux/Termux (may need root)"
+    },
+    "which": {
+      "Chinese": "用法：which [选项] 命令...\n功能：查找命令对应的可执行文件路径\n核心选项：-a（所有匹配）、-s（静默，仅返回码）\n示例：which python3 - python3 在哪\n适配系统：Windows(Git Bash/WSL)/Linux/Termux（Windows 用 where）",
+      "English": "Usage: which [option] command...\nFunction: Locate the executable path of a command\nCore options: -a (all matches), -s (silent, exit code only)\nExample: which python3 - Where is python3\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "whereis": {
+      "Chinese": "用法：whereis [选项] 名称...\n功能：定位命令的二进制、源码与手册页位置\n核心选项：-b（仅二进制）、-m（仅手册）、-s（仅源码）\n示例：whereis ls - 查找 ls 的相关文件\n适配系统：Linux/Termux",
+      "English": "Usage: whereis [option] name...\nFunction: Locate binary, source and manual of a command\nCore options: -b (binary), -m (man), -s (source)\nExample: whereis ls - Find files related to ls\nCompatible systems: Linux/Termux"
+    },
+    "file": {
+      "Chinese": "用法：file [选项] 文件...\n功能：识别文件类型（不依赖扩展名）\n核心选项：-b（不显示文件名）、-i（MIME 类型）、-z（探测压缩包内部）\n示例：file image.dat - 判断真实文件类型\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: file [option] file...\nFunction: Determine file type (extension-independent)\nCore options: -b (brief), -i (MIME type), -z (peek inside compressed)\nExample: file image.dat - Detect the real type\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "stat": {
+      "Chinese": "用法：stat [选项] 文件...\n功能：显示文件/文件系统的详细状态（权限、大小、时间戳、inode）\n核心选项：-c（自定义格式）、-f（文件系统信息）、-L（跟随符号链接）\n示例：stat file.txt - 查看文件详细信息\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: stat [option] file...\nFunction: Show detailed file/filesystem status (permissions, size, timestamps, inode)\nCore options: -c (custom format), -f (filesystem), -L (follow links)\nExample: stat file.txt - Detailed file info\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    }
+  }
+}

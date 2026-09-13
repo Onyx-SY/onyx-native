@@ -1,0 +1,48 @@
+{
+  "命令": {
+    "systemctl": {
+      "Chinese": "用法：systemctl [选项] 动作 [单元]（Linux/Termux 专属）\n功能：systemd 服务与系统管理\n核心动作：start/stop/restart（启停重启）、status（状态）、enable/disable（开机自启）、list-units（列出）、daemon-reload（重载配置）、reboot/poweroff\n示例：systemctl status sshd - 查看服务状态\n适配系统：仅使用 systemd 的 Linux",
+      "English": "Usage: systemctl [option] action [unit] (Linux/Termux only)\nFunction: Manage systemd services and the system\nCore actions: start/stop/restart, status, enable/disable, list-units, daemon-reload, reboot/poweroff\nExample: systemctl status sshd - Check service status\nCompatible systems: systemd-based Linux only"
+    },
+    "service": {
+      "Chinese": "用法：service [服务] [动作]（Linux/Termux 专属）\n功能：SysV 风格的服务管理（内部常转发到 systemd）\n核心动作：start、stop、restart、status、reload\n示例：service nginx restart - 重启 nginx\n适配系统：Linux（多数发行版兼容层）",
+      "English": "Usage: service [name] [action] (Linux/Termux only)\nFunction: SysV-style service management (often forwards to systemd)\nCore actions: start, stop, restart, status, reload\nExample: service nginx restart - Restart nginx\nCompatible systems: Linux (compat layer on most distros)"
+    },
+    "journalctl": {
+      "Chinese": "用法：journalctl [选项]（Linux/Termux 专属）\n功能：查看 systemd 日志\n核心选项：-u（按服务）、-f（实时跟踪）、-n（最近 N 条）、--since/--until（时间范围）、-p（优先级）、-b（本次启动）\n示例：journalctl -u sshd -f - 跟踪 sshd 日志\n适配系统：仅使用 systemd 的 Linux",
+      "English": "Usage: journalctl [option] (Linux/Termux only)\nFunction: Query the systemd journal logs\nCore options: -u (unit), -f (follow), -n (last N), --since/--until, -p (priority), -b (boot)\nExample: journalctl -u sshd -f - Follow sshd logs\nCompatible systems: systemd-based Linux only"
+    },
+    "crontab": {
+      "Chinese": "用法：crontab [选项] [文件]（Linux/Termux 专属）\n功能：管理当前用户的定时任务\n核心选项：-e（编辑）、-l（列出）、-r（删除）、-u（指定用户，需 root）\n时间格式：分 时 日 月 周 命令（* 任意，*/5 每 5 单位）\n示例：crontab -e - 编辑定时任务\n适配系统：Linux/Termux",
+      "English": "Usage: crontab [option] [file] (Linux/Termux only)\nFunction: Manage the current user's scheduled jobs\nCore options: -e (edit), -l (list), -r (remove), -u (user, root)\nFormat: min hour day month weekday command (* any, */5 every 5)\nExample: crontab -e - Edit cron jobs\nCompatible systems: Linux/Termux"
+    },
+    "fdisk": {
+      "Chinese": "用法：fdisk [选项] 设备（Linux/Termux 专属）\n功能：磁盘分区管理（MBR/GPT）\n核心选项：-l（列出分区表）、-u（指定单位）\n交互命令：p 打印、n 新建、d 删除、t 改类型、w 写入、q 退出\n示例：fdisk -l /dev/sda - 查看分区\n适配系统：Linux（需 root）",
+      "English": "Usage: fdisk [option] device (Linux/Termux only)\nFunction: Disk partitioning (MBR/GPT)\nCore options: -l (list tables), -u (units)\nInteractive: p print, n new, d delete, t type, w write, q quit\nExample: fdisk -l /dev/sda - List partitions\nCompatible systems: Linux (needs root)"
+    },
+    "parted": {
+      "Chinese": "用法：parted [选项] 设备 [命令]（Linux/Termux 专属）\n功能：磁盘分区工具（支持 GPT 与在线调整）\n核心命令：print（打印分区）、mklabel（建分区表）、mkpart（建分区）、rm（删分区）、resizepart（调整）\n示例：parted /dev/sda print - 查看分区\n适配系统：Linux（需 root）",
+      "English": "Usage: parted [option] device [command] (Linux/Termux only)\nFunction: Disk partitioning tool (GPT support, online resize)\nCore commands: print, mklabel, mkpart, rm, resizepart\nExample: parted /dev/sda print - Show partitions\nCompatible systems: Linux (needs root)"
+    },
+    "mkfs": {
+      "Chinese": "用法：mkfs [-t 类型] 设备（Linux/Termux 专属）\n功能：在设备上创建文件系统（格式化）\n核心选项：-t（类型 ext4/xfs/vfat 等）、-L（卷标）；亦可用 mkfs.ext4 等直接调用\n示例：mkfs.ext4 /dev/sdb1 - 格式化为 ext4\n适配系统：Linux（需 root，会清空数据，谨慎操作）",
+      "English": "Usage: mkfs [-t type] device (Linux/Termux only)\nFunction: Build a filesystem on a device (format)\nCore options: -t (type ext4/xfs/vfat...), -L (label); or call mkfs.ext4 directly\nExample: mkfs.ext4 /dev/sdb1 - Format as ext4\nCompatible systems: Linux (root; destroys data, use with care)"
+    },
+    "fsck": {
+      "Chinese": "用法：fsck [选项] 设备（Linux/Termux 专属）\n功能：检查并修复文件系统\n核心选项：-y（自动修复）、-n（只读检查）、-f（强制检查）、-a（自动）\n示例：fsck -y /dev/sdb1 - 检查并修复\n适配系统：Linux（需 root，卸载后操作）",
+      "English": "Usage: fsck [option] device (Linux/Termux only)\nFunction: Check and repair a filesystem\nCore options: -y (auto-repair), -n (read-only), -f (force), -a (auto)\nExample: fsck -y /dev/sdb1 - Check and repair\nCompatible systems: Linux (root; run unmounted)"
+    },
+    "blkid": {
+      "Chinese": "用法：blkid [选项] [设备]（Linux/Termux 专属）\n功能：查看块设备的 UUID、类型与标签\n核心选项：-s（指定字段）、-o（输出格式）、-U（按 UUID 查设备）\n示例：blkid /dev/sda1 - 查看分区标识\n适配系统：Linux（通常需 root）",
+      "English": "Usage: blkid [option] [device] (Linux/Termux only)\nFunction: Show UUID, type and label of block devices\nCore options: -s (field), -o (output format), -U (find by UUID)\nExample: blkid /dev/sda1 - Show partition identifiers\nCompatible systems: Linux (usually root)"
+    },
+    "iptables": {
+      "Chinese": "用法：iptables [选项] 链 规则（Linux/Termux 专属）\n功能：IPv4 防火墙/包过滤规则管理\n核心选项：-L（列出规则）、-A（追加）、-D（删除）、-I（插入）、-F（清空）、-P（默认策略）、-t（表）、-j（目标）、-p（协议）、--dport（目标端口）\n示例：iptables -L -n -v - 查看规则\n适配系统：Linux（需 root）",
+      "English": "Usage: iptables [option] chain rule (Linux/Termux only)\nFunction: Manage IPv4 firewall/packet filter rules\nCore options: -L (list), -A (append), -D (delete), -I (insert), -F (flush), -P (policy), -t (table), -j (target), -p (proto), --dport\nExample: iptables -L -n -v - List rules\nCompatible systems: Linux (needs root)"
+    },
+    "ufw": {
+      "Chinese": "用法：ufw [子命令] [规则]（Linux/Termux 专属）\n功能：Uncomplicated Firewall——iptables 的易用前端\n核心子命令：enable/disable（启用/禁用）、status（状态）、allow/deny（放行/拒绝）、delete、reset\n示例：ufw allow 22/tcp - 放行 22 端口\n适配系统：仅 Ubuntu/Debian 系 Linux（需 root）",
+      "English": "Usage: ufw [subcommand] [rule] (Linux/Termux only)\nFunction: Uncomplicated Firewall — easy front-end to iptables\nCore subcommands: enable/disable, status, allow/deny, delete, reset\nExample: ufw allow 22/tcp - Allow port 22\nCompatible systems: Ubuntu/Debian-based Linux (needs root)"
+    }
+  }
+}

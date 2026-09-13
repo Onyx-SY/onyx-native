@@ -1,0 +1,24 @@
+{
+  "命令": {
+    "nmap": {
+      "Chinese": "用法：nmap [扫描类型] [选项] 目标（Linux/Termux 专属）\n功能：网络主机发现与端口/服务扫描\n核心选项：-sT（TCP 连接扫描，无特权）、-sS（SYN 半开，需 root）、-sV（服务版本）、-O（系统识别，需 root）、-p（端口范围）、-Pn（跳过主机发现）、-A（激进全面）、-T4（提速）、--script（NSE 脚本）\n示例：nmap -sT -sV -p 1-1000 192.168.1.1 - 扫描端口与服务\n适配系统：Linux/Termux（-O/-sU 需 root，非 root 会整体退出）",
+      "English": "Usage: nmap [scan-type] [option] target (Linux/Termux only)\nFunction: Network host discovery and port/service scanning\nCore options: -sT (connect scan, unprivileged), -sS (SYN, root), -sV (versions), -O (OS, root), -p (ports), -Pn (skip discovery), -A (aggressive), -T4 (faster), --script (NSE)\nExample: nmap -sT -sV -p 1-1000 192.168.1.1 - Port and service scan\nCompatible systems: Linux/Termux (-O/-sU need root; unprivileged aborts)"
+    },
+    "tcpdump": {
+      "Chinese": "用法：tcpdump [选项] [表达式]（Linux/Termux 专属）\n功能：命令行网络抓包分析\n核心选项：-i（网卡，any 为全部）、-n（不解析域名）、-w（写文件）、-r（读文件）、-c（包数）、-v/-vv（详细）、-A（ASCII 显示）\n表达式：host/port/net、tcp/udp/icmp、and/or/not\n示例：tcpdump -i any -n port 80 - 抓取 80 端口流量\n适配系统：Linux/Termux（通常需 root）",
+      "English": "Usage: tcpdump [option] [expression] (Linux/Termux only)\nFunction: Command-line packet capture and analysis\nCore options: -i (interface, any = all), -n (no DNS), -w (write), -r (read), -c (count), -v/-vv (verbose), -A (ASCII)\nExpression: host/port/net, tcp/udp/icmp, and/or/not\nExample: tcpdump -i any -n port 80 - Capture port 80 traffic\nCompatible systems: Linux/Termux (usually root)"
+    },
+    "tshark": {
+      "Chinese": "用法：tshark [选项]（Linux/Termux 专属）\n功能：Wireshark 的命令行版，深度协议解析抓包\n核心选项：-i（网卡）、-f（BPF 过滤）、-Y（显示过滤）、-w（写 pcap）、-r（读 pcap）、-c（包数）、-T（输出格式）、-V（详细解码）\n示例：tshark -i wlan0 -Y 'http.request' - 只看 HTTP 请求\n适配系统：Linux/Termux（需安装，通常需 root）",
+      "English": "Usage: tshark [option] (Linux/Termux only)\nFunction: Wireshark CLI — deep protocol-aware capture\nCore options: -i (interface), -f (BPF filter), -Y (display filter), -w (write pcap), -r (read pcap), -c (count), -T (format), -V (verbose decode)\nExample: tshark -i wlan0 -Y 'http.request' - Only HTTP requests\nCompatible systems: Linux/Termux (install; usually root)"
+    },
+    "termux-setup-storage": {
+      "Chinese": "用法：termux-setup-storage（Linux/Termux 专属）\n功能：申请存储权限并把共享存储挂载到 ~/storage（Android 专属）\n核心说明：首次运行会弹出系统权限授权；授权后可用 ~/storage/shared 访问 /sdcard\n示例：termux-setup-storage - 申请并挂载存储\n适配系统：仅 Termux（Android）",
+      "English": "Usage: termux-setup-storage (Linux/Termux only)\nFunction: Request storage permission and mount shared storage to ~/storage (Android only)\nNotes: prompts for system permission on first run; then ~/storage/shared maps to /sdcard\nExample: termux-setup-storage - Grant and mount storage\nCompatible systems: Termux (Android) only"
+    },
+    "termux-open": {
+      "Chinese": "用法：termux-open [选项] 文件/URL（Linux/Termux 专属）\n功能：调用 Android 系统应用打开文件或链接（Android 专属）\n核心选项：--content-type（指定 MIME）、--chooser（强制选择器）\n示例：termux-open photo.jpg - 用图库打开图片\n适配系统：仅 Termux（Android）",
+      "English": "Usage: termux-open [option] file/url (Linux/Termux only)\nFunction: Open a file or URL with an Android app (Android only)\nCore options: --content-type (MIME), --chooser (force chooser)\nExample: termux-open photo.jpg - Open image in gallery\nCompatible systems: Termux (Android) only"
+    }
+  }
+}

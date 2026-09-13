@@ -1,0 +1,44 @@
+{
+  "命令": {
+    "apt": {
+      "Chinese": "用法：apt [子命令] [软件包...]（Linux/Termux 专属）\n功能：Debian/Ubuntu 系包管理器（apt-get 的友好前端）\n核心子命令：update（更新索引）、upgrade（升级）、install（安装）、remove（卸载）、search（搜索）、show（详情）、autoremove（清理依赖）\n示例：apt update && apt install -y curl - 更新索引并安装\n适配系统：仅 Debian/Ubuntu 系 Linux",
+      "English": "Usage: apt [subcommand] [package...] (Linux/Termux only)\nFunction: Debian/Ubuntu package manager (friendly front-end to apt-get)\nCore subcommands: update, upgrade, install, remove, search, show, autoremove\nExample: apt update && apt install -y curl - Update and install\nCompatible systems: Debian/Ubuntu-based Linux only"
+    },
+    "apt-get": {
+      "Chinese": "用法：apt-get [选项] 子命令 [软件包...]（Linux/Termux 专属）\n功能：Debian/Ubuntu 系经典包管理命令（脚本友好）\n核心子命令：update、upgrade、dist-upgrade、install、remove、purge、autoclean\n核心选项：-y（自动确认）、--no-install-recommends（不装推荐包）\n示例：apt-get install -y nginx - 非交互安装\n适配系统：仅 Debian/Ubuntu 系 Linux",
+      "English": "Usage: apt-get [option] subcommand [package...] (Linux/Termux only)\nFunction: Classic Debian/Ubuntu package manager (script-friendly)\nCore subcommands: update, upgrade, dist-upgrade, install, remove, purge, autoclean\nCore options: -y (assume yes), --no-install-recommends\nExample: apt-get install -y nginx - Non-interactive install\nCompatible systems: Debian/Ubuntu-based Linux only"
+    },
+    "apt-cache": {
+      "Chinese": "用法：apt-cache [子命令] [软件包]（Linux/Termux 专属）\n功能：查询 APT 包缓存与元数据\n核心子命令：search（搜索）、show（详情）、policy（版本策略）、depends（依赖）、rdepends（反向依赖）\n示例：apt-cache search editor - 搜索编辑器相关包\n适配系统：仅 Debian/Ubuntu 系 Linux",
+      "English": "Usage: apt-cache [subcommand] [package] (Linux/Termux only)\nFunction: Query the APT package cache and metadata\nCore subcommands: search, show, policy, depends, rdepends\nExample: apt-cache search editor - Search for editors\nCompatible systems: Debian/Ubuntu-based Linux only"
+    },
+    "dpkg": {
+      "Chinese": "用法：dpkg [选项] 动作（Linux/Termux 专属）\n功能：Debian 底层包工具（直接操作 .deb）\n核心选项：-i（安装 deb）、-r（卸载）、-l（列出已装）、-L（列出文件）、-S（查文件归属）、--configure（配置）\n示例：dpkg -i app.deb - 安装本地 deb 包\n适配系统：仅 Debian/Ubuntu 系 Linux",
+      "English": "Usage: dpkg [option] action (Linux/Termux only)\nFunction: Low-level Debian package tool (works with .deb directly)\nCore options: -i (install), -r (remove), -l (list), -L (files), -S (search owner), --configure\nExample: dpkg -i app.deb - Install a local deb\nCompatible systems: Debian/Ubuntu-based Linux only"
+    },
+    "pkg": {
+      "Chinese": "用法：pkg [子命令] [软件包...]（Linux/Termux 专属）\n功能：Termux 包管理器（apt 封装）\n核心子命令：install（安装）、uninstall（卸载）、update（更新索引）、upgrade（升级）、search（搜索）、list-installed（已装列表）、show（详情）\n示例：pkg install -y nmap - 在 Termux 安装 nmap\n适配系统：仅 Termux",
+      "English": "Usage: pkg [subcommand] [package...] (Linux/Termux only)\nFunction: Termux package manager (apt wrapper)\nCore subcommands: install, uninstall, update, upgrade, search, list-installed, show\nExample: pkg install -y nmap - Install nmap on Termux\nCompatible systems: Termux only"
+    },
+    "yum": {
+      "Chinese": "用法：yum [选项] 子命令 [软件包...]（Linux/Termux 专属）\n功能：RHEL/CentOS 7 及以下包管理器\n核心子命令：install、remove、update、search、info、list、clean\n核心选项：-y（自动确认）\n示例：yum install -y httpd - 安装并确认\n适配系统：仅 RHEL/CentOS 系 Linux",
+      "English": "Usage: yum [option] subcommand [package...] (Linux/Termux only)\nFunction: Package manager for RHEL/CentOS 7 and older\nCore subcommands: install, remove, update, search, info, list, clean\nCore options: -y (assume yes)\nExample: yum install -y httpd - Install with confirmation\nCompatible systems: RHEL/CentOS-based Linux only"
+    },
+    "dnf": {
+      "Chinese": "用法：dnf [选项] 子命令 [软件包...]（Linux/Termux 专属）\n功能：Fedora/RHEL 8+ 新一代包管理器（yum 后继）\n核心子命令：install、remove、upgrade、search、info、list、provides、clean\n核心选项：-y（自动确认）\n示例：dnf install -y git - 安装 git\n适配系统：仅 Fedora/RHEL 8+ Linux",
+      "English": "Usage: dnf [option] subcommand [package...] (Linux/Termux only)\nFunction: Next-gen package manager for Fedora/RHEL 8+ (yum successor)\nCore subcommands: install, remove, upgrade, search, info, list, provides, clean\nCore options: -y (assume yes)\nExample: dnf install -y git - Install git\nCompatible systems: Fedora/RHEL 8+ only"
+    },
+    "rpm": {
+      "Chinese": "用法：rpm [选项] [软件包]（Linux/Termux 专属）\n功能：RPM 底层包工具\n核心选项：-ivh（安装并显示进度）、-Uvh（升级）、-e（卸载）、-qa（列出已装）、-ql（列出文件）、-qf（查文件归属）\n示例：rpm -ivh app.rpm - 安装 RPM 包\n适配系统：仅 RHEL/CentOS/Fedora 系 Linux",
+      "English": "Usage: rpm [option] [package] (Linux/Termux only)\nFunction: Low-level RPM package tool\nCore options: -ivh (install verbose), -Uvh (upgrade), -e (erase), -qa (list), -ql (files), -qf (owner)\nExample: rpm -ivh app.rpm - Install an RPM\nCompatible systems: RHEL/CentOS/Fedora only"
+    },
+    "pacman": {
+      "Chinese": "用法：pacman [选项] [软件包]（Linux/Termux 专属）\n功能：Arch Linux 包管理器\n核心选项：-S（安装）、-Sy（更新索引）、-Syu（全系统升级）、-R（卸载）、-Rs（含依赖卸载）、-Ss（搜索）、-Q（查询已装）\n示例：pacman -Syu - 同步并升级全系统\n适配系统：仅 Arch Linux",
+      "English": "Usage: pacman [option] [package] (Linux/Termux only)\nFunction: Arch Linux package manager\nCore options: -S (install), -Sy (sync db), -Syu (full upgrade), -R (remove), -Rs (with deps), -Ss (search), -Q (query)\nExample: pacman -Syu - Sync and upgrade everything\nCompatible systems: Arch Linux only"
+    },
+    "brew": {
+      "Chinese": "用法：brew [子命令] [软件包]（Linux/Termux 专属）\n功能：Homebrew 包管理器（macOS/Linux）\n核心子命令：install、uninstall、update、upgrade、search、list、info、services\n示例：brew install wget - 安装 wget\n适配系统：macOS / Linux（Windows 用 WSL）",
+      "English": "Usage: brew [subcommand] [package] (Linux/Termux only)\nFunction: Homebrew package manager (macOS/Linux)\nCore subcommands: install, uninstall, update, upgrade, search, list, info, services\nExample: brew install wget - Install wget\nCompatible systems: macOS / Linux (Windows via WSL)"
+    }
+  }
+}

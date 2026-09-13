@@ -2214,22 +2214,6 @@ def handle_autocmd(cmd_parts: List[str], request_id: str) -> None:
 
 
 
-def handle_clear(cmd_parts: List[str], request_id: str) -> None:
-    """最简洁的跨平台清屏实现"""
-    # ANSI 转义序列：清屏 + 光标归位
-    print('\033[2J\033[H', end='')
-    
-    
-    print('\033[3J\033[2J\033[H', end='')
-    
-    log_info("Clear screen executed", request_id)
-
-
-def handle_pwd(cmd_parts: List[str], request_id: str) -> None:
-    """pwd 命令：AI 虚拟沙盒激活时显示虚拟根 /，普通场景显示真实工作目录"""
-    from core.handlers.builtins import handle_pwd as _hpwd
-    _hpwd(cmd_parts, request_id)
-
 def handle_exit(cmd_parts: List[str], request_id: str) -> None:
     log_info("程序退出", request_id)
 
@@ -2539,8 +2523,6 @@ def _lazy_help(cmd_parts: List[str], request_id: str) -> None:
 
 BUILTIN_COMMANDS: Dict[str, Callable[[List[str], str], None]] = {
     # 基础TBS命令
-    "clear": handle_clear,
-    "pwd": handle_pwd,
     "cd": handle_cd,
     "exit": handle_exit,
     "refresh": lambda cmd_parts, req_id: executor.submit(

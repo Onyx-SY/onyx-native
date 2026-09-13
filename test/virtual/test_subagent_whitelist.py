@@ -2,7 +2,7 @@
 """离线验证子代理执行层白名单闸 + 命令路由 + 内置命令拦截。
 
 - explore 不能调 Agent（嵌套套娃）；RunCommand 经安全管线放行（不再拒绝）
-- 内置命令（exit/cd/sudo/clear 等）在子代理命令管线中被拒绝（不暴露给子代理）
+- 内置命令（exit/cd/sudo 等）在子代理命令管线中被拒绝（不暴露给子代理）
 - lint 的 RunCommand 经安全管线执行（不被白名单拒绝）
 
 运行: python3 test/virtual/test_subagent_whitelist.py
@@ -76,7 +76,7 @@ def test_builtin_commands_blocked_in_pipeline():
     """子代理命令管线的内置命令拦截（模块级函数即 handle_ai 闭包使用的真实逻辑）。"""
     from bin.ai_cmd import build_subagent_blocked_commands, extract_subagent_command_head
     _blocked = build_subagent_blocked_commands({"exit": None, "ai": None}, _ROOT)
-    for c in ("exit", "cd", "sudo", "clear", "pwd", "sado", "source", "export"):
+    for c in ("exit", "cd", "sudo", "pwd", "sado", "source", "export"):
         assert c in _blocked, f"内置命令 {c} 应在拦截集（当前: {len(_blocked)} 个）"
     for c in ("git", "python", "pytest", "ls", "grep", "find"):
         assert c not in _blocked, f"系统命令 {c} 不应在拦截集"

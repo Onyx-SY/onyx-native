@@ -22,6 +22,8 @@ TOOLS_DIR = ""
 
 # ====================== 从 help_info 目录加载所有JSON文件 ======================
 CMD_HELP_INFO: Dict[str, Any] = {"命令": {}, "工具": {}}
+# Linux/Termux 专属命令集合（从 help_info/linux/ 目录动态推导，Windows 下隐藏）
+LINUX_ONLY_CMDS: set = set()
 
 def load_all_help_json():
     """加载commands和linux目录下所有JSON文件的帮助信息"""
@@ -46,7 +48,9 @@ def load_all_help_json():
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                        cmd_dict.update(data.get("命令", {}))
+                        linux_cmds = data.get("命令", {})
+                        cmd_dict.update(linux_cmds)
+                        LINUX_ONLY_CMDS.update(linux_cmds.keys())
                 except Exception as e:
                     print(f"{get_color_attr('YELLOW')}警告：读取 {filename} 失败：{str(e)} | Warning: failed to read {filename}: {str(e)}{get_color_attr('RESET', '')}")
     # 加载工具信息（从原mktool迁移）
@@ -181,6 +185,15 @@ def extract_summary(help_text: str, lang: str = "Chinese") -> str:
 # ====================== 命令分类映射 ======================
 COMMAND_CATEGORIES: Dict[str, List[str]] = {
     "files": ["cat", "cp", "echo", "ls", "mkdir", "mv", "pwd", "rm", "touch"],
+    "text": ["head", "tail", "sort", "uniq", "wc", "cut", "awk", "sed", "diff", "less", "more", "tee", "tr", "nl", "tac", "paste", "split", "printf"],
+    "search": ["grep", "find", "locate", "xargs", "tree"],
+    "archive": ["zip", "unzip", "bzip2", "xz", "zstd", "rsync", "tar", "gzip"],
+    "network": ["curl", "wget", "ping", "ifconfig", "ip", "netstat", "ss", "ssh", "scp", "dig", "nslookup", "traceroute", "nc", "telnet", "hostname", "nmap", "tcpdump", "tshark"],
+    "process": ["ps", "top", "htop", "kill", "killall", "pkill", "pgrep", "nice", "renice", "nohup", "watch", "free", "uptime", "screen", "tmux", "lsof", "time", "timeout"],
+    "sysinfo": ["date", "uname", "whoami", "id", "env", "df", "du", "mount", "umount", "lsblk", "lscpu", "dmesg", "which", "whereis", "file", "stat"],
+    "sysadmin": ["apt", "apt-get", "apt-cache", "dpkg", "pkg", "yum", "dnf", "rpm", "pacman", "brew", "systemctl", "service", "journalctl", "crontab", "fdisk", "parted", "mkfs", "fsck", "blkid", "termux-setup-storage", "termux-open"],
+    "dev": ["git", "python", "python3", "pip", "node", "npm", "yarn", "java", "gcc", "clang", "go", "mvn", "gradle", "docker", "docker-compose", "kubectl", "jq", "gh"],
+    "syssec": ["sudo", "su", "passwd", "chown", "chgrp", "chmod", "umask", "openssl", "ssh-keygen", "ssh-copy-id", "md5sum", "sha256sum", "base64", "useradd", "usermod", "userdel", "iptables", "ufw"],
     "navigation": ["cd", "source", "history", "alias", "unalias"],
     "system": ["activite", "manage", "import", "run", "refresh"],
     "ai": ["ai", "mktool"],
@@ -188,26 +201,59 @@ COMMAND_CATEGORIES: Dict[str, List[str]] = {
     "help_utils": ["help", "clear", "exit", "switch-prompt", "autocmd"],
 }
 
+# 全局帮助页中分类的展示顺序
+CATEGORY_ORDER: List[str] = [
+    "files", "text", "search", "archive", "network", "process", "sysinfo",
+    "sysadmin", "dev", "syssec", "navigation", "system", "ai", "security", "help_utils",
+]
+
 CATEGORY_NAMES_CN = {
     "files": "📁 文件操作",
+    "text": "📝 文本处理",
+    "search": "🔎 查找定位",
+    "archive": "📦 压缩归档",
+    "network": "🌐 网络",
+    "process": "🔄 进程与监控",
+    "sysinfo": "🖥️ 系统信息",
+    "sysadmin": "🧰 系统运维",
+    "dev": "🛠️ 开发工具",
+    "syssec": "🔐 系统安全",
     "navigation": "🧭 导航与Shell",
     "system": "⚙️ 系统管理",
     "ai": "🤖 AI与工具",
-    "security": "🔒 安全",
+    "security": "🔒 安全（高级）",
     "help_utils": "💡 帮助与实用",
 }
 
 CATEGORY_NAMES_EN = {
     "files": "📁 File Operations",
+    "text": "📝 Text Processing",
+    "search": "🔎 Search & Locate",
+    "archive": "📦 Archives & Compression",
+    "network": "🌐 Network",
+    "process": "🔄 Process & Monitoring",
+    "sysinfo": "🖥️ System Info",
+    "sysadmin": "🧰 System Administration",
+    "dev": "🛠️ Development",
+    "syssec": "🔐 System Security",
     "navigation": "🧭 Navigation & Shell",
     "system": "⚙️ System Management",
     "ai": "🤖 AI & Tools",
-    "security": "🔒 Security",
+    "security": "🔒 Security (Advanced)",
     "help_utils": "💡 Help & Utilities",
 }
 
 CATEGORY_COLORS = {
     "files": "CYAN",
+    "text": "WHITE",
+    "search": "WHITE",
+    "archive": "YELLOW",
+    "network": "BLUE",
+    "process": "MAGENTA",
+    "sysinfo": "CYAN",
+    "sysadmin": "YELLOW",
+    "dev": "GREEN",
+    "syssec": "RED",
     "navigation": "BLUE",
     "system": "YELLOW",
     "ai": "MAGENTA",
@@ -241,10 +287,8 @@ def handle_help(cmd_parts: List[str], request_id: str) -> None:
         RESET = G("RESET", "")
         
         print(G("CYAN") + "="*80 + RESET)
-        title = "                   ██████╗ ███╗   ██╗██╗   ██╗██╗  ██╗" if lang == "Chinese" else "                   ██████╗ ███╗   ██╗██╗   ██╗██╗  ██╗"
+        title = "Onyx Toolbox - 帮助手册（{}版）".format("Windows" if is_windows else "Linux/Termux") if lang == "Chinese" else "Onyx Toolbox - Help Manual（{} Version）".format("Windows" if is_windows else "Linux/Termux")
         print(G("GREEN") + title + RESET)
-        subtitle = "                   Onyx Toolbox - 帮助手册（{}版）".format("Windows" if is_windows else "Linux/Termux") if lang == "Chinese" else "                   Onyx Toolbox - Help Manual（{} Version）".format("Windows" if is_windows else "Linux/Termux")
-        print(G("GREEN") + subtitle + RESET)
         print(G("CYAN") + "="*80 + RESET)
         
         # ===== 快速入门 =====
@@ -255,12 +299,12 @@ def handle_help(cmd_parts: List[str], request_id: str) -> None:
         
         # ===== 命令分类列表 =====
         cat_names = CATEGORY_NAMES_CN if lang == "Chinese" else CATEGORY_NAMES_EN
-        linux_only_cmds = ["sudo", "du", "chmod", "gzip"]
+        linux_only_cmds = LINUX_ONLY_CMDS
         
         cat_title = "\n📋 命令分类" if lang == "Chinese" else "\n📋 Commands by Category"
         print(G("YELLOW") + cat_title + RESET)
         
-        for cat_key in ["files", "navigation", "system", "ai", "security", "help_utils"]:
+        for cat_key in CATEGORY_ORDER:
             cmds_in_cat = [c for c in COMMAND_CATEGORIES[cat_key] if c in cmd_help_info["命令"]]
             if not cmds_in_cat:
                 continue
@@ -322,7 +366,7 @@ def handle_help(cmd_parts: List[str], request_id: str) -> None:
     
     # 查看指定命令/工具帮助
     target_name = cmd_parts[1].lower()
-    linux_only_cmds = ["sudo", "du", "chmod", "gzip"]
+    linux_only_cmds = LINUX_ONLY_CMDS
     # 匹配预设命令
     if target_name in cmd_help_info["命令"]:
         if is_windows and target_name in linux_only_cmds:

@@ -5,7 +5,7 @@ import shutil
 import time
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from lib.terminal.colors import Fore, Style
 from rich.console import Console
 
@@ -89,6 +89,18 @@ def get_current_language() -> str:
 
 def _get_msg(msg_cn: str, msg_en: str) -> str:
     return msg_cn if get_current_language() == "chinese" else msg_en
+
+# 语言值别名（大小写不敏感）：短码与常见写法统一归一化为 chinese/english
+_LANGUAGE_ALIASES = {
+    "chinese": "chinese", "zh": "chinese", "cn": "chinese", "chi": "chinese",
+    "chs": "chinese", "zh-cn": "chinese", "zh_cn": "chinese", "zh-hans": "chinese",
+    "english": "english", "en": "english", "eng": "english",
+    "en-us": "english", "en_us": "english", "en-gb": "english",
+}
+
+def normalize_language(value: str) -> Optional[str]:
+    """把语言输入（含短码 zh/cn/en 等）归一化为 chinese/english；无法识别返回 None。"""
+    return _LANGUAGE_ALIASES.get((value or "").strip().lower())
 
 def init_config_dir() -> None:
     if not os.path.exists(CONFIG_DIR):
@@ -315,8 +327,8 @@ def handle_sandbox_option(options: List[str], request_id: str) -> None:
 def handle_set_option(options: List[str], request_id: str) -> None:
     if len(options) < 1:
         print_silent(Fore.RED + _get_msg(
-            "用法：manage set <选项> <值>\n支持选项：debug-times/debug-parsecmd/language/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/spring-mode/builtin-adv-syntax",
-            "Usage: manage set <option> <value>\nSupported options: debug-times/debug-parsecmd/language/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/spring-mode/builtin-adv-syntax"
+            "用法：manage set <选项> <值>\n支持选项：debug-times/debug-parsecmd/language（Chinese/English，支持短码 zh/cn/en）/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/spring-mode/builtin-adv-syntax",
+            "Usage: manage set <option> <value>\nSupported options: debug-times/debug-parsecmd/language (Chinese/English, short codes zh/cn/en)/clean-log-time/adv_danger_cmd_prompt/sandbox/mcp/spring-mode/builtin-adv-syntax"
         ))
         return
 
@@ -356,10 +368,14 @@ def handle_set_option(options: List[str], request_id: str) -> None:
         success = write_config_file(DEBUG_PARSECMD_PATH, opt_value)
 
     elif opt_name == "language":
-        if opt_value.lower() not in ["chinese", "english"]:
-            print_silent(Fore.RED + _get_msg("值必须为 Chinese/English", "Value must be Chinese/English"))
+        lang_value = normalize_language(opt_value)
+        if lang_value is None:
+            print_silent(Fore.RED + _get_msg(
+                "值必须为 Chinese/English（也接受 zh/cn/en 等短码）",
+                "Value must be Chinese/English (short codes zh/cn/en also accepted)"
+            ))
             return
-        success = write_config_file(LANGUAGE_PATH, opt_value.lower())
+        success = write_config_file(LANGUAGE_PATH, lang_value)
         sync_language_to_configjson()
 
     elif opt_name == "clean-log-time":

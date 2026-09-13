@@ -488,7 +488,7 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
 
         _make_tool(
             "Agent",
-            "启动子代理（隔离上下文，总结后喂回主 AI）。类型：explore=只读调查；plan=规划（只读+git）；lint=代码分析；test=测试；web_search_agent=联网调研（web_search 多重混合搜索+抓页）。所有类型均可经安全管线执行命令（危险命令与 Onyx 内置命令如 exit/clear/ai 不可用）。explore/plan 自动执行无需用户确认；lint/test/web_search_agent 需显式批准。适合大规模只读调查或可并行子任务——主上下文只接收总结，注意不要滥用。可指定 1~5 个任务并行（最多 5 个同时运行）。mode=sync 阻塞等待总结；mode=async 立即返回，完成后结果自动注入会话。**并行调查多个主题时，请用 `tasks` 数组在一次调用中派发，不要多次调用本工具。**",
+            "启动子代理（隔离上下文，总结后喂回主 AI）。类型：explore=只读调查；plan=规划（只读+git）；lint=代码分析；test=测试；web_search_agent=联网调研（web_search 多重混合搜索+抓页）。所有类型均可经安全管线执行命令（危险命令与 Onyx 内置命令如 exit/ai 不可用）。explore/plan 自动执行无需用户确认；lint/test/web_search_agent 需显式批准。适合大规模只读调查或可并行子任务——主上下文只接收总结，注意不要滥用。可指定 1~5 个任务并行（最多 5 个同时运行）。mode=sync 阻塞等待总结；mode=async 立即返回，完成后结果自动注入会话。**并行调查多个主题时，请用 `tasks` 数组在一次调用中派发，不要多次调用本工具。**",
             {
                 "description": {"type": "string", "description": "子代理任务描述"},
                 "prompt": {"type": "string", "description": "子代理的完整指令；多任务时可用 '1. ...\\n2. ...' 编号或 --- 分隔，配合 count 并行"},

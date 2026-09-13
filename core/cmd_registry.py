@@ -43,14 +43,13 @@ def is_interactive_command(ctx: "AppContext", cmd: str) -> bool:
 def build_builtin_registry(ctx: "AppContext") -> Dict[str, Callable]:
     """构建内置命令注册表（延迟导入 handler，避免循环依赖）"""
     from core.handlers.builtins import (
-        handle_clear, handle_exit, handle_cd,
+        handle_exit, handle_cd,
         handle_ai, handle_import, handle_switch_prompt,
         handle_set_adv_pwd, handle_autocmd,
         handle_mktool, handle_sado, handle_nanosado, handle_activite,
     )
 
     registry: Dict[str, Callable] = {
-        "clear": handle_clear,
         "exit": handle_exit,
         "cd": handle_cd,
         "activite": handle_activite,

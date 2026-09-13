@@ -1,0 +1,76 @@
+{
+  "命令": {
+    "head": {
+      "Chinese": "用法：head [选项] [文件...]\n功能：显示文件开头部分（默认前 10 行）\n核心选项：-n（指定行数）、-c（指定字节数）、-q（不显示文件名）、-v（总是显示文件名）\n示例：head -n 20 log.txt - 查看日志前 20 行\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: head [option] [file...]\nFunction: Output the first part of files (first 10 lines by default)\nCore options: -n (number of lines), -c (number of bytes), -q (never print file name), -v (always print file name)\nExample: head -n 20 log.txt - Show first 20 lines of log\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "tail": {
+      "Chinese": "用法：tail [选项] [文件...]\n功能：显示文件末尾部分（默认后 10 行）\n核心选项：-n（行数）、-f（实时跟踪文件追加）、-F（跟踪并在文件轮转后重试）、-c（字节数）\n示例：tail -f app.log - 实时查看日志\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: tail [option] [file...]\nFunction: Output the last part of files (last 10 lines by default)\nCore options: -n (lines), -f (follow appended data), -F (follow and retry after rotation), -c (bytes)\nExample: tail -f app.log - Follow log in real time\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "sort": {
+      "Chinese": "用法：sort [选项] [文件...]\n功能：对文本行排序\n核心选项：-n（数值排序）、-r（逆序）、-u（去重）、-k（指定字段）、-t（字段分隔符）、-h（人类可读数值）\n示例：sort -t: -k3 -n data.txt - 按第 3 列数值排序\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: sort [option] [file...]\nFunction: Sort lines of text\nCore options: -n (numeric sort), -r (reverse), -u (unique), -k (key field), -t (field separator), -h (human-readable numbers)\nExample: sort -t: -k3 -n data.txt - Sort by 3rd numeric field\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "uniq": {
+      "Chinese": "用法：uniq [选项] [输入 [输出]]\n功能：去除相邻重复行（通常先 sort 再 uniq）\n核心选项：-c（显示出现次数）、-d（仅显示重复行）、-u（仅显示唯一行）、-i（忽略大小写）\n示例：sort file | uniq -c - 统计每行出现次数\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: uniq [option] [input [output]]\nFunction: Remove adjacent duplicate lines (usually after sort)\nCore options: -c (prefix count), -d (only duplicated lines), -u (only unique lines), -i (ignore case)\nExample: sort file | uniq -c - Count occurrences of each line\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "wc": {
+      "Chinese": "用法：wc [选项] [文件...]\n功能：统计行数、单词数、字节数\n核心选项：-l（行数）、-w（单词数）、-c（字节数）、-m（字符数）\n示例：wc -l file.txt - 统计行数\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: wc [option] [file...]\nFunction: Count lines, words and bytes\nCore options: -l (lines), -w (words), -c (bytes), -m (characters)\nExample: wc -l file.txt - Count lines\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "cut": {
+      "Chinese": "用法：cut [选项] [文件...]\n功能：按列/字段提取文本\n核心选项：-d（字段分隔符）、-f（指定字段）、-c（字符区间）、--complement（取补集）\n示例：cut -d: -f1 /etc/passwd - 提取用户名\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: cut [option] [file...]\nFunction: Extract columns/fields from text\nCore options: -d (delimiter), -f (fields), -c (character ranges), --complement (invert selection)\nExample: cut -d: -f1 /etc/passwd - Extract usernames\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "awk": {
+      "Chinese": "用法：awk [选项] '模式{动作}' [文件...]\n功能：按列处理文本的编程式工具\n核心选项：-F（字段分隔符）、-v（赋值变量）、-f（脚本文件）\n示例：awk -F: '{print $1, $3}' /etc/passwd - 打印第 1、3 列\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: awk [option] 'pattern{action}' [file...]\nFunction: Pattern-scanning text processing tool\nCore options: -F (field separator), -v (assign variable), -f (script file)\nExample: awk -F: '{print $1, $3}' /etc/passwd - Print 1st and 3rd fields\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "sed": {
+      "Chinese": "用法：sed [选项] '脚本' [文件...]\n功能：流式文本编辑（替换/删除/插入/打印）\n核心选项：-i（原地修改文件）、-n（抑制默认输出）、-e（多个脚本）、-r（扩展正则）\n示例：sed -i 's/old/new/g' file.txt - 全局替换\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: sed [option] 'script' [file...]\nFunction: Stream editor for filtering and transforming text\nCore options: -i (edit files in place), -n (suppress default output), -e (multiple scripts), -r (extended regex)\nExample: sed -i 's/old/new/g' file.txt - Global replace\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "diff": {
+      "Chinese": "用法：diff [选项] 文件1 文件2\n功能：逐行比较两个文件的差异\n核心选项：-u（统一格式）、-r（递归比较目录）、-q（仅报告是否不同）、-i（忽略大小写）\n示例：diff -u old.txt new.txt - 生成补丁式差异\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: diff [option] file1 file2\nFunction: Compare files line by line\nCore options: -u (unified format), -r (recursive), -q (brief, only report difference), -i (ignore case)\nExample: diff -u old.txt new.txt - Produce patch-style diff\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "less": {
+      "Chinese": "用法：less [选项] [文件]\n功能：分页查看文件（支持前后翻页与搜索）\n核心选项：-N（显示行号）、-S（不折行）、+F（实时跟踪）、-R（保留颜色）\n示例：less -N bigfile.log - 带行号分页查看\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: less [option] [file]\nFunction: View file page by page (supports scrolling and search)\nCore options: -N (line numbers), -S (no wrap), +F (follow), -R (keep colors)\nExample: less -N bigfile.log - Paged view with line numbers\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "more": {
+      "Chinese": "用法：more [选项] [文件]\n功能：分页查看文件（仅向下翻页）\n核心选项：-n（每屏行数）、+行号（从指定行开始）、-s（压缩空行）\n示例：more +100 file.txt - 从第 100 行开始\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: more [option] [file]\nFunction: View file page by page (forward only)\nCore options: -n (lines per screen), +line (start at line), -s (squeeze blank lines)\nExample: more +100 file.txt - Start at line 100\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "tee": {
+      "Chinese": "用法：命令 | tee [选项] [文件...]\n功能：把输出同时写入屏幕和文件\n核心选项：-a（追加而非覆盖）、-i（忽略中断信号）、-p（诊断写入错误）\n示例：ls -l | tee out.txt - 同时显示并保存\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: command | tee [option] [file...]\nFunction: Write output to both screen and file(s)\nCore options: -a (append instead of overwrite), -i (ignore interrupts), -p (diagnose write errors)\nExample: ls -l | tee out.txt - Show and save at the same time\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "tr": {
+      "Chinese": "用法：tr [选项] 集合1 [集合2]\n功能：字符替换、删除或压缩\n核心选项：-d（删除字符）、-s（压缩重复字符）、-c（取字符集补集）\n示例：echo hello | tr a-z A-Z - 转大写\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: tr [option] set1 [set2]\nFunction: Translate, delete or squeeze characters\nCore options: -d (delete), -s (squeeze repeats), -c (complement set)\nExample: echo hello | tr a-z A-Z - Uppercase\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "nl": {
+      "Chinese": "用法：nl [选项] [文件]\n功能：为文本添加行号\n核心选项：-b（编号方式 a/t/n）、-s（行号后分隔符）、-w（行号宽度）、-v（起始编号）\n示例：nl file.txt - 给文件加行号\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: nl [option] [file]\nFunction: Number lines of files\nCore options: -b (numbering style a/t/n), -s (separator after number), -w (number width), -v (starting number)\nExample: nl file.txt - Add line numbers\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "tac": {
+      "Chinese": "用法：tac [选项] [文件...]\n功能：按行倒序输出文件（cat 的反写）\n核心选项：-s（分隔符）、-r（分隔符按正则解释）、-b（分隔符置于前）\n示例：tac file.txt - 倒序显示文件\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: tac [option] [file...]\nFunction: Concatenate and print files in reverse line order\nCore options: -s (separator), -r (regex separator), -b (separator before)\nExample: tac file.txt - Reverse line order\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "paste": {
+      "Chinese": "用法：paste [选项] 文件...\n功能：按列合并多个文件\n核心选项：-d（列分隔符，默认制表符）、-s（串行合并为一行）\n示例：paste a.txt b.txt - 横向拼接两文件\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: paste [option] file...\nFunction: Merge lines of files side by side\nCore options: -d (delimiter, default TAB), -s (serial, one line per file)\nExample: paste a.txt b.txt - Merge two files horizontally\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "split": {
+      "Chinese": "用法：split [选项] [输入] [前缀]\n功能：把大文件拆分成多个小文件\n核心选项：-l（按行数拆分）、-b（按字节大小拆分）、-n（按份数拆分）、-d（数字后缀）\n示例：split -l 1000 big.txt part_ - 每 1000 行一个文件\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: split [option] [input] [prefix]\nFunction: Split a file into pieces\nCore options: -l (lines per file), -b (bytes per file), -n (number of chunks), -d (numeric suffixes)\nExample: split -l 1000 big.txt part_ - One file per 1000 lines\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "printf": {
+      "Chinese": "用法：printf 格式 [参数...]\n功能：按格式输出文本（比 echo 更可控，不自动换行）\n核心选项：%s（字符串）、%d（整数）、%f（浮点）、\\n（换行）、\\t（制表符）\n示例：printf \"%-10s %d\\n\" name 42 - 格式化输出\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: printf format [arguments...]\nFunction: Format and print data (more controllable than echo, no auto newline)\nCore options: %s (string), %d (integer), %f (float), \\n (newline), \\t (tab)\nExample: printf \"%-10s %d\\n\" name 42 - Formatted output\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    }
+  }
+}

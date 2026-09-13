@@ -1,0 +1,28 @@
+{
+  "命令": {
+    "zip": {
+      "Chinese": "用法：zip [选项] 压缩包.zip 文件...\n功能：创建/更新 ZIP 压缩包\n核心选项：-r（递归目录）、-e（加密）、-9（最高压缩）、-x（排除文件）、-u（更新）\n示例：zip -r backup.zip mydir - 打包整个目录\n适配系统：Windows/Linux/Termux（Windows 亦有内置资源管理器支持）",
+      "English": "Usage: zip [option] archive.zip file...\nFunction: Create/update ZIP archives\nCore options: -r (recursive), -e (encrypt), -9 (best compression), -x (exclude), -u (update)\nExample: zip -r backup.zip mydir - Archive a whole directory\nCompatible systems: Windows/Linux/Termux"
+    },
+    "unzip": {
+      "Chinese": "用法：unzip [选项] 压缩包.zip\n功能：解压 ZIP 压缩包\n核心选项：-d（指定解压目录）、-l（仅列出内容）、-o（覆盖不询问）、-P（密码）\n示例：unzip -d out backup.zip - 解压到 out 目录\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: unzip [option] archive.zip\nFunction: Extract ZIP archives\nCore options: -d (target directory), -l (list only), -o (overwrite without prompt), -P (password)\nExample: unzip -d out backup.zip - Extract to out/\nCompatible systems: Windows/Linux/Termux"
+    },
+    "bzip2": {
+      "Chinese": "用法：bzip2 [选项] 文件...\n功能：压缩/解压 .bz2 文件（压缩率高于 gzip）\n核心选项：-d（解压）、-k（保留原文件）、-9（最高压缩）、-v（显示进度）\n示例：bzip2 -k big.log - 压缩并保留原文件\n适配系统：Linux/Termux（Windows 需 7-Zip/WSL）",
+      "English": "Usage: bzip2 [option] file...\nFunction: Compress/decompress .bz2 files (higher ratio than gzip)\nCore options: -d (decompress), -k (keep original), -9 (best compression), -v (verbose)\nExample: bzip2 -k big.log - Compress and keep original\nCompatible systems: Linux/Termux (Windows via 7-Zip/WSL)"
+    },
+    "xz": {
+      "Chinese": "用法：xz [选项] 文件...\n功能：压缩/解压 .xz 文件（高压缩率）\n核心选项：-d（解压）、-k（保留原文件）、-9（最高压缩）、-T（多线程）、-l（列出信息）\n示例：xz -9 -T0 big.img - 多线程最高压缩\n适配系统：Linux/Termux（Windows 需 7-Zip/WSL）",
+      "English": "Usage: xz [option] file...\nFunction: Compress/decompress .xz files (high ratio)\nCore options: -d (decompress), -k (keep original), -9 (best compression), -T (threads), -l (list info)\nExample: xz -9 -T0 big.img - Multi-threaded max compression\nCompatible systems: Linux/Termux (Windows via 7-Zip/WSL)"
+    },
+    "zstd": {
+      "Chinese": "用法：zstd [选项] 文件...\n功能：极速压缩/解压 .zst 文件（速度快、可调级别）\n核心选项：-d（解压）、-k（保留原文件）、-19（最高级别）、-T（线程数）、--rm（压缩后删除原文件）\n示例：zstd -19 -T0 big.tar - 高速高压缩\n适配系统：Linux/Termux（Windows 需 zstd/7-Zip）",
+      "English": "Usage: zstd [option] file...\nFunction: Fast compress/decompress .zst files (speed with tunable level)\nCore options: -d (decompress), -k (keep original), -19 (max level), -T (threads), --rm (remove source)\nExample: zstd -19 -T0 big.tar - Fast high-ratio compression\nCompatible systems: Linux/Termux (Windows via zstd/7-Zip)"
+    },
+    "rsync": {
+      "Chinese": "用法：rsync [选项] 源 目标\n功能：高效同步/复制文件（支持增量、远程、断点续传）\n核心选项：-a（归档模式）、-v（详细）、-z（传输压缩）、-P（进度+断点续传）、--delete（删除目标多余文件）、-e ssh（走 SSH）\n示例：rsync -avzP src/ user@host:/data/ - 同步到远程\n适配系统：Linux/Termux（Windows 需 WSL/cygwin）",
+      "English": "Usage: rsync [option] source destination\nFunction: Efficient file sync/copy (incremental, remote, resumable)\nCore options: -a (archive), -v (verbose), -z (compress), -P (progress + resume), --delete (remove extra), -e ssh (over SSH)\nExample: rsync -avzP src/ user@host:/data/ - Sync to remote\nCompatible systems: Linux/Termux (Windows via WSL/cygwin)"
+    }
+  }
+}

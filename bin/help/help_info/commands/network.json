@@ -1,0 +1,64 @@
+{
+  "命令": {
+    "curl": {
+      "Chinese": "用法：curl [选项] URL\n功能：通过多种协议传输数据（HTTP/HTTPS/FTP 等）\n核心选项：-O（保存为远程文件名）、-o（指定输出名）、-L（跟随重定向）、-I（仅取响应头）、-X（指定方法）、-H（请求头）、-d（POST 数据）、-k（忽略证书校验）\n示例：curl -L -o file.zip https://example.com/f.zip - 下载文件\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: curl [option] URL\nFunction: Transfer data over many protocols (HTTP/HTTPS/FTP, etc.)\nCore options: -O (save as remote name), -o (output name), -L (follow redirects), -I (headers only), -X (method), -H (header), -d (POST data), -k (insecure)\nExample: curl -L -o file.zip https://example.com/f.zip - Download a file\nCompatible systems: Windows/Linux/Termux"
+    },
+    "wget": {
+      "Chinese": "用法：wget [选项] URL\n功能：从网络下载文件（支持断点续传与递归抓取）\n核心选项：-c（断点续传）、-O（输出名）、-q（安静）、-r（递归下载）、-np（不回溯父目录）、-P（保存目录）\n示例：wget -c https://example.com/big.iso - 断点续传下载\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: wget [option] URL\nFunction: Download files from the web (resumable, recursive)\nCore options: -c (continue/resume), -O (output name), -q (quiet), -r (recursive), -np (no parent), -P (directory prefix)\nExample: wget -c https://example.com/big.iso - Resumable download\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "ping": {
+      "Chinese": "用法：ping [选项] 主机\n功能：测试与目标主机的连通性与延迟\n核心选项：-c（发送次数）、-i（间隔秒）、-s（包大小）、-W（超时）、-4/-6（协议族）\n示例：ping -c 4 8.8.8.8 - 发送 4 个探测包\n适配系统：Windows/Linux/Termux（Windows 用 -n 指定次数）",
+      "English": "Usage: ping [option] host\nFunction: Test reachability and latency to a host\nCore options: -c (count), -i (interval), -s (packet size), -W (timeout), -4/-6 (family)\nExample: ping -c 4 8.8.8.8 - Send 4 probes\nCompatible systems: Windows/Linux/Termux (Windows uses -n for count)"
+    },
+    "ifconfig": {
+      "Chinese": "用法：ifconfig [接口] [选项]\n功能：查看/配置网络接口（Linux 旧式，Android/Termux 常用）\n核心选项：接口名（如 wlan0）、up/down（启停）、netmask（掩码）、-a（全部）\n示例：ifconfig -a - 显示所有网络接口\n适配系统：Linux/Termux/Android（现代 Linux 推荐 ip 命令）",
+      "English": "Usage: ifconfig [interface] [option]\nFunction: View/configure network interfaces (legacy; common on Android/Termux)\nCore options: interface name (e.g. wlan0), up/down, netmask, -a (all)\nExample: ifconfig -a - Show all interfaces\nCompatible systems: Linux/Termux/Android (modern Linux prefers ip)"
+    },
+    "ip": {
+      "Chinese": "用法：ip [对象] [命令]\n功能：现代网络配置工具（取代 ifconfig/route/netstat）\n核心选项：ip a（地址）、ip r（路由）、ip l（链路）、ip n（邻居）、-c（彩色）\n示例：ip a show wlan0 - 查看接口地址\n适配系统：Linux/Termux（Android/Termux 可能缺失，用 ifconfig 替代）",
+      "English": "Usage: ip [object] [command]\nFunction: Modern network configuration tool (replaces ifconfig/route/netstat)\nCore options: ip a (addresses), ip r (routes), ip l (links), ip n (neighbors), -c (color)\nExample: ip a show wlan0 - Show interface addresses\nCompatible systems: Linux/Termux (may be missing on Android/Termux; use ifconfig)"
+    },
+    "netstat": {
+      "Chinese": "用法：netstat [选项]\n功能：查看网络连接、路由表、接口统计\n核心选项：-t（TCP）、-u（UDP）、-l（监听）、-n（数字显示）、-p（进程）、-a（全部）、-r（路由）\n示例：netstat -tlnp - 查看监听端口及进程\n适配系统：Windows/Linux/Termux（现代 Linux 推荐 ss）",
+      "English": "Usage: netstat [option]\nFunction: Show network connections, routing tables, interface stats\nCore options: -t (TCP), -u (UDP), -l (listening), -n (numeric), -p (process), -a (all), -r (route)\nExample: netstat -tlnp - Show listening ports and processes\nCompatible systems: Windows/Linux/Termux (modern Linux prefers ss)"
+    },
+    "ss": {
+      "Chinese": "用法：ss [选项]\n功能：查看套接字/连接统计（netstat 的现代替代）\n核心选项：-t（TCP）、-u（UDP）、-l（监听）、-n（数字）、-p（进程）、-a（全部）\n示例：ss -tlnp - 查看监听端口\n适配系统：Linux/Termux",
+      "English": "Usage: ss [option]\nFunction: Dump socket statistics (modern netstat replacement)\nCore options: -t (TCP), -u (UDP), -l (listening), -n (numeric), -p (process), -a (all)\nExample: ss -tlnp - Show listening ports\nCompatible systems: Linux/Termux"
+    },
+    "ssh": {
+      "Chinese": "用法：ssh [选项] [用户@]主机 [命令]\n功能：安全远程登录/执行命令\n核心选项：-p（端口）、-i（私钥）、-L（本地端口转发）、-R（远程转发）、-N（不执行命令）、-v（调试）\n示例：ssh -p 2222 user@host - 登录远程主机\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: ssh [option] [user@]host [command]\nFunction: Secure remote login/command execution\nCore options: -p (port), -i (identity file), -L (local forward), -R (remote forward), -N (no command), -v (verbose)\nExample: ssh -p 2222 user@host - Log in to remote host\nCompatible systems: Windows/Linux/Termux"
+    },
+    "scp": {
+      "Chinese": "用法：scp [选项] 源 目标\n功能：通过 SSH 在本地与远程之间复制文件\n核心选项：-r（递归目录）、-P（端口，注意大写）、-i（私钥）、-C（压缩）、-p（保留时间戳）\n示例：scp -r dir user@host:/data/ - 上传目录\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: scp [option] source target\nFunction: Copy files between local and remote over SSH\nCore options: -r (recursive), -P (port, uppercase), -i (identity), -C (compress), -p (preserve times)\nExample: scp -r dir user@host:/data/ - Upload a directory\nCompatible systems: Windows/Linux/Termux"
+    },
+    "dig": {
+      "Chinese": "用法：dig [选项] 名称 [类型] [@DNS服务器]\n功能：DNS 查询与诊断\n核心选项：+short（简洁输出）、+trace（追踪解析链）、@服务器、-x（反向解析）、ANY（所有记录）\n示例：dig +short example.com - 快速解析域名\n适配系统：Linux/Termux（Windows 用 nslookup）",
+      "English": "Usage: dig [option] name [type] [@server]\nFunction: DNS lookup and diagnostics\nCore options: +short (concise), +trace (trace chain), @server, -x (reverse), ANY (all records)\nExample: dig +short example.com - Quick DNS resolution\nCompatible systems: Linux/Termux (Windows uses nslookup)"
+    },
+    "nslookup": {
+      "Chinese": "用法：nslookup [选项] 名称 [DNS服务器]\n功能：查询域名解析记录\n核心选项：-type=（记录类型 A/MX/NS）、-debug（调试）、服务器参数\n示例：nslookup -type=mx example.com - 查询 MX 记录\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: nslookup [option] name [server]\nFunction: Query DNS records\nCore options: -type= (A/MX/NS), -debug, server argument\nExample: nslookup -type=mx example.com - Query MX records\nCompatible systems: Windows/Linux/Termux"
+    },
+    "traceroute": {
+      "Chinese": "用法：traceroute [选项] 主机\n功能：跟踪数据包到目标所经过的路由节点\n核心选项：-n（不解析域名）、-m（最大跳数）、-I（ICMP）、-T（TCP）、-p（端口）\n示例：traceroute -n 8.8.8.8 - 显示路由跳数\n适配系统：Linux/Termux（Windows 为 tracert）",
+      "English": "Usage: traceroute [option] host\nFunction: Trace the route packets take to a host\nCore options: -n (no DNS), -m (max hops), -I (ICMP), -T (TCP), -p (port)\nExample: traceroute -n 8.8.8.8 - Show route hops\nCompatible systems: Linux/Termux (Windows uses tracert)"
+    },
+    "nc": {
+      "Chinese": "用法：nc [选项] 主机 端口\n功能：网络瑞士军刀——TCP/UDP 连接、监听、端口探测、传输\n核心选项：-l（监听）、-p（本地端口）、-z（仅扫描不发送）、-v（详细）、-u（UDP）、-w（超时）\n示例：nc -zv host 22 - 探测端口是否开放\n适配系统：Windows/Linux/Termux（部分系统为 netcat/ncat）",
+      "English": "Usage: nc [option] host port\nFunction: TCP/UDP connect, listen, port scan and transfer\nCore options: -l (listen), -p (local port), -z (scan only), -v (verbose), -u (UDP), -w (timeout)\nExample: nc -zv host 22 - Check if port is open\nCompatible systems: Windows/Linux/Termux (sometimes netcat/ncat)"
+    },
+    "telnet": {
+      "Chinese": "用法：telnet 主机 [端口]\n功能：明文远程登录或探测端口连通性\n核心选项：主机、端口（默认 23）、Ctrl+] 退出会话\n示例：telnet example.com 80 - 测试 80 端口\n适配系统：Windows/Linux/Termux（明文协议，建议改用 ssh）",
+      "English": "Usage: telnet host [port]\nFunction: Plaintext remote login or port connectivity test\nCore options: host, port (default 23), Ctrl+] to quit session\nExample: telnet example.com 80 - Test port 80\nCompatible systems: Windows/Linux/Termux (plaintext; prefer ssh)"
+    },
+    "hostname": {
+      "Chinese": "用法：hostname [选项] [新名称]\n功能：查看或临时设置主机名\n核心选项：-f（完整域名）、-I（所有 IP 地址）、-s（短名）\n示例：hostname -I - 显示本机所有 IP\n适配系统：Windows/Linux/Termux（Windows 为 hostname 命令）",
+      "English": "Usage: hostname [option] [new-name]\nFunction: Show or temporarily set the host name\nCore options: -f (FQDN), -I (all IP addresses), -s (short name)\nExample: hostname -I - Show all local IPs\nCompatible systems: Windows/Linux/Termux"
+    }
+  }
+}

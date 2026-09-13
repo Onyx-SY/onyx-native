@@ -1,0 +1,76 @@
+{
+  "命令": {
+    "git": {
+      "Chinese": "用法：git [子命令] [参数]\n功能：分布式版本控制系统\n核心子命令：clone（克隆）、init（初始化）、add（暂存）、commit（提交）、push/pull（推拉）、branch（分支）、checkout/switch（切换）、merge（合并）、log（历史）、status（状态）、diff（差异）、stash（暂存工作区）、remote（远程）\n示例：git clone https://host/repo.git - 克隆仓库\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: git [subcommand] [args]\nFunction: Distributed version control system\nCore subcommands: clone, init, add, commit, push/pull, branch, checkout/switch, merge, log, status, diff, stash, remote\nExample: git clone https://host/repo.git - Clone a repo\nCompatible systems: Windows/Linux/Termux"
+    },
+    "python": {
+      "Chinese": "用法：python [选项] [脚本/模块] [参数]\n功能：运行 Python 解释器（python3 的别名）\n核心选项：-m（以模块方式运行）、-c（执行字符串）、-i（交互）、-V（版本）、-u（无缓冲输出）\n示例：python -m http.server 8000 - 起一个简易 HTTP 服务\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: python [option] [script/module] [args]\nFunction: Run the Python interpreter (alias of python3)\nCore options: -m (run module), -c (run string), -i (interactive), -V (version), -u (unbuffered)\nExample: python -m http.server 8000 - Quick HTTP server\nCompatible systems: Windows/Linux/Termux"
+    },
+    "python3": {
+      "Chinese": "用法：python3 [选项] [脚本/模块] [参数]\n功能：Python 3 解释器\n核心选项：-m（模块）、-c（字符串）、-i（交互）、-V（版本）、-m venv（建虚拟环境）\n示例：python3 -m venv .venv - 创建虚拟环境\n适配系统：Linux/Termux（Windows 通常为 python）",
+      "English": "Usage: python3 [option] [script/module] [args]\nFunction: Python 3 interpreter\nCore options: -m (module), -c (string), -i (interactive), -V (version), -m venv (virtualenv)\nExample: python3 -m venv .venv - Create a virtual environment\nCompatible systems: Linux/Termux (Windows usually python)"
+    },
+    "pip": {
+      "Chinese": "用法：pip [子命令] [选项]\n功能：Python 包管理器\n核心子命令：install（安装）、uninstall（卸载）、list（列表）、show（详情）、freeze（导出依赖）、download（下载）\n核心选项：-r（按需求文件）、-U（升级）、--user（用户级安装）\n示例：pip install -r requirements.txt - 安装依赖\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: pip [subcommand] [option]\nFunction: Python package manager\nCore subcommands: install, uninstall, list, show, freeze, download\nCore options: -r (requirements file), -U (upgrade), --user (user install)\nExample: pip install -r requirements.txt - Install dependencies\nCompatible systems: Windows/Linux/Termux"
+    },
+    "node": {
+      "Chinese": "用法：node [选项] [脚本] [参数]\n功能：运行 Node.js（JavaScript 运行时）\n核心选项：-v（版本）、-e（执行表达式）、--inspect（调试）、-r（预加载模块）\n示例：node app.js - 运行脚本\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: node [option] [script] [args]\nFunction: Run Node.js (JavaScript runtime)\nCore options: -v (version), -e (eval), --inspect (debug), -r (preload)\nExample: node app.js - Run a script\nCompatible systems: Windows/Linux/Termux"
+    },
+    "npm": {
+      "Chinese": "用法：npm [子命令] [选项]\n功能：Node.js 包管理器\n核心子命令：install/i（安装）、run（运行脚本）、start、test、publish、update、ci\n核心选项：-g（全局）、--save-dev（开发依赖）、--registry（镜像源）\n示例：npm install -g pnpm - 全局安装 pnpm\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: npm [subcommand] [option]\nFunction: Node.js package manager\nCore subcommands: install/i, run, start, test, publish, update, ci\nCore options: -g (global), --save-dev, --registry\nExample: npm install -g pnpm - Install pnpm globally\nCompatible systems: Windows/Linux/Termux"
+    },
+    "yarn": {
+      "Chinese": "用法：yarn [子命令] [选项]\n功能：Node.js 包管理器（快速、确定性强）\n核心子命令：add（添加）、remove（移除）、install（安装）、upgrade（升级）、run（运行脚本）\n核心选项：--dev（开发依赖）、--global（全局）\n示例：yarn add axios - 添加依赖\n适配系统：Windows/Linux/Termux（需安装）",
+      "English": "Usage: yarn [subcommand] [option]\nFunction: Node.js package manager (fast, deterministic)\nCore subcommands: add, remove, install, upgrade, run\nCore options: --dev, --global\nExample: yarn add axios - Add a dependency\nCompatible systems: Windows/Linux/Termux (may need install)"
+    },
+    "java": {
+      "Chinese": "用法：java [选项] 类/包/JAR [参数]\n功能：运行 Java 程序\n核心选项：-jar（运行 JAR）、-cp/-classpath（类路径）、-version（版本）、-Xmx（最大堆）\n示例：java -jar app.jar - 运行 JAR 包\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: java [option] class/jar [args]\nFunction: Run Java programs\nCore options: -jar, -cp/-classpath, -version, -Xmx (max heap)\nExample: java -jar app.jar - Run a JAR\nCompatible systems: Windows/Linux/Termux"
+    },
+    "gcc": {
+      "Chinese": "用法：gcc [选项] 源文件... -o 输出\n功能：GNU C/C++ 编译器\n核心选项：-o（输出名）、-c（仅编译不链接）、-O2（优化）、-Wall（警告）、-I（头文件目录）、-l（链接库）、-g（调试信息）\n示例：gcc -O2 -Wall main.c -o main - 编译 C 程序\n适配系统：Windows(MinGW)/Linux/Termux",
+      "English": "Usage: gcc [option] source... -o output\nFunction: GNU C/C++ compiler\nCore options: -o (output), -c (compile only), -O2 (optimize), -Wall (warnings), -I (include), -l (library), -g (debug)\nExample: gcc -O2 -Wall main.c -o main - Compile C\nCompatible systems: Windows (MinGW)/Linux/Termux"
+    },
+    "clang": {
+      "Chinese": "用法：clang [选项] 源文件... -o 输出\n功能：LLVM 家族的 C/C++ 编译器\n核心选项：-o（输出）、-c（仅编译）、-O2（优化）、-Wall（警告）、-I/-L/-l（头/库）、-g（调试）\n示例：clang++ -std=c++17 main.cpp -o main - 编译 C++\n适配系统：Linux/Termux（Windows 需 LLVM）",
+      "English": "Usage: clang [option] source... -o output\nFunction: LLVM C/C++ compiler\nCore options: -o, -c, -O2, -Wall, -I/-L/-l, -g\nExample: clang++ -std=c++17 main.cpp -o main - Compile C++\nCompatible systems: Linux/Termux (Windows via LLVM)"
+    },
+    "go": {
+      "Chinese": "用法：go [子命令] [参数]\n功能：Go 语言工具链\n核心子命令：run（运行）、build（编译）、test（测试）、mod（模块管理）、get（拉取依赖）、fmt（格式化）、env（环境）\n示例：go build -o app . - 编译当前包\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: go [subcommand] [args]\nFunction: Go toolchain\nCore subcommands: run, build, test, mod, get, fmt, env\nExample: go build -o app . - Build current package\nCompatible systems: Windows/Linux/Termux"
+    },
+    "mvn": {
+      "Chinese": "用法：mvn [选项] [目标...]\n功能：Apache Maven（Java 项目构建/依赖管理）\n核心目标：clean（清理）、compile（编译）、package（打包）、test（测试）、install（安装到本地仓库）、deploy（部署）\n核心选项：-D（属性）、-P（激活 profile）\n示例：mvn clean package - 清理并打包\n适配系统：Windows/Linux/Termux（需安装）",
+      "English": "Usage: mvn [option] [goal...]\nFunction: Apache Maven (Java build/dependency management)\nCore goals: clean, compile, package, test, install, deploy\nCore options: -D (property), -P (profile)\nExample: mvn clean package - Clean and package\nCompatible systems: Windows/Linux/Termux (may need install)"
+    },
+    "gradle": {
+      "Chinese": "用法：gradle [选项] [任务...]\n功能：Gradle 构建工具（Java/Kotlin/Android）\n核心任务：build（构建）、test（测试）、run（运行）、clean（清理）、assemble\n核心选项：-x（排除任务）、--info（详细）、-P（属性）\n示例：gradle build - 构建项目\n适配系统：Windows/Linux/Termux（需安装）",
+      "English": "Usage: gradle [option] [task...]\nFunction: Gradle build tool (Java/Kotlin/Android)\nCore tasks: build, test, run, clean, assemble\nCore options: -x (exclude), --info, -P (property)\nExample: gradle build - Build the project\nCompatible systems: Windows/Linux/Termux (may need install)"
+    },
+    "docker": {
+      "Chinese": "用法：docker [子命令] [参数]\n功能：容器管理\n核心子命令：run（运行）、ps（列表）、images（镜像）、build（构建）、pull/push（拉推镜像）、exec（进入容器）、logs（日志）、stop/rm（停止/删除）、compose（编排）\n示例：docker run -it --rm ubuntu bash - 交互式容器\n适配系统：Windows/Linux（Termux 需 proot/远程）",
+      "English": "Usage: docker [subcommand] [args]\nFunction: Container management\nCore subcommands: run, ps, images, build, pull/push, exec, logs, stop/rm, compose\nExample: docker run -it --rm ubuntu bash - Interactive container\nCompatible systems: Windows/Linux (Termux via proot/remote)"
+    },
+    "docker-compose": {
+      "Chinese": "用法：docker-compose [选项] [子命令]\n功能：用 YAML 编排多容器应用\n核心子命令：up（启动）、down（停止并删除）、ps（状态）、logs（日志）、build（构建）、restart\n核心选项：-d（后台）、-f（指定文件）\n示例：docker-compose up -d - 后台启动全部服务\n适配系统：Windows/Linux（新版为 docker compose）",
+      "English": "Usage: docker-compose [option] [subcommand]\nFunction: Orchestrate multi-container apps via YAML\nCore subcommands: up, down, ps, logs, build, restart\nCore options: -d (detach), -f (file)\nExample: docker-compose up -d - Start all services in background\nCompatible systems: Windows/Linux (newer: docker compose)"
+    },
+    "kubectl": {
+      "Chinese": "用法：kubectl [子命令] [资源] [选项]\n功能：Kubernetes 集群命令行工具\n核心子命令：get（查看）、apply（应用）、create、delete、describe（详情）、logs、exec、port-forward、scale、rollout\n核心选项：-n（命名空间）、-o（输出格式）、-f（文件）\n示例：kubectl get pods -n default - 查看 Pod\n适配系统：Windows/Linux/Termux（需安装）",
+      "English": "Usage: kubectl [subcommand] [resource] [option]\nFunction: Kubernetes cluster CLI\nCore subcommands: get, apply, create, delete, describe, logs, exec, port-forward, scale, rollout\nCore options: -n (namespace), -o (output), -f (file)\nExample: kubectl get pods -n default - List pods\nCompatible systems: Windows/Linux/Termux (may need install)"
+    },
+    "jq": {
+      "Chinese": "用法：jq [选项] '过滤器' [文件...]\n功能：命令行 JSON 处理器\n核心选项：-r（原始字符串输出）、-c（紧凑输出）、-s（合并输入）、.key（取字段）、.[]（遍历数组）\n示例：curl -s api | jq '.data[].name' - 提取字段\n适配系统：Windows/Linux/Termux（需安装）",
+      "English": "Usage: jq [option] 'filter' [file...]\nFunction: Command-line JSON processor\nCore options: -r (raw output), -c (compact), -s (slurp), .key (field), .[] (iterate array)\nExample: curl -s api | jq '.data[].name' - Extract fields\nCompatible systems: Windows/Linux/Termux (may need install)"
+    },
+    "gh": {
+      "Chinese": "用法：gh [子命令] [参数]\n功能：GitHub 官方命令行工具\n核心子命令：repo（仓库）、pr（拉取请求）、issue（议题）、auth（登录）、release（发布）、gist\n示例：gh pr create - 创建 Pull Request\n适配系统：Windows/Linux/Termux（需安装并 gh auth login）",
+      "English": "Usage: gh [subcommand] [args]\nFunction: Official GitHub CLI\nCore subcommands: repo, pr, issue, auth, release, gist\nExample: gh pr create - Create a pull request\nCompatible systems: Windows/Linux/Termux (install + gh auth login)"
+    }
+  }
+}

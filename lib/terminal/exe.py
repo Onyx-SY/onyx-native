@@ -246,10 +246,16 @@ def get_terminal_size(fd: int = sys.stdin.fileno()) -> Tuple[int, int]:
 
     if HAVE_FCNTL_TERMIOS and os.isatty(fd):
         try:
-            rows, cols = struct.unpack('hh', fcntl.ioctl(fd, termios.TIOCGWINSZ, '1234'))
-            return rows, cols
-        except Exception:
-            pass
+            # ⚠️ 不能用 fcntl.ioctl(fd, TIOCGWINSZ, '1234') 这种 4 字节写法：
+            # struct winsize 是 8 字节，内核会写 8 字节进 4 字节缓冲区，
+            # Python 3.14 直接抛 SystemError('buffer overflow')，被 except 吞掉后
+            # 永远回退 (24,80) → 所有 TUI 按 24x80 绘制 → 形变/错位。
+            # os.get_terminal_size() 内部用正确的 8 字节 ioctl，且不读 COLUMNS/LINES 环境变量。
+            _sz = os.get_terminal_size(fd)
+            if _sz.lines > 0 and _sz.columns > 0:
+                return _sz.lines, _sz.columns
+        except OSError as _e:
+            debug_log(f"get_terminal_size failed on fd={fd}: {_e}", 'error')
     return 24, 80
 
 
@@ -428,7 +434,15 @@ class PersistentShell:
         # 动态 prompt 模式列表：除 marker 外，还实时学习 shell 实际 PS1
         # 即使 PS1 被 venv/主题等改写，也能通过 fallback 模式检测命令完成
         self._prompt_patterns: List[re.Pattern] = []
-        self._prompt_probed = False
+        # PS1 探测（_probe_and_learn_prompt）已是死代码：通用 prompt 正则匹配
+        # 于 2026-07-22 被移除，_prompt_patterns 不再被读取。它却会在**宿主终端
+        # 仍是 cooked 模式**时向 PTY 发 probe 并阻塞最多 2.6s，还会把 probe 的
+        # __DONE__ PS1 残留进 PTY，导致紧随其后的第一条命令被误判为"已完成"。
+        # 因此这里直接标记为已探测，彻底跳过它（方法保留以兼容调用方）。
+        self._prompt_probed = True
+        # 首条命令前需要"耐心排空"PTY 残留（shell 初始化的收尾输出），避免其
+        # __DONE__ PS1 被当成完成信号导致首条命令提前返回、TUI 整帧丢失。
+        self._first_exec_done = False
 
         # Merge environment variables with extra variables
         self._extra_vars = {}
@@ -514,22 +528,34 @@ class PersistentShell:
         # 读回显 + probe 结果 + 紧接其后的 prompt
         buf = ""
         deadline = time.time() + 2.0
+        seen_probe = False
         while time.time() < deadline:
             try:
                 chunk = self._read_from_master(timeout=0.3)
-                if not chunk:
-                    continue
-                buf += chunk
-                # probe 标记已出现 → 之后的内容就是 PS1
-                if "__PSL_PROBE__" in buf:
-                    # 再读一次收尾（_read_from_master 内部用 select 超时，无需额外 sleep）
-                    try:
-                        buf += self._read_from_master(timeout=0.2) or ""
-                    except Exception:
-                        pass
-                    break
             except Exception:
                 break
+            if not chunk:
+                if seen_probe:
+                    break
+                continue
+            # 修复：原代码 `buf += chunk` 是 str += bytes（TypeError）被 except 吞掉，
+            # 探测循环实际上第一轮就 break → 从未学到 prompt，且把 probe 的
+            # __DONE__ PS1 残留在 PTY 里 → 下一条命令被误判为"已完成"→ 首条命令输出丢失。
+            buf += chunk.decode('utf-8', errors='replace')
+            if "__PSL_PROBE__" in buf:
+                seen_probe = True
+
+        # 收尾：把 probe 命令自身的回显与紧随其后的 PS1（__DONE__ marker）读干净，
+        # 否则残留 marker 会被第一条真实命令误当成完成信号。
+        quiet_deadline = time.time() + 0.6
+        while time.time() < quiet_deadline:
+            try:
+                extra = self._read_from_master(timeout=0.08)
+            except Exception:
+                break
+            if not extra:
+                break
+            buf += extra.decode('utf-8', errors='replace')
 
         # 从 buf 中提取 probe 输出之后、prompt 之前/之后的内容
         idx = buf.rfind("__PSL_PROBE__")
@@ -569,6 +595,9 @@ class PersistentShell:
         # 否则 finally 与尾部检查会触发 UnboundLocalError 并掩盖真实错误。
         is_windows = platform.system() == "Windows"
         _passthrough_entered_raw = False
+        # 只有主线程才拥有"用户键盘"。后台线程（alias-sender / submit_cmd_async /
+        # 子代理）绝不能读 fd 0，否则会和 prompt_toolkit / 前台 TUI 抢按键。
+        _is_main_thread = (threading.current_thread() is threading.main_thread())
         old_sigint = None
         old_sigwinch = None
         _interrupted_flag = {'value': False}
@@ -591,14 +620,18 @@ class PersistentShell:
 
             # 命令执行期间进入 raw 模式，确保 TUI 程序的逐键输入能正确转发到 PTY。
             # 命令结束后恢复到 cooked 模式，与 bash/zsh 行为一致。
-            if not is_windows and threading.current_thread() is threading.main_thread():
+            if not is_windows and _is_main_thread:
                 try:
                     import termios as _pt
                     if os.isatty(fd_stdin):
                         save_terminal_attrs()
                         _new_tty = _pt.tcgetattr(fd_stdin)
-                        _new_tty[0] &= ~(_pt.ICRNL | _pt.INLCR | _pt.IGNCR)
-                        _new_tty[3] &= ~(_pt.ICANON | _pt.ECHO | _pt.ISIG)
+                        # 对齐 tty.setraw()：字节级透传 + 不拦截特殊键
+                        _new_tty[0] &= ~(_pt.BRKINT | _pt.ICRNL | _pt.INPCK
+                                         | _pt.ISTRIP | _pt.IXON | _pt.IXOFF)
+                        _new_tty[1] &= ~_pt.OPOST          # 关输出处理（不再自动补 CR）
+                        _new_tty[2] = (_new_tty[2] & ~(_pt.CSIZE | _pt.PARENB)) | _pt.CS8
+                        _new_tty[3] &= ~(_pt.ICANON | _pt.ECHO | _pt.IEXTEN | _pt.ISIG)
                         _new_tty[6][_pt.VMIN] = 1
                         _new_tty[6][_pt.VTIME] = 0
                         _pt.tcsetattr(fd_stdin, _pt.TCSANOW, _new_tty)
@@ -611,12 +644,28 @@ class PersistentShell:
                     """将 SIGINT 转发到 PTY 子进程组，使 Ctrl+C 能真正杀死前台程序"""
                     _interrupted_flag['value'] = True
                     debug_log("SIGINT caught by Python handler, forwarding to PTY process group")
-                    if self.pid is not None:
-                        try:
+                    try:
+                        # 优先发给 PTY 的"前台进程组"（真正在跑的 TUI/命令），
+                        # 而不是 shell 自己的进程组 —— 二者通常不同。
+                        pgid = None
+                        if self.master_fd is not None:
+                            try:
+                                pgid = os.tcgetpgrp(self.master_fd)
+                            except OSError:
+                                pgid = None
+                        if not pgid and self.pid is not None:
                             pgid = os.getpgid(self.pid)
+                        if pgid:
                             os.killpg(pgid, signal.SIGINT)
-                        except (ProcessLookupError, PermissionError, OSError) as e:
-                            debug_log(f"Failed to forward SIGINT to process group: {e}", 'error')
+                    except (ProcessLookupError, PermissionError, OSError) as e:
+                        debug_log(f"Failed to forward SIGINT to process group: {e}", 'error')
+                # 后台线程（alias-sender）读写 tty 时避免被 SIGTTOU 挂起（真 tty 语义）
+                old_sigttou = None
+                try:
+                    if hasattr(signal, 'SIGTTOU'):
+                        old_sigttou = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+                except (ValueError, OSError):
+                    pass
                 try:
                     old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
                     if hasattr(signal, 'SIGWINCH'):
@@ -635,8 +684,14 @@ class PersistentShell:
             if not is_windows:
                 update_pty_size(self.master_fd)
 
-            # 排空 PTY 残留输出（单次 drain，无 sleep — PTY 已就绪时 drain 为 O(1)）
-            self._drain_output()
+            # 排空 PTY 残留输出。
+            # 首条命令更耐心：shell 初始化（PS1 设置等）的收尾输出可能稍后才到，
+            # 若残留里的 __DONE__ PS1 被当成"完成 marker"，首条命令会提前返回、
+            # 整帧 TUI 画面丢失（表现为 TUI 一闪而过或全黑）。
+            if self._first_exec_done:
+                self._drain_output()
+            else:
+                self._drain_output(max_iterations=20, quiet_timeout=0.03)
             _echo_pending = True  # 需要跳过 shell 回显的命令文本
             _echo_buf = ""        # 累积回显字节
             _echo_start_time = time.time()  # echo 跳过超时计时（TUI 程序无 \n 时避免吞输出）
@@ -649,22 +704,49 @@ class PersistentShell:
                 return -1, full_raw_output
 
             def _emit(_b: bytes):
-                """把 PTY 原始字节直接写终端（保留 CRLF；避免 UTF-8 往返损坏）。"""
-                _buf = getattr(sys.stdout, 'buffer', None)
+                """把 PTY 原始字节直接写「真实终端」（保留 CRLF；避免 UTF-8 往返损坏）。
+
+                必须绕过 sys.stdout：AI 路径下 capture_command_output() 会把
+                sys.stdout 换成 RealTimeOutputCatcher（其 .buffer 是个 list），
+                旧的 getattr(sys.stdout,'buffer') 拿到 list 后 .write 抛 AttributeError
+                被 except 吞掉 → TUI 输出全部丢失。
+                """
+                _target = sys.__stdout__ if sys.__stdout__ is not None else sys.stdout
+                _buf = getattr(_target, 'buffer', None)
                 try:
-                    if _buf is not None:
+                    if _buf is not None and hasattr(_buf, 'write'):
                         _buf.write(_b)
                         _buf.flush()
-                    else:
-                        sys.stdout.write(_b.decode('utf-8', errors='replace'))
-                        sys.stdout.flush()
+                        return
                 except Exception:
                     pass
+                try:
+                    os.write(1, _b)
+                    return
+                except Exception:
+                    pass
+                try:
+                    sys.stdout.write(_b.decode('utf-8', errors='replace'))
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+
+            def _safe(_s: str) -> str:
+                """把 surrogateescape 代理字符还原为合法文本（供 output_buffer/AI 展示）。"""
+                try:
+                    return _s.encode('utf-8', 'surrogateescape').decode('utf-8', 'replace')
+                except Exception:
+                    return _s
 
             while True:
                 if not is_windows and self.master_fd is not None:
                     try:
-                        rlist, _, _ = select.select([self.master_fd, fd_stdin], [], [])
+                        # 非主线程（alias-sender / 异步任务 / 子代理）不监听 fd 0，
+                        # 否则会把用户按键从 prompt_toolkit/前台 TUI 手里抢走。
+                        _watch_fds = [self.master_fd]
+                        if _is_main_thread:
+                            _watch_fds.append(fd_stdin)
+                        rlist, _, _ = select.select(_watch_fds, [], [])
                     except (select.error, OSError):
                         continue
                     data = None
@@ -698,7 +780,7 @@ class PersistentShell:
                         debug_log("PTY EOF (passthrough)")
                         break
                     try:
-                        text = data.decode('utf-8', errors='replace')
+                        text = data.decode('utf-8', errors='surrogateescape')
                     except UnicodeDecodeError:
                         text = data.decode('latin-1', errors='replace')
 
@@ -742,9 +824,9 @@ class PersistentShell:
                             debug_log(f"PS1 done marker, exit={return_code}")
                             before_marker = text[:done_match.start()]
                             if before_marker:
-                                _emit(before_marker.encode('utf-8', errors='replace'))
+                                _emit(before_marker.encode('utf-8', errors='surrogateescape'))
                                 if output_buffer is not None:
-                                    output_buffer.append(before_marker.replace('\r\n', '\n'))
+                                    output_buffer.append(_safe(before_marker.replace('\r\n', '\n')))
                             break
 
                     # ── 不再使用 fallback prompt pattern 检测 ──
@@ -757,9 +839,9 @@ class PersistentShell:
                     # Real-time output forwarding —— 原样写原始字节：
                     # 不改写 CRLF（改写依赖终端 ONLCR，OPOST 关闭时换行不回车 → TUI 形变），
                     # 也不做 decode/encode 往返（避免跨 4096 边界截断的多字节 UTF-8 被破坏）。
-                    _emit(text.encode('utf-8', errors='replace') if _echo_was_active else data)
+                    _emit(text.encode('utf-8', errors='surrogateescape') if _echo_was_active else data)
                     if output_buffer is not None:
-                        output_buffer.append(text.replace('\r\n', '\n'))
+                        output_buffer.append(_safe(text.replace('\r\n', '\n')))
 
                 # --- Forward stdin to PTY (for TUI programs) ---
                 if stdin_data is not None and len(stdin_data) > 0:
@@ -771,13 +853,18 @@ class PersistentShell:
         except Exception as e:
             debug_log(f"Passthrough exception: {e}", 'error')
         finally:
+            self._first_exec_done = True
             if not is_windows:
                 # 恢复信号 handlers（非主线程或信号已被改动时静默跳过）
                 try:
-                    if old_sigint:
+                    # 用 is not None：SIG_DFL 的值是 0，用真值判断会导致
+                    # "上一个 handler 是 SIG_DFL"时永远不还原。
+                    if old_sigint is not None:
                         signal.signal(signal.SIGINT, old_sigint)
-                    if old_sigwinch and hasattr(signal, 'SIGWINCH'):
+                    if old_sigwinch is not None and hasattr(signal, 'SIGWINCH'):
                         signal.signal(signal.SIGWINCH, old_sigwinch)
+                    if old_sigttou is not None and hasattr(signal, 'SIGTTOU'):
+                        signal.signal(signal.SIGTTOU, old_sigttou)
                 except ValueError:
                     pass
                 # 恢复终端到 cooked 模式（与 bash/zsh 一致）
@@ -807,10 +894,26 @@ class PersistentShell:
             except Exception as e:
                 debug_log(f"Windows write error: {e}", 'error')
         elif self.master_fd is not None:
-            try:
-                os.write(self.master_fd, data)
-            except OSError as e:
-                debug_log(f"Unix write error: {e}", 'error')
+            # 循环写满：os.write 可能部分写（PTY 缓冲满），单次写会静默丢字节
+            mv = memoryview(data)
+            while mv:
+                try:
+                    n = os.write(self.master_fd, mv)
+                except InterruptedError:
+                    continue
+                except BlockingIOError:
+                    # 非阻塞 fd 且缓冲满 → 等可写再重试，绝不丢字节
+                    try:
+                        select.select([], [self.master_fd], [], 0.5)
+                    except Exception:
+                        time.sleep(0.01)
+                    continue
+                except OSError as e:
+                    debug_log(f"Unix write error: {e}", 'error')
+                    break
+                if n <= 0:
+                    break
+                mv = mv[n:]
 
     def _read_from_master(self, timeout: float = 0.01) -> Optional[bytes]:
         """
@@ -995,6 +1098,10 @@ class PersistentShell:
                 # 不导出 LINES/COLUMNS：真实 tty 下二者是 shell 变量、不导出。
                 # 导出会让 ncurses（use_env 默认开）优先用 env 而非 TIOCGWINSZ，
                 # resize 后即拿到过期尺寸 → 形变。
+                # 注意：必须真正从 env 里 pop 掉 —— os.environ.copy() 会原样带过来，
+                # _extra_vars 也会把它们重新塞回去（旧代码只在注释里"声明"不导出）。
+                env.pop('LINES', None)
+                env.pop('COLUMNS', None)
                 env['PS1'] = f'{self._done_marker}:$?\\n'
                 env['PROMPT'] = '$P$G'
                 # For zsh compatibility: disable prompt and other features
@@ -1126,12 +1233,17 @@ class PersistentShell:
             debug_log(f"Failed to setup prompt: {e}", 'error')
             pass
 
-    def _drain_output(self, max_iterations: int = 8):
-        """Consume all pending output (non-blocking)"""
+    def _drain_output(self, max_iterations: int = 8, quiet_timeout: float = 0.002):
+        """Consume all pending output (non-blocking).
+
+        quiet_timeout: 单次读取等待时长。默认 2ms（够快，用于常规收尾）；
+        首条命令前会传更大的值，耐心等到"真的安静"为止，避免 shell 初始化
+        收尾输出（含 __DONE__ PS1）稍后才到、被下一条命令误判为完成 marker。
+        """
         drained = 0
         empty_count = 0
         for _ in range(max_iterations):
-            data = self._read_from_master(timeout=0.002)
+            data = self._read_from_master(timeout=quiet_timeout)
             if not data:
                 empty_count += 1
                 if empty_count >= 2:

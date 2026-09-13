@@ -1,0 +1,16 @@
+{
+  "命令": {
+    "locate": {
+      "Chinese": "用法：locate [选项] 模式\n功能：基于数据库快速查找文件路径（比 find 快，但依赖 updatedb 索引）\n核心选项：-i（忽略大小写）、-n（结果数量上限）、-e（仅存在文件）、-r（正则）\n示例：locate -i '*.conf' - 快速定位配置文件\n适配系统：Linux/Termux（需先 updatedb 建立索引）",
+      "English": "Usage: locate [option] pattern\nFunction: Find file paths via a database (faster than find, needs updatedb index)\nCore options: -i (ignore case), -n (limit), -e (existing only), -r (regex)\nExample: locate -i '*.conf' - Quickly find config files\nCompatible systems: Linux/Termux (run updatedb first)"
+    },
+    "xargs": {
+      "Chinese": "用法：命令 | xargs [选项] 命令\n功能：把标准输入转换为命令行参数批量执行\n核心选项：-n（每次参数个数）、-I{}（占位替换）、-0（NUL 分隔，配合 find -print0）、-P（并行数）、-r（无输入则不执行）\n示例：find . -name '*.log' -print0 | xargs -0 rm - 批量删除\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: command | xargs [option] command\nFunction: Build and execute command lines from standard input\nCore options: -n (args per run), -I{} (placeholder), -0 (NUL-separated with find -print0), -P (parallel), -r (no-run-if-empty)\nExample: find . -name '*.log' -print0 | xargs -0 rm - Batch delete\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "tree": {
+      "Chinese": "用法：tree [选项] [目录]\n功能：以树状图显示目录结构\n核心选项：-L（最大深度）、-a（含隐藏文件）、-d（仅目录）、-h（人类可读大小）、-I（排除模式）\n示例：tree -L 2 -h - 两层目录树\n适配系统：Windows/Linux/Termux（部分系统需安装）",
+      "English": "Usage: tree [option] [directory]\nFunction: Display directory structure as a tree\nCore options: -L (max depth), -a (include hidden), -d (dirs only), -h (human size), -I (exclude pattern)\nExample: tree -L 2 -h - Two-level tree\nCompatible systems: Windows/Linux/Termux (may need install)"
+    }
+  }
+}

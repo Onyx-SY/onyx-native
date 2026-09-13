@@ -1,0 +1,60 @@
+{
+  "命令": {
+    "su": {
+      "Chinese": "用法：su [选项] [用户]\n功能：切换用户身份（默认切到 root）\n核心选项：-（模拟完整登录环境）、-c（执行单条命令后退出）、-s（指定 shell）\n示例：su - - 切换到 root 并加载其环境\n适配系统：Linux/Termux（Termux 下 root 受限）",
+      "English": "Usage: su [option] [user]\nFunction: Switch user identity (defaults to root)\nCore options: - (login shell env), -c (run one command), -s (shell)\nExample: su - - Switch to root with its environment\nCompatible systems: Linux/Termux (root limited on Termux)"
+    },
+    "passwd": {
+      "Chinese": "用法：passwd [选项] [用户]\n功能：修改用户密码\n核心选项：-l（锁定账户）、-u（解锁）、-d（删除密码）、-e（强制下次改密）\n示例：passwd - 修改当前用户密码\n适配系统：Linux/Termux（通常需 root 改他人密码）",
+      "English": "Usage: passwd [option] [user]\nFunction: Change user password\nCore options: -l (lock), -u (unlock), -d (delete password), -e (expire)\nExample: passwd - Change your own password\nCompatible systems: Linux/Termux (root needed to change others)"
+    },
+    "chown": {
+      "Chinese": "用法：chown [选项] 用户[:组] 文件...\n功能：修改文件的所有者与所属组\n核心选项：-R（递归）、-v（显示过程）、--reference（参照其他文件）\n示例：chown -R user:group /data - 递归改所有者\n适配系统：Linux/Termux（通常需 root）",
+      "English": "Usage: chown [option] user[:group] file...\nFunction: Change file owner and group\nCore options: -R (recursive), -v (verbose), --reference (copy from file)\nExample: chown -R user:group /data - Recursive change\nCompatible systems: Linux/Termux (usually needs root)"
+    },
+    "chgrp": {
+      "Chinese": "用法：chgrp [选项] 组 文件...\n功能：修改文件所属组\n核心选项：-R（递归）、-v（显示过程）、--reference（参照）\n示例：chgrp -R dev /srv/app - 递归改组\n适配系统：Linux/Termux",
+      "English": "Usage: chgrp [option] group file...\nFunction: Change group ownership of files\nCore options: -R (recursive), -v (verbose), --reference\nExample: chgrp -R dev /srv/app - Recursive group change\nCompatible systems: Linux/Termux"
+    },
+    "umask": {
+      "Chinese": "用法：umask [选项] [掩码]\n功能：设置新建文件的默认权限掩码\n核心选项：-S（符号形式显示）、-p（可复现输出）\n示例：umask 022 - 新建文件默认 644、目录 755\n适配系统：Linux/Termux",
+      "English": "Usage: umask [option] [mask]\nFunction: Set default permission mask for new files\nCore options: -S (symbolic), -p (reusable output)\nExample: umask 022 - New files 644, dirs 755\nCompatible systems: Linux/Termux"
+    },
+    "openssl": {
+      "Chinese": "用法：openssl 子命令 [选项]\n功能：加密、证书、哈希等密码学工具集\n核心子命令：genrsa/genpkey（生成密钥）、req（证书请求/自签）、x509（证书操作）、dgst（哈希/签名）、enc（对称加解密）、s_client（TLS 客户端）\n示例：openssl req -x509 -newkey rsa:2048 -nodes -keyout k.pem -out c.pem -days 365 - 自签证书\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: openssl subcommand [option]\nFunction: Cryptography toolkit (encryption, certs, hashing)\nCore subcommands: genrsa/genpkey, req, x509, dgst, enc, s_client\nExample: openssl req -x509 -newkey rsa:2048 -nodes -keyout k.pem -out c.pem -days 365 - Self-signed cert\nCompatible systems: Windows/Linux/Termux"
+    },
+    "ssh-keygen": {
+      "Chinese": "用法：ssh-keygen [选项]\n功能：生成/管理 SSH 密钥对\n核心选项：-t（类型 rsa/ed25519）、-b（位数）、-C（注释）、-f（输出文件）、-N（空密码）、-p（改密码）\n示例：ssh-keygen -t ed25519 -C \"me@host\" - 生成现代密钥\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: ssh-keygen [option]\nFunction: Generate/manage SSH key pairs\nCore options: -t (type rsa/ed25519), -b (bits), -C (comment), -f (file), -N (passphrase), -p (change passphrase)\nExample: ssh-keygen -t ed25519 -C \"me@host\" - Generate modern key\nCompatible systems: Windows/Linux/Termux"
+    },
+    "ssh-copy-id": {
+      "Chinese": "用法：ssh-copy-id [选项] [用户@]主机\n功能：把本机公钥追加到远程主机的 authorized_keys（实现免密登录）\n核心选项：-i（指定公钥）、-p（端口）\n示例：ssh-copy-id -i ~/.ssh/id_ed25519.pub user@host - 配置免密\n适配系统：Linux/Termux（Windows 需手动或脚本）",
+      "English": "Usage: ssh-copy-id [option] [user@]host\nFunction: Append your public key to remote authorized_keys (passwordless login)\nCore options: -i (identity), -p (port)\nExample: ssh-copy-id -i ~/.ssh/id_ed25519.pub user@host - Set up key auth\nCompatible systems: Linux/Termux (Windows manual/scripted)"
+    },
+    "md5sum": {
+      "Chinese": "用法：md5sum [选项] [文件...]\n功能：计算/校验文件的 MD5 摘要\n核心选项：-c（校验校验和文件）、-b（二进制模式）\n示例：md5sum -c sums.md5 - 校验文件完整性\n适配系统：Linux/Termux（Windows 用 certutil -hashfile）",
+      "English": "Usage: md5sum [option] [file...]\nFunction: Compute/verify MD5 checksums\nCore options: -c (check list), -b (binary)\nExample: md5sum -c sums.md5 - Verify integrity\nCompatible systems: Linux/Termux (Windows: certutil -hashfile)"
+    },
+    "sha256sum": {
+      "Chinese": "用法：sha256sum [选项] [文件...]\n功能：计算/校验文件的 SHA-256 摘要（比 MD5 更安全）\n核心选项：-c（校验）、-b（二进制）、--tag（BSD 风格输出）\n示例：sha256sum image.iso - 生成校验值\n适配系统：Linux/Termux（Windows 用 certutil -hashfile）",
+      "English": "Usage: sha256sum [option] [file...]\nFunction: Compute/verify SHA-256 checksums (stronger than MD5)\nCore options: -c (check), -b (binary), --tag (BSD style)\nExample: sha256sum image.iso - Produce checksum\nCompatible systems: Linux/Termux (Windows: certutil -hashfile)"
+    },
+    "base64": {
+      "Chinese": "用法：base64 [选项] [文件]\n功能：Base64 编码/解码\n核心选项：-d（解码）、-w（换行宽度，0 为不换行）、-i（忽略非字母字符）\n示例：echo -n hello | base64 - 编码\n适配系统：Windows(Git Bash/WSL)/Linux/Termux",
+      "English": "Usage: base64 [option] [file]\nFunction: Base64 encode/decode\nCore options: -d (decode), -w (wrap width, 0 = none), -i (ignore non-alphabet)\nExample: echo -n hello | base64 - Encode\nCompatible systems: Windows (Git Bash/WSL)/Linux/Termux"
+    },
+    "useradd": {
+      "Chinese": "用法：useradd [选项] 用户名\n功能：创建新用户\n核心选项：-m（创建家目录）、-s（登录 shell）、-G（附加组）、-u（指定 UID）、-d（家目录）\n示例：useradd -m -s /bin/bash alice - 新建用户\n适配系统：Linux/Termux（需 root）",
+      "English": "Usage: useradd [option] username\nFunction: Create a new user\nCore options: -m (home dir), -s (shell), -G (groups), -u (UID), -d (home)\nExample: useradd -m -s /bin/bash alice - Add a user\nCompatible systems: Linux/Termux (needs root)"
+    },
+    "usermod": {
+      "Chinese": "用法：usermod [选项] 用户名\n功能：修改已存在用户\n核心选项：-aG（追加附加组）、-s（shell）、-d（家目录）、-l（改名）、-L/-U（锁定/解锁）\n示例：usermod -aG docker alice - 加入 docker 组\n适配系统：Linux/Termux（需 root）",
+      "English": "Usage: usermod [option] username\nFunction: Modify an existing user\nCore options: -aG (append groups), -s (shell), -d (home), -l (rename), -L/-U (lock/unlock)\nExample: usermod -aG docker alice - Add to docker group\nCompatible systems: Linux/Termux (needs root)"
+    },
+    "userdel": {
+      "Chinese": "用法：userdel [选项] 用户名\n功能：删除用户\n核心选项：-r（同时删除家目录与邮件）、-f（强制）\n示例：userdel -r alice - 删除用户及其家目录\n适配系统：Linux/Termux（需 root）",
+      "English": "Usage: userdel [option] username\nFunction: Delete a user\nCore options: -r (remove home and mail), -f (force)\nExample: userdel -r alice - Remove user and home\nCompatible systems: Linux/Termux (needs root)"
+    }
+  }
+}

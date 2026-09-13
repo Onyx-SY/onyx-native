@@ -1,0 +1,68 @@
+{
+  "命令": {
+    "top": {
+      "Chinese": "用法：top [选项]\n功能：实时查看进程与系统资源占用\n核心选项：-d（刷新间隔秒）、-p（指定 PID）、-u（按用户）、-b（批处理模式）、-n（刷新次数）\n交互键：q 退出、P 按 CPU 排序、M 按内存排序、k 结束进程\n示例：top -d 1 - 每秒刷新\n适配系统：Windows/Linux/Termux",
+      "English": "Usage: top [option]\nFunction: Real-time view of processes and resource usage\nCore options: -d (delay), -p (PID), -u (user), -b (batch mode), -n (iterations)\nInteractive keys: q quit, P sort by CPU, M sort by memory, k kill\nExample: top -d 1 - Refresh every second\nCompatible systems: Windows/Linux/Termux"
+    },
+    "htop": {
+      "Chinese": "用法：htop [选项]\n功能：交互式彩色进程查看器（top 增强版）\n核心选项：-u（按用户）、-p（指定 PID）、-d（刷新延迟）\n交互键：F3 搜索、F4 过滤、F5 树状、F6 排序、F9 结束进程\n示例：htop -u root - 只看 root 进程\n适配系统：Linux/Termux（需安装）",
+      "English": "Usage: htop [option]\nFunction: Interactive colorful process viewer (enhanced top)\nCore options: -u (user), -p (PID), -d (delay)\nInteractive keys: F3 search, F4 filter, F5 tree, F6 sort, F9 kill\nExample: htop -u root - Only root processes\nCompatible systems: Linux/Termux (may need install)"
+    },
+    "killall": {
+      "Chinese": "用法：killall [选项] 进程名\n功能：按进程名结束所有匹配进程\n核心选项：-9（强制）、-i（交互确认）、-u（指定用户）、-s（信号）\n示例：killall -9 nginx - 强制结束所有 nginx\n适配系统：Linux/Termux（Windows 用 taskkill）",
+      "English": "Usage: killall [option] name\nFunction: Kill processes by name\nCore options: -9 (force), -i (interactive), -u (user), -s (signal)\nExample: killall -9 nginx - Force kill all nginx\nCompatible systems: Linux/Termux (Windows uses taskkill)"
+    },
+    "pkill": {
+      "Chinese": "用法：pkill [选项] 模式\n功能：按名称/属性匹配并结束进程\n核心选项：-f（匹配完整命令行）、-9（强制）、-u（用户）、-n（最新）、-o（最旧）\n示例：pkill -f 'python app.py' - 按命令行结束\n适配系统：Linux/Termux",
+      "English": "Usage: pkill [option] pattern\nFunction: Signal processes by name/attribute\nCore options: -f (match full command line), -9 (force), -u (user), -n (newest), -o (oldest)\nExample: pkill -f 'python app.py' - Kill by command line\nCompatible systems: Linux/Termux"
+    },
+    "pgrep": {
+      "Chinese": "用法：pgrep [选项] 模式\n功能：按名称/属性查找进程 PID\n核心选项：-f（匹配完整命令行）、-l（显示名称）、-a（显示完整命令行）、-u（用户）\n示例：pgrep -af python - 列出 python 进程\n适配系统：Linux/Termux",
+      "English": "Usage: pgrep [option] pattern\nFunction: Look up process IDs by name/attribute\nCore options: -f (full command line), -l (show name), -a (show full line), -u (user)\nExample: pgrep -af python - List python processes\nCompatible systems: Linux/Termux"
+    },
+    "nice": {
+      "Chinese": "用法：nice [选项] [命令]\n功能：以指定优先级启动命令（调整调度优先级）\n核心选项：-n（优先级增量 -20~19，越小越优先）\n示例：nice -n 10 tar czf a.tgz dir - 低优先级打包\n适配系统：Linux/Termux",
+      "English": "Usage: nice [option] [command]\nFunction: Run a command with modified scheduling priority\nCore options: -n (adjustment -20..19, lower = higher priority)\nExample: nice -n 10 tar czf a.tgz dir - Low-priority archive\nCompatible systems: Linux/Termux"
+    },
+    "renice": {
+      "Chinese": "用法：renice [优先级] [选项] PID\n功能：调整正在运行进程的优先级\n核心选项：-n（新优先级）、-p（PID）、-u（用户的所有进程）\n示例：renice -n 5 -p 1234 - 降低进程优先级\n适配系统：Linux/Termux",
+      "English": "Usage: renice priority [option] PID\nFunction: Alter priority of running processes\nCore options: -n (new priority), -p (PID), -u (all processes of user)\nExample: renice -n 5 -p 1234 - Lower priority of PID 1234\nCompatible systems: Linux/Termux"
+    },
+    "nohup": {
+      "Chinese": "用法：nohup 命令 [参数] &\n功能：忽略挂起信号运行命令（退出终端后仍继续）\n核心选项：默认输出到 nohup.out，可重定向\n示例：nohup python server.py > out.log 2>&1 & - 后台常驻\n适配系统：Linux/Termux（Windows 用 start /b）",
+      "English": "Usage: nohup command [args] &\nFunction: Run a command immune to hangups (keeps running after logout)\nCore options: output goes to nohup.out by default; redirect as needed\nExample: nohup python server.py > out.log 2>&1 & - Persistent background job\nCompatible systems: Linux/Termux (Windows uses start /b)"
+    },
+    "watch": {
+      "Chinese": "用法：watch [选项] 命令\n功能：周期性重复执行命令并全屏显示结果\n核心选项：-n（间隔秒）、-d（高亮差异）、-t（不显示标题）\n示例：watch -n 2 -d free -h - 每 2 秒看内存\n适配系统：Linux/Termux（Windows 无内置）",
+      "English": "Usage: watch [option] command\nFunction: Run a command repeatedly and show output full-screen\nCore options: -n (interval), -d (highlight differences), -t (no title)\nExample: watch -n 2 -d free -h - Watch memory every 2s\nCompatible systems: Linux/Termux"
+    },
+    "free": {
+      "Chinese": "用法：free [选项]\n功能：查看内存与交换分区使用情况\n核心选项：-h（人类可读）、-m（MB）、-g（GB）、-s（持续刷新秒）\n示例：free -h - 人类可读内存\n适配系统：Linux/Termux",
+      "English": "Usage: free [option]\nFunction: Display memory and swap usage\nCore options: -h (human-readable), -m (MB), -g (GB), -s (refresh seconds)\nExample: free -h - Human-readable memory\nCompatible systems: Linux/Termux"
+    },
+    "uptime": {
+      "Chinese": "用法：uptime [选项]\n功能：显示系统运行时长、用户数、负载均值\n核心选项：-p（易读格式）、-s（开机时间）\n示例：uptime -p - 显示运行了多久\n适配系统：Linux/Termux",
+      "English": "Usage: uptime [option]\nFunction: Show how long the system has been running, users, load averages\nCore options: -p (pretty), -s (since)\nExample: uptime -p - Show uptime in words\nCompatible systems: Linux/Termux"
+    },
+    "screen": {
+      "Chinese": "用法：screen [选项] [命令]\n功能：终端复用器——会话可分离/恢复（断线不中断任务）\n核心选项：-S（命名会话）、-ls（列出会话）、-r（恢复会话）、-d（分离）\n交互键：Ctrl+a d 分离、Ctrl+a c 新窗口、Ctrl+a n 切换\n示例：screen -S work - 创建名为 work 的会话\n适配系统：Linux/Termux（需安装）",
+      "English": "Usage: screen [option] [command]\nFunction: Terminal multiplexer — detach/resume sessions (survive disconnects)\nCore options: -S (named session), -ls (list), -r (resume), -d (detach)\nKeys: Ctrl+a d detach, Ctrl+a c new window, Ctrl+a n switch\nExample: screen -S work - Create a session named work\nCompatible systems: Linux/Termux (may need install)"
+    },
+    "tmux": {
+      "Chinese": "用法：tmux [选项] [命令]\n功能：终端复用器——多窗格/窗口，会话可分离恢复\n核心选项：new -s（新会话）、attach -t（连接）、ls（列出）、kill-session\n交互键：Ctrl+b d 分离、Ctrl+b % 竖分、Ctrl+b \" 横分、Ctrl+b c 新窗口\n示例：tmux new -s dev - 创建 dev 会话\n适配系统：Linux/Termux（需安装）",
+      "English": "Usage: tmux [option] [command]\nFunction: Terminal multiplexer — panes/windows, detachable sessions\nCore options: new -s (new session), attach -t (attach), ls (list), kill-session\nKeys: Ctrl+b d detach, Ctrl+b % split vertical, Ctrl+b \" split horizontal, Ctrl+b c new window\nExample: tmux new -s dev - Create dev session\nCompatible systems: Linux/Termux (may need install)"
+    },
+    "lsof": {
+      "Chinese": "用法：lsof [选项]\n功能：列出打开的文件与网络连接及其所属进程\n核心选项：-i（网络连接）、-i:端口、-p（指定 PID）、-u（用户）、+D（目录下文件）\n示例：lsof -i:8080 - 查看占用 8080 端口的进程\n适配系统：Linux/Termux（Windows 无内置）",
+      "English": "Usage: lsof [option]\nFunction: List open files and network connections with owning process\nCore options: -i (network), -i:port, -p (PID), -u (user), +D (dir files)\nExample: lsof -i:8080 - Find process on port 8080\nCompatible systems: Linux/Termux"
+    },
+    "time": {
+      "Chinese": "用法：time 命令 [参数]\n功能：统计命令执行耗时（真实/用户/系统）\n核心选项：-p（POSIX 格式）、-v（详细统计）、-o（输出到文件）\n示例：time python build.py - 测量脚本耗时\n适配系统：Linux/Termux（Windows 为 PowerShell 的 Measure-Command）",
+      "English": "Usage: time command [args]\nFunction: Measure execution time of a command (real/user/sys)\nCore options: -p (POSIX format), -v (verbose), -o (output file)\nExample: time python build.py - Measure script runtime\nCompatible systems: Linux/Termux (Windows uses Measure-Command)"
+    },
+    "timeout": {
+      "Chinese": "用法：timeout [选项] 时长 命令\n功能：在限定时间内运行命令，超时自动终止\n核心选项：-s（超时发送的信号）、-k（超时后再强杀）、时长后缀 s/m/h\n示例：timeout 10 curl slow.site - 10 秒后中止\n适配系统：Linux/Termux（Windows 无内置）",
+      "English": "Usage: timeout [option] duration command\nFunction: Run a command with a time limit, killing it on timeout\nCore options: -s (signal on timeout), -k (kill-after), duration suffix s/m/h\nExample: timeout 10 curl slow.site - Abort after 10s\nCompatible systems: Linux/Termux"
+    }
+  }
+}

@@ -29,8 +29,8 @@
         "output": 3.96
       },
       "deepseek-v4-flash": {
-        "input": 0.44,
-        "output": 1.32
+        "input": 0.3,
+        "output": 1.2
       }
     }
   },
@@ -499,8 +499,8 @@
         "output": 3.96
       },
       "deepseek-v4-flash": {
-        "input": 0.44,
-        "output": 1.32
+        "input": 0.3,
+        "output": 1.2
       },
       "glm-5.2": {
         "input": 1.4,

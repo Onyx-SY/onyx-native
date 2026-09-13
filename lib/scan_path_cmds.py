@@ -4,7 +4,6 @@ import os
 import sys
 import time
 import msgpack
-import concurrent.futures
 import asyncio
 import threading
 from typing import Dict, List, Set, Optional, Any, Tuple, Callable
@@ -392,6 +391,7 @@ class ScanPathCmds:
         all_debug_info = []
         
         # 使用ThreadPoolExecutor并行扫描
+        import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_dir = {executor.submit(self._scan_single_directory, dir_path, force_scan): dir_path 
                            for dir_path in path_dirs}

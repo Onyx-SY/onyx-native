@@ -5,8 +5,9 @@ import re
 import uuid
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Any, Callable
-from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Tuple, Optional, Any, Callable, TYPE_CHECKING
+if TYPE_CHECKING:
+    from concurrent.futures import ThreadPoolExecutor
 from getpass import getpass
 
 from lib.terminal.colors import Fore, Style
@@ -101,7 +102,7 @@ class AppContext:
     # ---- 进程 ----
     PROCESS_LOCK: Any = None
     process_lock: Any = field(default_factory=threading.Lock)
-    executor: Optional[ThreadPoolExecutor] = None
+    executor: "Optional[ThreadPoolExecutor]" = None
     CURRENT_PROCESSES: List[Tuple[int, float, str, str]] = field(default_factory=list)
 
     # ---- AI 缓存 ----

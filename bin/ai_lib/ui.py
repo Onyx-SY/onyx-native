@@ -18,10 +18,16 @@ from typing import List, Optional, Dict, Tuple
 from rich.console import Console as RichConsole
 from rich.panel import Panel
 from rich.table import Table
-from rich.markdown import Markdown
+
 from rich.box import ROUNDED, HEAVY, DOUBLE
 from rich.text import Text
 from rich.rule import Rule
+
+
+def _markdown(text, **kw):
+    """惰性导入 rich.markdown（启动不加载 markdown_it/pygments）。"""
+    from rich.markdown import Markdown as _M
+    return _M(text, **kw)
 
 console = RichConsole()
 
@@ -370,7 +376,7 @@ def text_input(
 def render_plan_panel(plan_text: str) -> Panel:
     """渲染计划内容 Panel"""
     _l = _ui_lang()
-    md = Markdown(plan_text.strip()) if plan_text.strip() else Text("(空计划)" if _l == "chinese" else "(empty plan)")
+    md = _markdown(plan_text.strip()) if plan_text.strip() else Text("(空计划)" if _l == "chinese" else "(empty plan)")
     return Panel(
         md,
         title="📋 AI 计划" if _l == "chinese" else "📋 AI Plan",
@@ -408,7 +414,7 @@ def render_ai_panel(text: str, title: str = "🤖 AI") -> Panel:
     content = text.strip()
     if content:
         content = "● " + content
-    md = Markdown(content) if content else Text("(无内容)" if _ui_lang() == "chinese" else "(empty)")
+    md = _markdown(content) if content else Text("(无内容)" if _ui_lang() == "chinese" else "(empty)")
     return Panel(
         md,
         title=title,
@@ -523,7 +529,7 @@ class StreamingDisplay:
                 if not final.startswith("● "):
                     final = "● " + final
                 self._live.update(Panel(
-                    Markdown(final),
+                    _markdown(final),
                     title="🤖 AI",
                     border_style="green",
                     box=ROUNDED,

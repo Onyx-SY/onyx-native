@@ -44,7 +44,7 @@ import queue
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Tuple, Union, Iterable
 
-from prompt_toolkit import prompt
+from prompt_toolkit import prompt, PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style as PromptStyle
@@ -54,6 +54,10 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion, AutoSuggestFromHistory
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.validation import Validator, ValidationError
+
+# ── PromptSession 复用缓存：prompt() 快捷函数每次调用都会重建会话（约 20~45ms），
+#    按输入签名缓存后，提示符刷新不再付出会话构建开销 ──
+_SESSION_CACHE = {"key": None, "session": None}
 
 # 导入拆分的模块
 from .kb import create_key_bindings
@@ -1573,18 +1577,33 @@ def universal_input(
             return not is_completion_locked()
 
         prompt_text = prompt_func()
-        user_input = prompt(
-            prompt_text,
-            completer=completer,
-            lexer=lexer,
-            complete_while_typing=completion_typing_filter,
-            style=comp_style,
-            key_bindings=kb,
-            # mouse_support 已移除，避免鼠标接管终端滚动
-            complete_in_thread=True,
-            reserve_space_for_menu=6,
-            auto_suggest=auto_suggest,
+        # 复用 PromptSession（prompt() 快捷函数每次都会重建会话，约 20~45ms/次）
+        try:
+            _vc = _VALID_COMMANDS
+            _vhash = hash(frozenset(_vc.keys() if isinstance(_vc, dict) else _vc))
+        except Exception:
+            _vhash = -1
+        _cache_key = (
+            virtual_root, sys_type, get_terminal_type(), _vhash,
+            repr(sorted((_ptk_config.get("colors") or {}).items())),
         )
+        if _SESSION_CACHE.get("key") == _cache_key and _SESSION_CACHE.get("session") is not None:
+            session = _SESSION_CACHE["session"]
+        else:
+            session = PromptSession(
+                completer=completer,
+                lexer=lexer,
+                complete_while_typing=completion_typing_filter,
+                style=comp_style,
+                key_bindings=kb,
+                # mouse_support 已移除，避免鼠标接管终端滚动
+                complete_in_thread=True,
+                reserve_space_for_menu=6,
+                auto_suggest=auto_suggest,
+            )
+            _SESSION_CACHE["key"] = _cache_key
+            _SESSION_CACHE["session"] = session
+        user_input = session.prompt(prompt_text)
 
         # ── 虚影补全接受的多行命令：以多行形式重放，不进入单行缓冲区 ──
         user_input = _consume_pending_multiline_recall(user_input, virtual_root)

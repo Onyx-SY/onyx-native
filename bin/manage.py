@@ -180,6 +180,9 @@ def sync_language_to_configjson() -> None:
     try:
         with open(CONFIG_JSON_PATH, "r", encoding="utf-8") as f:
             config = json.load(f)
+        # 值未变则跳过写盘（启动提速）
+        if config.get("display_info", {}).get("language", {}).get("default") == lang:
+            return
         with open(CONFIG_JSON_PATH, "w", encoding="utf-8") as f:
             config["display_info"]["language"]["default"] = lang
             json.dump(config, f, ensure_ascii=False, indent=2)

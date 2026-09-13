@@ -32,28 +32,21 @@ import gc
 import os
 import sys
 import json
-import ctypes
 import time
-import shutil
 import re
 import threading
 import shlex
 import uuid
 import socket
-import subprocess
-import platform  
 from getpass import getpass
-import secrets
-import hashlib
 
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 from lib.terminal.colors import Fore, Style
-from typing import Dict, List, Tuple, Optional, Any, Callable, Union
+from typing import Dict, List, Tuple, Optional, Any, Callable, Union, TYPE_CHECKING
 
-
-
-from pathlib import Path
+if TYPE_CHECKING:
+    from concurrent.futures import ThreadPoolExecutor
+# 注：ctypes / shutil / concurrent.futures 改为函数内惰性导入，压缩启动耗时
 
 
 # === 热路径模块级导入（从函数内提升，避免每条命令重复 import 查找）===
@@ -337,7 +330,7 @@ MAIN_FILE_KEYWORDS: List[str] = ["main", "主", "entry", "入口", "start", "启
 
 PROCESS_LOCK = None
 # 3. 线程与进程管理(吃灰吧，不想维护)
-executor: Optional[ThreadPoolExecutor] = None  # 线程池
+executor: "Optional[ThreadPoolExecutor]" = None  # 线程池（ThreadPoolExecutor 惰性导入）
 process_lock = threading.Lock()                # 进程列表锁
 CURRENT_PROCESSES: List[Tuple[int, float, str, str]] = []  # 运行中进程（PID+时间+请求ID+命令）
 
@@ -1012,6 +1005,7 @@ def check_log_rotation() -> None:
         # 轮转后的旧日志名：.onyx-main-时间戳.log.轮转时间戳（如.onyx-main-20251029214000.log.20251029215000）
         rotate_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         old_log = f"{LOG_FILE_PATH}.{rotate_timestamp}"
+        import shutil
         shutil.move(LOG_FILE_PATH, old_log)
         print(Fore.YELLOW + f"日志轮转完成：{os.path.basename(old_log)}" + Style.RESET_ALL)
 
@@ -1245,7 +1239,8 @@ def load_config() -> bool:
     USER_HISTORY_PATH = os.path.join(USER_HOME_DIR, ".onyx_cmd_history")
     
     
-    # 线程池初始化
+    # 线程池初始化（惰性导入，避免启动时加载 concurrent.futures）
+    from concurrent.futures import ThreadPoolExecutor
     executor = ThreadPoolExecutor(max_workers=SANDBOX_CONFIG["max_process_count"])
     PYTHON_EXE = "python"
     
@@ -1481,6 +1476,7 @@ def check_admin_permission() -> None:
             # 直接调用 os.geteuid()，不依赖任何缓存
             is_admin = os.geteuid() == 0
         elif sys.platform.startswith("win32"):
+            import ctypes
             is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
         
         # 强制覆盖 user_info，不保留旧缓存
@@ -2038,11 +2034,6 @@ def _show_cmd_error_hint(cmd: str, request_id: str, reason: str) -> None:
 
 #Oh My God 一直在维护的核心模块，重点关注谢谢   核心模块啊！！！
 
-def handle_cd(cmd_parts: List[str], request_id: str) -> None:
-    from core.handlers.cd_handler import handle_cd as _hcd
-    from core.context import get_ctx
-    _hcd(get_ctx(), cmd_parts, request_id)
-
 # ====================== mktool 命令处理函数 =======================
 # ====================== mktool 命令处理函数 =======================
 def handle_mktool(cmd_parts: List[str], request_id: str) -> None:
@@ -2523,7 +2514,6 @@ def _lazy_help(cmd_parts: List[str], request_id: str) -> None:
 
 BUILTIN_COMMANDS: Dict[str, Callable[[List[str], str], None]] = {
     # 基础TBS命令
-    "cd": handle_cd,
     "exit": handle_exit,
     "refresh": lambda cmd_parts, req_id: executor.submit(
         lambda: generate_tool_alias_commands(str(uuid.uuid4())), req_id
@@ -2728,6 +2718,7 @@ def show_welcome():
      print(title_color + ascii_art + Style.RESET_ALL)
      
      # 5. 显示欢迎标题（居中对齐，增强美观度）
+     import shutil
      terminal_width = shutil.get_terminal_size().columns
      centered_title = welcome_title.center(terminal_width)
      #print(title_color + centered_title + Style.RESET_ALL)
@@ -3246,8 +3237,9 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
 
         # 18. 根目录缓存预热
         if os.path.isdir(ROOT_DIR):
-            cache_directory_files(ROOT_DIR, request_id)
-            log_info(f"根目录缓存预热: {ROOT_DIR}", request_id)
+            threading.Thread(
+                target=lambda: cache_directory_files(ROOT_DIR, request_id),
+                daemon=True, name="root-dir-cache-warmup").start()
         record_step("26.root_dir_cache_warmup")
 
         # 19. 初始化启动耗时统计
@@ -3259,12 +3251,21 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
         global DEBUG_TIMES_PATH, DEBUG_PARSECMD_PATH  # 更新模块级全局变量
         sync_language_to_configjson()
         record_step("28.sync_language_to_configjson")
-        
-        auto_clean_expired_logs()
+
+        # 日志清理 + manage 默认配置：改为后台执行，不阻塞首屏
+        def _deferred_startup_tasks():
+            try:
+                auto_clean_expired_logs()
+            except Exception:
+                pass
+            try:
+                if not oneshot:
+                    handle_manage(["manage", "-q"], request_id)
+            except Exception:
+                pass
+        threading.Thread(target=_deferred_startup_tasks, daemon=True,
+                         name="startup-deferred").start()
         record_step("29.auto_clean_expired_logs")
-        
-        if not oneshot:
-            handle_manage(["manage", "-q"], request_id)
         record_step("30.handle_manage")
 
         # 21. 加载自启命令

@@ -3,7 +3,6 @@
 import os
 import json
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -115,6 +114,7 @@ def load_config(ctx: "AppContext") -> bool:
     ctx.USER_CONFIG_PATH = os.path.join(ctx.USER_HOME_DIR, ".onyx_user_config.json")
     ctx.USER_HISTORY_PATH = os.path.join(ctx.USER_HOME_DIR, ".onyx_cmd_history")
 
+    from concurrent.futures import ThreadPoolExecutor
     ctx.executor = ThreadPoolExecutor(max_workers=ctx.SANDBOX_CONFIG["max_process_count"])
     ctx.PYTHON_EXE = "python"
 

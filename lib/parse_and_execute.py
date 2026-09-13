@@ -596,8 +596,8 @@ def _sync_cwd_from_shell(log_info_func=None, request_id: str = None, cmd_type: s
                     if log_info_func:
                         log_info_func(f"阻止越界同步: shell={shell_cwd}, 拉回沙箱根目录", request_id)
                     try:
-                        from lib.terminal.exe import _get_persistent_shell
-                        ps = _get_persistent_shell()
+                        from lib.terminal.exe import get_persistent_shell_raw
+                        ps = get_persistent_shell_raw()
                         if ps is not None:
                             ps.set_cwd(_SANDBOX_ROOT)
                             ps.cwd = _SANDBOX_ROOT
@@ -621,8 +621,8 @@ def _sync_cwd_from_shell(log_info_func=None, request_id: str = None, cmd_type: s
                 # 同步 PersistentShell.cwd，防止下次 _get_persistent_shell
                 # 误判为不同步并用旧 cwd 覆盖 shell
                 try:
-                    from lib.terminal.exe import _get_persistent_shell
-                    ps = _get_persistent_shell()
+                    from lib.terminal.exe import get_persistent_shell_raw
+                    ps = get_persistent_shell_raw()
                     if ps is not None:
                         ps.cwd = shell_cwd
                 except ImportError:

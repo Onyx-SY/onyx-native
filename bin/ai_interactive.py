@@ -7,7 +7,7 @@ AI 独立交互会话 — 持久对话 REPL
 用法：由 ai_cmd.handle_ai 入口调用，或 Onyx.py 直接调用 ai_interactive_session()。
 """
 
-import asyncio
+
 import os
 import sys
 import time
@@ -28,9 +28,15 @@ from prompt_toolkit.filters import is_searching
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.markdown import Markdown
+
 
 console = Console()
+
+
+def _markdown(text, **kw):
+    """惰性导入 rich.markdown（依赖 markdown_it/pygments，约 100ms，启动不加载）。"""
+    from rich.markdown import Markdown as _M
+    return _M(text, **kw)
 
 
 # ─────────────────────────────── / 指令表 ───────────────────────────────
@@ -97,6 +103,26 @@ _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/sessions": "List saved sessions",
     "/cost":   "Show cost stats (today / total / session)",
     "/doctor": "🔧 Health check (key/MCP/memory/env)",
+}
+
+# ── 斜杠命令的参数枚举补全（Tab 补全用；仅收录有固定取值集的参数）──
+# 第一参数：/lang cn|en、/mode normal|plan、/param <名称>、/chat list|switch|new …
+_SLASH_ARG_ENUMS: Dict[str, List[str]] = {
+    "/lang":        ["cn", "en"],
+    "/mode":        ["normal", "plan"],
+    "/memory-mode": ["global", "project"],
+    "/memmode":     ["global", "project"],
+    "/param":       ["temperature", "top_p", "max_tokens", "reasoning_effort", "thinking"],
+    "/chat":        ["list", "switch", "new"],
+    "/mcp":         ["list", "install", "remove"],
+    "/history":     ["-c", "-a"],
+    "/resume":      ["latest"],
+}
+
+# 第二参数：/param reasoning_effort high|max、/param thinking on|off
+_SLASH_ARG2_ENUMS: Dict[tuple, List[str]] = {
+    ("/param", "reasoning_effort"): ["high", "max"],
+    ("/param", "thinking"):         ["on", "off"],
 }
 
 _HELP_TEXT_CN = """\
@@ -186,9 +212,7 @@ def _current_word(text: str) -> str:
 
 
 def _iter_path_completions(word: str):
-    """文件系统路径补全：目录追加 '/'，隐藏项仅在前缀为 '.' 时给出。"""
-    if not word:
-        return
+    """文件系统路径补全：目录追加 '/'，隐藏项仅在前缀为 '.' 时给出；空词 → 列出当前目录。"""
     expanded = os.path.expanduser(word) if word.startswith("~") else word
     if expanded.endswith(os.sep) or expanded.endswith("/"):
         search_dir, base = expanded, ""
@@ -226,7 +250,7 @@ class _AICompleter(Completer):
     """
 
     # 参数位置需要路径补全的斜杠命令
-    _PATH_ARG_CMDS = ("/cd", "/resume", "/save", "/export", "/load")
+    _PATH_ARG_CMDS = ("/cd", "/resume", "/save", "/export")
 
     def __init__(self, slash_cmds: Dict[str, str], lang: str = "chinese"):
         self._slash = slash_cmds
@@ -237,17 +261,44 @@ class _AICompleter(Completer):
         stripped = text.lstrip()
         word = _current_word(text)
 
-        # 1) 斜杠命令头补全（尚未输入空格时）
+        # 1) 斜杠命令头补全（尚未输入空格时，大小写不敏感）
         if stripped.startswith("/") and " " not in stripped:
+            low = stripped.lower()
             for cmd, desc in self._slash.items():
-                if cmd.startswith(stripped):
+                if cmd.lower().startswith(low):
                     yield Completion(cmd, start_position=-len(word),
                                      display=cmd, display_meta=desc)
             return
 
-        # 2) 斜杠命令的参数位置（如 /cd <path>）→ 路径补全
+        # 2) 斜杠命令的参数位置（如 /cd <path>、/lang cn|en）→ 路径 / 枚举补全
         if stripped.startswith("/") and " " in stripped:
-            head = stripped.split(None, 1)[0]
+            parts = stripped.split()
+            head = parts[0].lower()
+            ends_space = stripped[-1].isspace()
+            arg_idx = len(parts) if ends_space else len(parts) - 1
+            low = word.lower()
+
+            # 2a) 固定枚举参数（/lang cn|en、/mode normal|plan、/param <名称> <值> …）
+            if head in _SLASH_ARG_ENUMS:
+                if arg_idx == 1:
+                    cands = _SLASH_ARG_ENUMS[head]
+                elif arg_idx == 2:
+                    cands = _SLASH_ARG2_ENUMS.get((head, parts[1].lower()), [])
+                else:
+                    cands = []
+                for val in cands:
+                    if val.lower().startswith(low):
+                        yield Completion(val, start_position=-len(word), display=val)
+                return
+
+            # 2b) /help <命令> → 补全斜杠命令名
+            if head == "/help":
+                for cmd in self._slash:
+                    if cmd.lower().startswith(low):
+                        yield Completion(cmd, start_position=-len(word), display=cmd)
+                return
+
+            # 2c) 路径参数（/cd <路径>）
             if head in self._PATH_ARG_CMDS:
                 yield from _iter_path_completions(word)
             return
@@ -680,7 +731,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         return True
 
     elif cmd == "/help":
-        console.print(Markdown(_build_help(lang)))
+        console.print(_markdown(_build_help(lang)))
         return True
 
     elif cmd == "/clear":
@@ -1372,6 +1423,7 @@ def _probe_next_line(peek_session, window: float) -> Optional[str]:
     result = []
 
     def _run():
+        import asyncio
         async def _probe():
             return await asyncio.wait_for(
                 peek_session.prompt_async(message="", handle_sigint=False), window)
@@ -1440,7 +1492,7 @@ def ai_interactive_session(
     }
 
     console.print(Panel(
-        Markdown(_t("welcome", current_lang)),
+        _markdown(_t("welcome", current_lang)),
         title=f"🤖 Onyx AI — {_t('title', current_lang)}"
     ))
 
@@ -1526,6 +1578,30 @@ def ai_interactive_session(
             # 普通模式：进入多行模式并换行（已有内容另起一行；之后 Enter 都是换行暂存）
             _ml_state["active"] = True
             b.insert_text('\n')
+
+    # ── Tab 补全：对齐 lib/terminal/kb.py（completion_next / completion_prev）──
+    # prompt_toolkit 默认 Tab 绑定会 insert_common_part：多个候选共享前缀时只补出
+    # "ex" 这类残缺结果（如输入 /e → 补成 /ex，而不是完整的 /exit）。这里改为与
+    # shell REPL 一致：菜单未开则打开菜单且不插入公共前缀；菜单已开则选中/循环下一项，
+    # 一次 Tab 即补全到完整命令。同时清除幽灵建议（AutoSuggestFromHistory 虚影），
+    # 避免虚影与补全叠加导致文本损坏。
+    @_kb.add('c-i', eager=True, filter=~is_searching)
+    def _complete_next(event):
+        b = event.current_buffer
+        b.suggestion = None
+        if b.complete_state:
+            b.complete_next()
+        else:
+            b.start_completion(select_first=False)
+
+    @_kb.add('s-tab', eager=True, filter=~is_searching)
+    def _complete_prev(event):
+        b = event.current_buffer
+        b.suggestion = None
+        if b.complete_state:
+            b.complete_previous()
+        else:
+            b.start_completion(select_first=False)
 
     @_kb.add('c-c', eager=True, filter=~is_searching)
     def _cancel(event):
@@ -1679,7 +1755,7 @@ def _call_ai_engine(
                     # 展示最终规划（透明可审，替代纯静默注入）
                     try:
                         console.print(Panel(
-                            Markdown(_plus_think),
+                            _markdown(_plus_think),
                             title=("🧠 Plus 执行规划" if ctx.get("lang", "chinese") == "chinese" else "🧠 Plus Plan"),
                             border_style="cyan",
                         ))

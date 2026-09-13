@@ -1662,6 +1662,17 @@ def _get_persistent_shell(cwd: Optional[str] = None) -> PersistentShell:
     return _persistent_shell
 
 
+def get_persistent_shell_raw() -> Optional[PersistentShell]:
+    """返回持久 shell 实例，但**不做任何 cwd 同步副作用**。
+
+    与 _get_persistent_shell 的区别：本函数只读取全局实例，不会因为
+    ps.cwd 与当前 cwd 不一致而向 shell 补发 `cd`（补发 cd 会覆盖 shell
+    的 OLDPWD，破坏 `cd -`）。供 _sync_cwd_from_shell 等「只拿实例、
+    只改属性」的场景使用。
+    """
+    return _persistent_shell
+
+
 def get_var_from_shell(var_name: str) -> Optional[str]:
     """Read variable value from persistent shell"""
     global _persistent_shell

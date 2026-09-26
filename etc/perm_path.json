@@ -130,6 +130,20 @@
     ]
   },
 
+  "/data/data/com.termux/files/usr/tmp/<*:10>": {
+    "mode": "blacklist",
+    "min_mode": "adv",
+    "allow_advanced_syntax": true,
+    "commands": [
+      "mkfs", "fdisk", "parted", "gdisk", "sgdisk",
+      "dd", "dcfldd",
+      "wipefs", "shred",
+      "mkswap", "cryptsetup",
+      "pvremove", "pvcreate", "vgremove", "vgcreate", "lvremove", "lvcreate",
+      "mdadm", "dmsetup"
+    ]
+  },
+
   "/var/log/<*:10>": {
     "mode": "blacklist",
     "min_mode": "adv",

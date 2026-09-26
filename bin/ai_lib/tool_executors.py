@@ -27,9 +27,43 @@ from .native_tools import build_native_tools
 console = Console()
 
 
+# ── 会话任务列表（TodoWrite）共享状态 ──
+# TodoWrite 执行器原为纯函数；这里保留最近一次写入的列表，供 TUI 侧栏 / 窄屏状态条
+# 实时渲染。无持久化（与工具语义一致：AI 每次写入即全量覆盖）。
+_TODO_STATE: List[Dict] = []
+
+
+def get_todos() -> List[Dict]:
+    """返回当前会话任务列表（副本）。"""
+    return [dict(t) for t in _TODO_STATE]
+
+
+def set_todos(todos) -> None:
+    """更新会话任务列表并通知 UI 适配器（TUI 侧栏 / 窄屏状态条）。
+
+    适配器缺失（REPL）或方法未实现时静默跳过 —— 状态本身仍然保留。
+    """
+    global _TODO_STATE
+    try:
+        _TODO_STATE = [dict(t) for t in (todos or []) if isinstance(t, dict)]
+    except Exception:
+        _TODO_STATE = []
+    try:
+        from .ui import get_ui_adapter
+        adapter = get_ui_adapter()
+        if adapter is not None and hasattr(adapter, "set_todos"):
+            adapter.set_todos(get_todos())
+    except Exception:
+        pass
+
+
 def _exec_validate_edit(file_path: str, search: str, replace: str) -> str:
     """校验 SEARCH/REPLACE 编辑。"""
     try:
+        if not file_path:
+            return _i18n("missing_path_arg", "bilingual")
+        if not search:
+            return _i18n("missing_text_arg", "bilingual")
         from lib.edit_engine import validate_edit, dry_run_edit
         ok, msg = validate_edit(file_path, search, replace)
         if ok:
@@ -43,6 +77,10 @@ def _exec_validate_edit(file_path: str, search: str, replace: str) -> str:
 def _exec_preview_edit(file_path: str, search: str, replace: str) -> str:
     """预览 diff。"""
     try:
+        if not file_path:
+            return _i18n("missing_path_arg", "bilingual")
+        if not search:
+            return _i18n("missing_text_arg", "bilingual")
         from lib.edit_engine import dry_run_edit
         diff = dry_run_edit(file_path, search, replace)
         if diff.startswith("❌"):
@@ -56,6 +94,8 @@ def _exec_get_file_info(file_path: str) -> str:
     """获取文件基本信息。"""
     try:
         import os, datetime
+        if not file_path:
+            return _i18n("missing_path_arg", "bilingual")
         if not os.path.exists(file_path):
             return _i18n("finfo_not_found", "bilingual", path=file_path)
         stat = os.stat(file_path)
@@ -154,6 +194,8 @@ def _exec_read_file(file_path: str, range_str: str = None, head: int = None, tai
     """
     from ..ai_cmd import _AI_INTERRUPTED
     try:
+        if not file_path:
+            return _i18n("missing_path_arg", "bilingual")
         abs_path = os.path.abspath(file_path)
         if not os.path.exists(abs_path):
             return _i18n("read_not_found", "bilingual", path=abs_path)
@@ -252,6 +294,8 @@ def _exec_read_file(file_path: str, range_str: str = None, head: int = None, tai
 def _exec_write_file(file_path: str, content: str) -> str:
     """写入文件（全量覆盖）。返回中包含 original_file 供撤销。"""
     try:
+        if not file_path:
+            return _i18n("missing_path_arg", "bilingual")
         os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
         old_content = ""
         is_update = False
@@ -279,9 +323,17 @@ def _exec_write_file(file_path: str, content: str) -> str:
         return f"❌ write_file failed: {e}"
 
 
-def _exec_edit_file(file_path: str, old_string: str, new_string: str) -> str:
-    """SEARCH/REPLACE 精确替换。返回中包含 original_file 供撤销。"""
+def _exec_edit_file(file_path: str, old_string: str, new_string: str,
+                    replace_all: bool = False) -> str:
+    """SEARCH/REPLACE 精确替换。返回中包含 original_file 供撤销。
+
+    replace_all=True 时替换全部匹配（不再要求唯一）。
+    """
     try:
+        if not file_path:
+            return _i18n("missing_path_arg", "bilingual")
+        if not old_string:
+            return _i18n("missing_text_arg", "bilingual")
         from lib.edit_engine import apply_edit
         # 读旧内容做 diff 预览 + 保存原始内容
         old_content = ""
@@ -292,13 +344,14 @@ def _exec_edit_file(file_path: str, old_string: str, new_string: str) -> str:
         except Exception:
             old_content = ""
         if old_content and old_string in old_content:
-            new_content = old_content.replace(old_string, new_string, 1)
+            new_content = (old_content.replace(old_string, new_string) if replace_all
+                           else old_content.replace(old_string, new_string, 1))
             console.print("  " + _i18n("edit_console_ok", "bilingual", path=file_path))
             try:
                 _render_edit_diff(old_content, new_content)
             except Exception:
                 pass
-        ok, msg = apply_edit(file_path, old_string, new_string)
+        ok, msg = apply_edit(file_path, old_string, new_string, replace_all=replace_all)
         if ok:
             # 保存到全局撤销记录
             global _LAST_EDIT
@@ -646,6 +699,7 @@ def _exec_structured_output(format: str, data: str) -> str:
 def _exec_todo_write(todos: list) -> str:
     """更新任务列表。"""
     try:
+        set_todos(todos)  # 写入共享状态并推送 UI（TUI 侧栏 / 窄屏状态条实时刷新）
         if not todos:
             return "✅ 任务列表已清空"
         lines = []
@@ -653,13 +707,13 @@ def _exec_todo_write(todos: list) -> str:
         in_progress = sum(1 for t in todos if t.get("status") == "in_progress")
         completed = sum(1 for t in todos if t.get("status") == "completed")
         lines.append(f"📋 任务列表（共 {len(todos)} 项：⏳ {pending} 待办 · 🔄 {in_progress} 进行中 · ✅ {completed} 完成）")
-        for t in todos:
+        for i, t in enumerate(todos, 1):
             status = t.get("status", "pending")
             content = t.get("content", "")
             active = t.get("activeForm", "")
             icon = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}.get(status, "⏳")
             status_text = {"pending": "待办", "in_progress": active or "进行中", "completed": "完成"}.get(status, "")
-            lines.append(f"{icon} {content} _{status_text}_")
+            lines.append(f"{i}. {icon} {content} _{status_text}_")
         return "\n".join(lines)
     except Exception as e:
         return f"❌ TodoWrite failed: {e}"

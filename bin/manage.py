@@ -28,7 +28,11 @@ init_color_safe()
 # 路径配置（跨平台兼容）
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-USER = os.getlogin()
+try:
+    import getpass as _getpass
+    USER = _getpass.getuser()
+except Exception:
+    USER = os.environ.get("USER") or os.environ.get("LOGNAME") or "default"
 USER_HOME_DIR = os.path.join(ROOT_DIR, "root") if USER == "root" else os.path.join(ROOT_DIR, "home", USER)
 CONFIG_DIR = os.path.join(USER_HOME_DIR, ".config", "onyx")
 CONFIG_JSON_PATH = os.path.join(ROOT_DIR, "onyx", "etc", "config.json")

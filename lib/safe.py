@@ -305,6 +305,34 @@ def _get_msg(key: str, **kwargs) -> str:
     return msg_template
 
 
+def _ai_context_confirm(confirm_msg: str) -> bool:
+    """人类确认分支的统一入口：AI 执行上下文下不抢终端，改走正规 UI 确认。
+
+    AI（REPL/TUI）执行命令时 prompt_toolkit 会话仍占用终端；若此处用裸 input()
+    弹 y/N，会与 prompt_toolkit 抢 stdin → 提示符重复渲染/终端错乱。
+    因此当 lib.terminal.exe.AI_EXECUTION_MODE 为真时，委托 bin.ai_lib.ui.confirm
+    （TUI → 模态框；REPL → inquirer/prompt_toolkit），并用 real_terminal_io() 保证
+    提示不被 AI 的输出捕获流吞掉。纯 shell 场景保持原裸 input()，行为不变。
+
+    返回 True 表示用户确认执行。
+    """
+    import sys as _sys
+    _exe = _sys.modules.get('lib.terminal.exe')
+    if getattr(_exe, 'AI_EXECUTION_MODE', False):
+        try:
+            from bin.ai_lib.ui import real_terminal_io, confirm as _ui_confirm
+            with real_terminal_io():
+                return bool(_ui_confirm(confirm_msg, default=False, lang=_CURRENT_LANG))
+        except Exception:
+            pass  # 委托失败 → 回退裸 input()
+    try:
+        _ans = input(Fore.YELLOW + confirm_msg + Style.RESET_ALL).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return _ans in ('y', 'yes')
+
+
 def _adv_confirm_with_disable_option(warning_msg: str, confirm_msg: str, 
                                       cmd_type: str, user_home: str = None,
                                       force_confirm: bool = False) -> bool:
@@ -325,7 +353,9 @@ def _adv_confirm_with_disable_option(warning_msg: str, confirm_msg: str,
     global _ADV_DANGER_CMD_PROMPT_ENABLED
 
     # === 会话级跳过：本会话已验证过一次验证码，后续命令执行不再重复弹验证码 ===
-    if _SESSION_CAPTCHA_VERIFIED:
+    # ⚠️ 但**强制确认类型（rm / 重定向 / here-doc）不享受豁免**：会话标记可能来自
+    #    另一次确认，不能让 `rm -rf` 这类命令靠它静默执行。
+    if _SESSION_CAPTCHA_VERIFIED and not force_confirm:
         _debug_print(f"本会话已验证过验证码，跳过确认 (cmd_type={cmd_type})")
         print(Fore.LIGHTBLACK + _get_msg("captcha_skip_hint") + Style.RESET_ALL)
         return True
@@ -344,18 +374,11 @@ def _adv_confirm_with_disable_option(warning_msg: str, confirm_msg: str,
             force_info = _get_msg("force_confirm_info", cmd_types=', '.join(force_types))
             print(Fore.YELLOW + force_info + Style.RESET_ALL)
     
-    # ── 4 位 hex 验证码确认 ──
+    # ── 4 位 hex 验证码确认（统一走 ui.captcha；TUI 下为模态输入）──
     import secrets as _safe_secrets
-    captcha = _safe_secrets.token_hex(2).upper()
-    print(Fore.RED + warning_msg + Style.RESET_ALL)
-    print(Fore.YELLOW + _get_msg("captcha_prompt", captcha=captcha) + Style.RESET_ALL)
-    try:
-        confirm = input("> ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return False
-    
-    if confirm.upper() != captcha:
+    _captcha = _safe_secrets.token_hex(2).upper()
+    from bin.ai_lib.ui import captcha as _ui_captcha
+    if not _ui_captcha("🛡️ 危险命令确认", warning_msg, _captcha, _CURRENT_LANG):
         print(Fore.RED + _get_msg("captcha_wrong") + Style.RESET_ALL)
         return False
 
@@ -379,14 +402,12 @@ def _adv_confirm_with_disable_option(warning_msg: str, confirm_msg: str,
         _debug_print(f"内存缓存中 {cmd_type} 已关闭二次确认，跳过询问")
         return True
     
-    # 询问是否关闭后续此类危险操作的二次确认
-    try:
-        disable_msg = _get_msg("adv_confirm_disable_ask")
-        disable_confirm = input(Fore.YELLOW + disable_msg + Style.RESET_ALL)
-    except (EOFError, KeyboardInterrupt):
-        disable_confirm = 'n'
-    
-    if disable_confirm.lower() == 'y':
+    # 询问是否关闭后续此类危险操作的二次确认（统一走 ui.confirm）
+    disable_msg = _get_msg("adv_confirm_disable_ask")
+    from bin.ai_lib.ui import confirm as _ui_confirm
+    _disable_confirm = _ui_confirm(disable_msg, default=False, lang=_CURRENT_LANG)
+
+    if _disable_confirm:
         # === 用户选择关闭二次确认，保存到文件 ===
         success = save_adv_danger_cmd_config(False, user_home)
         if success:
@@ -883,6 +904,23 @@ def _all_paths_in_home_zones(phys_paths: List[str], zones: List[str]) -> bool:
     return True
 
 
+def _onyx_internal_entry_paths() -> set:
+    """Onyx 自身的执行入口文件（cmd.py）——实现细节路径，不参与细颗粒规则匹配。
+
+    背景：无 shebang 的文本脚本（`./a.sh`）会被执行层改写成
+    `python <ROOT>/onyx/cmd.py -c "source ./a.sh"`。cmd.py 是 Onyx **设计上的命令执行接口**，
+    但它位于沙箱外，会被 `/` 兜底规则按 `min_mode` 拦掉（mid 模式直接拒绝）。
+    这里把它排除掉：经它执行的内部命令仍会走完整安全检查，安全边界不变。
+    """
+    if not _ROOT_DIR:
+        return set()
+    entry = os.path.join(_ROOT_DIR, "onyx", "cmd.py")
+    try:
+        return {os.path.realpath(entry), entry}
+    except Exception:
+        return {entry}
+
+
 def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str], 
                                    username: str, user_mode,
                                    log_info_func=None, log_error_func=None,
@@ -931,11 +969,15 @@ def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str],
     # 【修复重复询问】：收集所有被拦截的路径，统一处理
     denied_paths = []
     min_mode_violation = None  # (path, required_mode)：规则要求的最低模式高于当前模式
+    _internal_entries = _onyx_internal_entry_paths()   # Onyx 自身执行入口，见该函数说明
     for phys_path in all_phys_paths:
         if not phys_path:
             continue
         if phys_path == FORBIDDEN_MSG:
             continue  # 非真实路径：越界裁决已由执行层转换兜底，不参与规则匹配
+        if phys_path in _internal_entries:
+            _debug_print(f"跳过 Onyx 内部执行入口（实现细节路径）：{phys_path}")
+            continue
         
         is_hit, matched_rule = is_path_under_fine_grained_control(
             phys_path, _ROOT_DIR, username, check_existence=False
@@ -1013,12 +1055,7 @@ def check_path_permission_for_cmd(cmd_head: str, all_phys_paths: List[str],
             warning_msg = _get_msg("adv_path_permission_warning", cmd=cmd_head, path=paths_str)
             print(Fore.YELLOW + warning_msg + Style.RESET_ALL)
             confirm_msg = _get_msg("adv_confirm_exec")
-            try:
-                confirm = input(Fore.YELLOW + confirm_msg + Style.RESET_ALL).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return False
-            if confirm in ('y', 'yes'):
+            if _ai_context_confirm(confirm_msg):
                 _debug_print(f"人类用户确认执行：{cmd_head}")
                 print(Fore.GREEN + _get_msg("user_confirmed") + Style.RESET_ALL)
                 return True
@@ -1244,12 +1281,7 @@ def check_fine_grained_advanced_syntax(phys_paths: List[str], root_dir: str, use
                 return True
             warning_msg = _get_msg(deny_key)
             print(Fore.YELLOW + warning_msg + Style.RESET_ALL)
-            try:
-                confirm = input(Fore.YELLOW + _get_msg("adv_confirm_exec") + Style.RESET_ALL).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return False
-            if confirm in ('y', 'yes'):
+            if _ai_context_confirm(_get_msg("adv_confirm_exec")):
                 mark_session_captcha_verified()
                 _debug_print("人类用户确认执行高级语法命令（本会话后续不再询问）")
                 print(Fore.GREEN + _get_msg("user_confirmed") + Style.RESET_ALL)

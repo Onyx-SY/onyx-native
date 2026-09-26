@@ -154,10 +154,12 @@ def validate_edit(file_path: str, search: str, replace: str) -> Tuple[bool, str]
     return True, ""
 
 
-def _check_search_uniqueness(file_path: str, search: str) -> Tuple[bool, str, Optional[str]]:
+def _check_search_uniqueness(file_path: str, search: str,
+                             require_unique: bool = True) -> Tuple[bool, str, Optional[str]]:
     """
-    检查 search 存在性+唯一性，返回 (ok, error, content)。
+    检查 search 存在性(+唯一性)，返回 (ok, error, content)。
     内部函数，避免重复读文件。
+    require_unique=False（replace_all 场景）时允许多次出现。
     """
     if not os.path.exists(file_path):
         return False, f"File not found: {file_path}", None
@@ -169,23 +171,27 @@ def _check_search_uniqueness(file_path: str, search: str) -> Tuple[bool, str, Op
     count = content.count(search)
     if count == 0:
         return False, f"SEARCH text not found in {file_path}", None
-    if count > 1:
+    if count > 1 and require_unique:
         return False, f"SEARCH text found {count} times (not unique) in {file_path}", None
     return True, "", content
 
 
 # ──────────────────────────── Diff 预览 ───────────────────────
 
-def dry_run_edit(file_path: str, search: str, replace: str) -> str:
+def dry_run_edit(file_path: str, search: str, replace: str,
+                 replace_all: bool = False) -> str:
     """
     生成 SEARCH/REPLACE 编辑的 unified diff 预览。
 
+    replace_all=True 时预览「全部替换」的 diff。
     返回: diff 文本（适合终端显示）
     """
-    ok, error, content = _check_search_uniqueness(file_path, search)
+    ok, error, content = _check_search_uniqueness(file_path, search,
+                                                  require_unique=not replace_all)
     if not ok:
         return f"❌ {error}"
-    new_content = content.replace(search, replace, 1)
+    new_content = (content.replace(search, replace) if replace_all
+                   else content.replace(search, replace, 1))
     rel_path = os.path.relpath(file_path) if os.path.exists(file_path) else file_path
     diff = difflib.unified_diff(
         content.splitlines(keepends=True),
@@ -204,20 +210,22 @@ def _backup_path(file_path: str) -> str:
 
 
 def apply_edit(file_path: str, search: str, replace: str,
-               backup: bool = True) -> Tuple[bool, str]:
+               backup: bool = True, replace_all: bool = False) -> Tuple[bool, str]:
     """
     执行 SEARCH/REPLACE 编辑，失败自动回滚。
 
     参数:
-      file_path: 目标文件
-      search:    要查找的文本
-      replace:   替换文本
-      backup:    是否创建 .bak 备份
+      file_path:   目标文件
+      search:      要查找的文本
+      replace:     替换文本
+      backup:      是否创建 .bak 备份
+      replace_all: True 时替换全部匹配（不要求唯一）
 
     返回: (ok: bool, message: str)
     """
     # 1. 校验
-    ok, error, content = _check_search_uniqueness(file_path, search)
+    ok, error, content = _check_search_uniqueness(file_path, search,
+                                                  require_unique=not replace_all)
     if not ok:
         return False, error
 
@@ -231,7 +239,8 @@ def apply_edit(file_path: str, search: str, replace: str,
 
     # 3. 写入
     try:
-        new_content = content.replace(search, replace, 1)
+        new_content = (content.replace(search, replace) if replace_all
+                       else content.replace(search, replace, 1))
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
     except Exception as e:

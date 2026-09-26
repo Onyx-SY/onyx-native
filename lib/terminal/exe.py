@@ -208,6 +208,113 @@ AI_EXECUTION_MODE = False
 # 内置命令不经 subprocess → 保持 None，显示 "-"）
 AI_LAST_EXIT_CODE: Optional[int] = None
 
+# ── AI 命令中断注册表（2026-09）──
+# 目的：Ctrl+C 必须能杀掉「AI 正在执行的命令」，即使命令跑在**工作线程**里
+# （signal.signal 只能装在主线程 → 工作线程装不上 handler，Ctrl+C 打不到子进程）。
+# 这里维护「当前活跃的 AI 命令进程组」表；主线程的 SIGINT handler（ai_cmd 的
+# _on_interrupt）优先调用 interrupt_active_ai_cmds() 转发信号，而不是打断 AI 循环。
+_AI_CMD_LOCK = threading.Lock()
+_AI_ACTIVE_CMDS: Dict[int, Dict[str, Any]] = {}   # id(proc) -> {"proc": Popen, "hits": int}
+_AI_CMD_ESCALATE = (signal.SIGINT, signal.SIGTERM,
+                    getattr(signal, "SIGKILL", signal.SIGTERM))   # Windows 无 SIGKILL
+
+
+def register_ai_cmd(proc) -> None:
+    """登记一个正在运行的 AI 命令进程（供 Ctrl+C 转发）。"""
+    try:
+        with _AI_CMD_LOCK:
+            _AI_ACTIVE_CMDS[id(proc)] = {"proc": proc, "hits": 0}
+    except Exception:
+        pass
+
+
+def unregister_ai_cmd(proc) -> None:
+    """注销 AI 命令进程（命令结束后调用）。"""
+    try:
+        with _AI_CMD_LOCK:
+            _AI_ACTIVE_CMDS.pop(id(proc), None)
+    except Exception:
+        pass
+
+
+class PtyCmdProxy:
+    """把 PTY 前台进程组包装成「类 Popen」对象，供 interrupt_active_ai_cmds 转发信号。
+
+    用途：AI 模式下**交互式命令**（vim/ssh/python 等）会回退到常驻 PTY 执行，
+    它没有 Popen 对象 → 注册表里没有条目 → Ctrl+C 转发不到（旧实现只有 subprocess
+    路径被登记，这就是「有时 Ctrl+C 杀不掉 AI 正在执行的命令」的一个来源）。
+
+    `pid` 取 PTY 的**前台进程组**（tcgetpgrp）：这正是终端 Ctrl+C 打的目标；
+    取不到时退回 shell 自身 pid（等价于终端无 job control 时的行为）。
+    """
+
+    def __init__(self, shell):
+        self._shell = shell
+
+    @property
+    def pid(self):
+        sh = self._shell
+        try:
+            fd = getattr(sh, "master_fd", None)
+            if fd is not None:
+                pgid = os.tcgetpgrp(fd)
+                if pgid:
+                    return pgid
+        except Exception:
+            pass
+        return getattr(sh, "pid", None)
+
+    def poll(self):
+        return None      # 命令是否结束由调用方（run_cmd_sync）负责注销
+
+    def send_signal(self, sig) -> None:
+        pid = self.pid
+        if pid is None:
+            return
+        try:
+            os.killpg(pid, sig)          # pid 已是进程组 id
+        except (ProcessLookupError, PermissionError, OSError, AttributeError):
+            try:
+                os.kill(pid, sig)
+            except Exception:
+                pass
+
+
+def interrupt_active_ai_cmds() -> int:
+    """把中断信号转发给所有活跃的 AI 命令进程组（重复按 Ctrl+C 逐级升级）。
+
+    返回处理的命令数（0 = 当前没有 AI 命令在跑，调用方应改走「打断 AI」路径）。
+    升级策略：第 1 次 SIGINT → 第 2 次 SIGTERM → 第 3 次及以后 SIGKILL。
+    解决「命令忽略 SIGINT / 卡在不可中断状态 → Ctrl+C 杀不掉」的问题。
+    """
+    handled = 0
+    try:
+        with _AI_CMD_LOCK:
+            entries = list(_AI_ACTIVE_CMDS.values())
+        for ent in entries:
+            proc = ent.get("proc")
+            if proc is None:
+                continue
+            try:
+                if proc.poll() is not None:
+                    continue
+            except Exception:
+                pass
+            hits = int(ent.get("hits", 0))
+            sig = _AI_CMD_ESCALATE[min(hits, len(_AI_CMD_ESCALATE) - 1)]
+            ent["hits"] = hits + 1
+            try:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except (ProcessLookupError, PermissionError, OSError, AttributeError):
+                try:
+                    proc.send_signal(sig)
+                except Exception:
+                    pass
+            handled += 1
+    except Exception:
+        pass
+    return handled
+
 # ========== getcwd 缓存（减少频繁系统调用） ==========
 _cached_cwd: Optional[str] = None
 _cached_cwd_time: float = 0
@@ -1763,16 +1870,14 @@ def _exec_ai_subprocess(cmd: str, output_buffer: List[str],
                 pass
 
     def _cmd_sigint_handler(signum, frame):
-        """AI 执行模式下 Ctrl+C：只转发 SIGINT 到命令进程组，不置位任何全局中断标志。"""
+        """AI 执行模式下 Ctrl+C：把信号转发给命令进程组（重复按逐级升级），
+        不置位任何全局中断标志（AI 循环继续）。
+
+        升级：第 1 次 SIGINT → 第 2 次 SIGTERM → 第 3 次及以后 SIGKILL ——
+        解决「命令忽略 SIGINT / 卡在不可中断状态 → Ctrl+C 杀不掉」的问题。
+        """
         _interrupted['value'] = True
-        if _proc is not None:
-            try:
-                os.killpg(os.getpgid(_proc.pid), _sig.SIGINT)
-            except (ProcessLookupError, PermissionError, OSError, AttributeError):
-                try:
-                    _proc.kill()
-                except Exception:
-                    pass
+        interrupt_active_ai_cmds()
 
     try:
         _old_sigint = _sig.signal(_sig.SIGINT, _cmd_sigint_handler)
@@ -1785,6 +1890,7 @@ def _exec_ai_subprocess(cmd: str, output_buffer: List[str],
             text=True, errors="replace", cwd=cwd,
             start_new_session=True,  # 独立进程组：终端 Ctrl+C 不直接打到命令
         )
+        register_ai_cmd(_proc)   # 登记活跃命令：主线程 Ctrl+C handler 可据此转发
         _out_b, _err_b = _proc.communicate(timeout=600)
         _out = (_out_b or "").rstrip()
         _err = (_err_b or "").rstrip()
@@ -1802,6 +1908,7 @@ def _exec_ai_subprocess(cmd: str, output_buffer: List[str],
         output_buffer.append(f"[AI 命令执行异常: {_e}]")
         return -1
     finally:
+        unregister_ai_cmd(_proc)
         if _old_sigint is not None:
             try:
                 _sig.signal(_sig.SIGINT, _old_sigint)
@@ -1892,13 +1999,26 @@ def run_cmd_sync(
 
         shell = _get_persistent_shell(cwd=cwd)
 
-        with _shell_lock:
-            return_code, raw_output = shell.execute(
-                cmd,
-                output_buffer,
-                log_info=log_info_func,
-                log_error=log_error_func,
-            )
+        # 交互式命令回退 PTY：也登记进中断注册表 —— 否则 Ctrl+C 打不到它
+        # （这就是「有时 Ctrl+C 杀不掉 AI 正在执行的命令」的一个来源）。
+        _pty_proxy = None
+        if AI_EXECUTION_MODE:
+            try:
+                _pty_proxy = PtyCmdProxy(shell)
+                register_ai_cmd(_pty_proxy)
+            except Exception:
+                _pty_proxy = None
+        try:
+            with _shell_lock:
+                return_code, raw_output = shell.execute(
+                    cmd,
+                    output_buffer,
+                    log_info=log_info_func,
+                    log_error=log_error_func,
+                )
+        finally:
+            if _pty_proxy is not None:
+                unregister_ai_cmd(_pty_proxy)
 
         if AI_EXECUTION_MODE:
             AI_LAST_EXIT_CODE = return_code

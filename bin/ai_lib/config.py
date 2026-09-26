@@ -15,11 +15,16 @@ from typing import Dict, List, Optional, Any, Callable, Tuple
 from rich.console import Console
 console = Console()
 
-from .ui import select_option, text_input as ui_text_input
+from .ui import (select_option, text_input as ui_text_input,
+                   secret_input as ui_secret_input, confirm as ui_confirm)
 
 # ── 核心路径配置 ──
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-USER = os.getlogin() if hasattr(os, "getlogin") else os.getenv("USER", "default")
+try:
+    import getpass as _getpass
+    USER = _getpass.getuser()
+except Exception:
+    USER = os.getenv("USER") or os.getenv("LOGNAME") or "default"
 # 运行时 $HOME 优先（Onyx 沙箱开=虚拟 home / 关=OS 真实 home，AI 配置读/写必须跟随同一 home）；
 # 缺失时回退到按代码位置推导的静态 home（模块独立运行场景）
 _STATIC_USER_HOME_DIR = os.path.join(ROOT_DIR, "root") if USER == "root" else os.path.join(ROOT_DIR, "home", USER)
@@ -464,6 +469,48 @@ def _deobfuscate(encoded: str) -> str:
     raw = base64.b64decode(encoded[len(_KEY_OBFUSCATE_PREFIX):])
     return bytes(b ^ key for b in raw).decode("utf-8")
 
+
+def _valid_api_key(key: str) -> bool:
+    """API Key 最小校验：非空、长度 ≥ 8、不含任何空白字符（空格/换行/制表符）。"""
+    if not isinstance(key, str):
+        return False
+    if len(key.strip()) < 8:
+        return False
+    if any(c.isspace() for c in key):
+        return False
+    return True
+
+
+def mask_api_key(key: str) -> str:
+    """统一 API Key 掩码展示：短 key 也不泄露完整串。"""
+    key = key or ""
+    n = len(key)
+    if n <= 8:
+        return "*" * max(n, 3)
+    return key[:4] + "*" * 8 + key[-4:]
+
+
+def _atomic_write_json(path: str, data: dict, mode: int = 0o600) -> None:
+    """原子写入 JSON：同目录临时文件 + fsync + os.replace，避免写入中断导致文件损坏。"""
+    import tempfile
+    _dir = os.path.dirname(path)
+    if _dir:
+        os.makedirs(_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_key_", dir=_dir or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        raise
+
 def load_key_conf() -> dict:
     """读取 key.json（旧 key.conf 自动迁移），返回 {platform, api_key, model, params} 或空 dict"""
     path = KEY_CONF_PATH
@@ -474,10 +521,7 @@ def load_key_conf() -> dict:
                 with open(KEY_CONF_LEGACY_PATH, "r", encoding="utf-8") as _f:
                     _data = json.load(_f)
                 if isinstance(_data, dict):
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    with open(path, "w", encoding="utf-8") as _f:
-                        json.dump(_data, _f, ensure_ascii=False, indent=2)
-                    os.chmod(path, 0o600)
+                    _atomic_write_json(path, _data, mode=0o600)
                     os.remove(KEY_CONF_LEGACY_PATH)
             except Exception:
                 pass
@@ -492,23 +536,23 @@ def load_key_conf() -> dict:
             return {}
         # 自动解码混淆的 API Key
         if "api_key" in data and isinstance(data["api_key"], str):
-            data["api_key"] = _deobfuscate(data["api_key"])
+            data["api_key"] = _deobfuscate(data["api_key"]).strip()
         return data
     except Exception:
         return {}
 
 def save_key_conf(platform: str, api_key: str, model: str = "", params: dict = None,
                   api_url: str = "") -> None:
-    """写入 key.conf（API Key 自动混淆存储）"""
-    os.makedirs(os.path.dirname(KEY_CONF_PATH), exist_ok=True)
+    """写入 key.json（API Key 自动混淆存储；原子写 + 0600 权限）"""
+    api_key = (api_key or "").strip()
+    if not api_key:
+        raise ValueError("API Key 不能为空")
     data = {"platform": platform, "api_key": _obfuscate(api_key), "model": model}
     if params:
         data["params"] = params
     if api_url:
         data["api_url"] = api_url
-    with open(KEY_CONF_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.chmod(KEY_CONF_PATH, 0o600)
+    _atomic_write_json(KEY_CONF_PATH, data, mode=0o600)
     # 迁移完成：删除旧版 key.conf（若仍存在）
     try:
         if os.path.exists(KEY_CONF_LEGACY_PATH):
@@ -532,9 +576,19 @@ def _setup_key_conf_interactive(lang: str = "chinese") -> dict:
 
     # 输入 API Key
     key_prompt = f"🔑 输入 {info['name']} API Key" if lang == "chinese" else f"🔑 Enter {info['name']} API Key"
-    key = ui_text_input(key_prompt, "", lang)
-    if not key:
-        return {}
+    key = ""
+    while True:
+        key = ui_secret_input(key_prompt, "", lang).strip()
+        if not key:
+            return {}  # 用户取消 / 留空
+        if _valid_api_key(key):
+            break
+        console.print(
+            "❌ 密钥格式无效：不能为空、长度需 ≥ 8、且不含空格或换行，请重新输入。"
+            if lang == "chinese" else
+            "❌ Invalid key: must be non-empty, at least 8 chars, no spaces/newlines. Try again.",
+            style="bold red",
+        )
 
     # 选择模型（标签带协议与免费标记，如 big-pickle (openai) 免费 / claude-sonnet-5 (anthropic)）
     model_labels = []
@@ -552,22 +606,31 @@ def _setup_key_conf_interactive(lang: str = "chinese") -> dict:
     model_choice = select_option(model_prompt, model_labels, default=_default_label, lang=lang)
     model = model_value.get(model_choice) or info["default_model"]
 
-    # 参数（可选自定义）
+    # 参数（可选自定义）—— 全部经 ui 适配器取输入：TUI 下弹模态框，
+    # 裸 input() 在 TUI 的 worker 线程会抢 Textual 占用的 stdin → 永久卡死。
     params = dict(info["params"])
-    tune = input("自定义参数？(y/N): " if lang == "chinese" else "Customize params? (y/N): ").strip().lower()
-    if tune == "y":
+    tune = ui_confirm(
+        "自定义参数？" if lang == "chinese" else "Customize params?",
+        default=False,
+        lang=lang,
+    )
+    if tune:
         try:
-            t = input(f"  temperature [{params.get('temperature', 0.1)}]: ").strip()
+            t = ui_text_input("temperature",
+                              str(params.get("temperature", 0.1)), lang=lang).strip()
             if t:
                 params["temperature"] = float(t)
-            tp = input(f"  top_p [{params.get('top_p', 0.2)}]: ").strip()
+            tp = ui_text_input("top_p",
+                               str(params.get("top_p", 0.2)), lang=lang).strip()
             if tp:
                 params["top_p"] = float(tp)
-            mt = input(f"  max_tokens [{params.get('max_tokens', 4096)}]: ").strip()
+            mt = ui_text_input("max_tokens",
+                               str(params.get("max_tokens", 4096)), lang=lang).strip()
             if mt:
                 params["max_tokens"] = int(mt)
             _tk_default = params.get("thinking", bool(info.get("thinking", False)))
-            tk = input(f"  思考模式 [{'on' if _tk_default else 'off'}]: ").strip().lower()
+            tk = ui_text_input("思考模式" if lang == "chinese" else "Thinking",
+                               "on" if _tk_default else "off", lang=lang).strip().lower()
             if tk in ("on", "true", "1", "yes", "enabled"):
                 params["thinking"] = True
             elif tk in ("off", "false", "0", "no", "disabled", "none"):
@@ -597,7 +660,10 @@ def _render_edit_diff(old_text: str, new_text: str, context_lines: int = 2):
                 show_range = range(i1, i2)
             else:
                 show_range = list(range(i1, i1 + context_lines)) + list(range(i2 - context_lines, i2))
-                console.print(f"       [dim]... {total - context_lines * 2} 行未变化 ... | {total - context_lines * 2} lines unchanged ...[/]")
+                _unchanged = total - context_lines * 2
+                console.print((f"       [dim]... {_unchanged} 行未变化 ...[/]"
+                               if get_current_lang() != "english"
+                               else f"       [dim]... {_unchanged} lines unchanged ...[/]"))
             for idx in show_range:
                 console.print((f"   {idx + 1:>4} │ {old_lines[idx]}").ljust(_w), style="bright_black")
             if total > context_lines * 2 + 1:
@@ -709,99 +775,13 @@ def get_prompt_text(lang: str) -> Dict[str, str]:
         "unknown_error": "未知错误：{}",
     }
 
-# -------------------------- 许可证验证 --------------------------
-def load_ai_key() -> Optional[str]:
-    lang = get_current_lang()
-    prompts = get_prompt_text(lang)
 
-    if not os.path.exists(AI_KEY_PATH):
-        console.print(prompts["no_key_found"], style="bold yellow")
-        while True:
-            choice = input(prompts["set_key_prompt"] + " ").strip().lower()
-            if choice == "n":
-                console.print(prompts["no_set_exit"], style="bold red")
-                sys.exit(1)
-            elif choice == "y":
-                key = input(prompts["input_key_prompt"] + " ").strip()
-                if len(key) != 32:
-                    console.print(prompts["key_format_error"], style="bold red")
-                    continue
-                os.makedirs(os.path.dirname(AI_KEY_PATH), exist_ok=True)
-                try:
-                    with open(AI_KEY_PATH, "w", encoding="utf-8") as f:
-                        f.write(key)
-                    os.chmod(AI_KEY_PATH, 0o400)
-                    console.print(prompts["key_save_success"], style="bold green")
-                    return key
-                except Exception as e:
-                    console.print(prompts["save_key_fail"].format(str(e)), style="bold red")
-                    sys.exit(1)
-            else:
-                console.print(prompts["invalid_input"], style="bold red")
-
-    try:
-        with open(AI_KEY_PATH, "r", encoding="utf-8") as f:
-            key = f.read().strip()
-        if len(key) != 32:
-            console.print(prompts["key_format_error"], style="bold red")
-            while True:
-                choice = input(prompts["retry_set_prompt"] + " ").strip().lower()
-                if choice == "n":
-                    sys.exit(1)
-                elif choice == "y":
-                    new_key = input(prompts["input_key_prompt"] + " ").strip()
-                    if len(new_key) == 32:
-                        with open(AI_KEY_PATH, "w", encoding="utf-8") as f:
-                            f.write(new_key)
-                        os.chmod(AI_KEY_PATH, 0o400)
-                        console.print(prompts["key_update_success"], style="bold green")
-                        return new_key
-                    else:
-                        console.print(prompts["key_format_error"], style="bold red")
-                else:
-                    console.print(prompts["invalid_input"], style="bold red")
-        return key
-    except Exception as e:
-        console.print(prompts["read_key_fail"].format(str(e)), style="bold red")
-        sys.exit(1)
-
-def verify_ai_key(key: str) -> bool:
-    import requests  # 延迟导入（仅此函数使用）——启动提速，行为不变
-    server_url = get_server_url()
-    lang = get_current_lang()
-    prompts = get_prompt_text(lang)
-
-    try:
-        headers = {"X-AI-Key": key}
-        response = requests.get(
-            f"{server_url}/api/ai/verify",
-            headers=headers,
-            timeout=80
-        )
-        if response.status_code == 200:
-            return response.json().get("valid", False)
-        else:
-            err_msg = prompts["license_verification_fail"].format(response.status_code)
-            console.print(err_msg, style="bold red")
-            return False
-    except Exception as e:
-        err_msg = prompts["verification_network_error"].format(str(e))
-        console.print(err_msg, style="bold red")
-        while True:
-            choice = input(prompts["retry_set_prompt"] + " ").strip().lower()
-            if choice == "n":
-                console.print(prompts["no_set_exit"], style="bold red")
-                sys.exit(1)
-            elif choice == "y":
-                new_key = input(prompts["input_key_prompt"] + " ").strip()
-                if len(new_key) != 32:
-                    console.print(prompts["key_format_error"], style="bold red")
-                    continue
-                os.makedirs(os.path.dirname(AI_KEY_PATH), exist_ok=True)
-                with open(AI_KEY_PATH, "w", encoding="utf-8") as f:
-                    f.write(new_key)
-                console.print(prompts["key_update_success"], style="bold green")
-                os.chmod(AI_KEY_PATH, 0o400)
-                return verify_ai_key(new_key)
-            else:
-                console.print(prompts["invalid_input"], style="bold red")
+# -------------------------- API Key 就绪检查 --------------------------
+def ensure_api_key_configured(lang: str = "chinese") -> bool:
+    """确保已配置 API Key：未配置则进入交互式引导。返回最终是否就绪。"""
+    conf = load_key_conf()
+    if conf and (conf.get("api_key") or "").strip():
+        return True
+    _setup_key_conf_interactive(lang)
+    conf = load_key_conf()
+    return bool(conf and (conf.get("api_key") or "").strip())

@@ -534,7 +534,10 @@ _ENV_PROBE_TYPES = {
                   "patator", "snmpwalk", "onesixtyone", "nbtscan", "enum4linux",
                   "smbmap", "smbclient", "aircrack-ng", "airodump-ng", "aireplay-ng",
                   "reaver", "crunch", "wifite", "macchanger", "proxychains", "msfconsole"],
-        "extra": [("监听端口", "ss -tln 2>/dev/null | head -10 || netstat -tln 2>/dev/null | head -10")],
+        # 注意：`cmd1 | head || cmd2 | head` 是错的 —— 管道退出码取自 head(0)，
+# `||` 永不触发 → 没有 ss 的机器（Android/Termux、精简容器）永远拿不到端口列表。
+# 正确写法是用 { … || …; } 让 `||` 作用在命令本身，再交给 head 截断。
+        "extra": [("监听端口", "{ ss -tln 2>/dev/null || netstat -tln 2>/dev/null; } | head -10")],
     },
     "python": {
         "sections": ["system", "user", "tools"],
@@ -574,7 +577,8 @@ _ENV_PROBE_TYPES = {
                   ("npm", "npm --version 2>/dev/null"),
                   ("nginx", "nginx -v 2>&1 | head -1"),
                   ("php", "php --version 2>/dev/null | head -1"),
-                  ("本地 Web 端口", "ss -tln 2>/dev/null | grep -E ':(80|443|8000|8080|3000|5000|8888|9000) ' | head -8 || netstat -tln 2>/dev/null | grep -E ':(80|443|8000|8080|3000|5000|8888|9000) ' | head -8")],
+                  # 同上：`||` 必须作用在命令上，否则没有 ss 时整条规则静默为空
+                  ("本地 Web 端口", "{ ss -tln 2>/dev/null || netstat -tln 2>/dev/null; } | grep -E ':(80|443|8000|8080|3000|5000|8888|9000) ' | head -8")],
     },
     "permission": {
         "sections": ["system", "user", "tools"],

@@ -918,18 +918,9 @@ def _adv_confirm_prompt(cmd_str: str, current_lang: str, msg: Dict,
         log_info_func(f"Adv 模式二次确认：{cmd_str[:100]}...", request_id)
     
     import secrets as _pae_secrets
-    captcha = _pae_secrets.token_hex(2).upper()
-    print(f"{Fore.RED}{warning}{Style.RESET_ALL}")
-    if current_lang == "chinese":
-        prompt = f"{Fore.YELLOW}验证码: [ {captcha} ]  — 请输入上方验证码以确认执行\n> {Style.RESET_ALL}"
-    else:
-        prompt = f"{Fore.YELLOW}Captcha: [ {captcha} ]  — please enter the captcha above to confirm\n> {Style.RESET_ALL}"
-    try:
-        response = safe_input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return False
-    if response.upper() == captcha:
+    _captcha = _pae_secrets.token_hex(2).upper()
+    from bin.ai_lib.ui import captcha as _ui_captcha
+    if _ui_captcha("🛡️ Adv 模式确认", warning, _captcha, current_lang):
         mark_session_captcha_verified()
         return True
     return False

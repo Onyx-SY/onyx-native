@@ -29,7 +29,6 @@ except Exception as e:
 
 if HAS_PTK:
     from lib.terminal import input_lib as il
-    from lib.terminal.kb import create_key_bindings
 
 RAW = "cat > a.txt << EOF\n12\nls\nbd\nEOF"
 
@@ -40,26 +39,33 @@ def test_up_enter_multiline():
     il._HISTORY_INITIALIZED = True  # 阻止从真实历史文件重载
     il.reset_history_index()
 
-    kb = create_key_bindings(sys_type="Linux", terminal_type="bash")
     out = io.StringIO()
-    _orig_prompt = il.prompt
+    _RealPromptSession = il.PromptSession
+    _saved_cache = dict(il._SESSION_CACHE)
 
     with create_pipe_input() as inp:
-        session = PromptSession(input=inp, output=Vt100_Output(out, lambda: Size(rows=24, columns=80)))
+        # universal_input 内部自建并缓存 PromptSession（真实输入路径），
+        # 这里把 input/output 注入进去，让该会话走管道而非真实 stdin，
+        # 从而可以在无人值守下驱动 Up/Enter 并断言真实提交结果。
+        _captured = {}
+
+        def _factory(*args, **kwargs):
+            _captured.update(kwargs)
+            kwargs.setdefault("input", inp)
+            kwargs.setdefault("output", Vt100_Output(out, lambda: Size(rows=24, columns=80)))
+            return _RealPromptSession(*args, **kwargs)
+
+        il.PromptSession = _factory
+        il._SESSION_CACHE["key"] = None
+        il._SESSION_CACHE["session"] = None
 
         def feed():
-            time.sleep(0.12)
+            time.sleep(0.15)
             inp.send_text("\x1b[A")   # Up
             time.sleep(0.3)
             inp.send_text("\r")       # Enter
         threading.Thread(target=feed, daemon=True).start()
 
-        def _prompt(message="", **kwargs):
-            kwargs.pop("input", None)
-            kwargs.pop("output", None)
-            return session.prompt(message, **kwargs)
-
-        il.prompt = _prompt
         try:
             result = il.universal_input(
                 prompt_func=lambda: "> ",
@@ -67,8 +73,14 @@ def test_up_enter_multiline():
                 language="chinese",
             )
         finally:
-            il.prompt = _orig_prompt
+            il.PromptSession = _RealPromptSession
+            il._SESSION_CACHE.clear()
+            il._SESSION_CACHE.update(_saved_cache)
             il.reset_history_index()
+
+    # Ctrl+R 反查的接线回归：真实会话必须挂上项目历史桥接（跨会话历史）
+    assert _captured.get("history") is il._PTK_HISTORY, "PromptSession 未挂 OnyxHistory，Ctrl+R 将只覆盖本次运行"
+    assert _captured.get("search_ignore_case") is True, "Ctrl+R 搜索应忽略大小写"
 
     # 提交结果 = 完整原始多行
     assert result == RAW, f"提交结果应为完整多行，got {result!r}"

@@ -1329,18 +1329,20 @@ def detect_system() -> str:
 
 
 def init_sandbox_config() -> None:
-    """根据系统类型和权限初始化沙箱配置文件"""
+    """初始化沙箱配置：只读取配置文件，不再交互询问。
+
+    配置文件（etc/onyx/sandbox）由首次启动向导（Main.py）写入；
+    若文件缺失（例如被手动删除），默认启用沙箱并补齐配置文件，
+    保证后续启动行为一致，且启动过程绝不阻塞等待用户输入。
+    """
     global _SANDBOX_ENABLED, ROOT_DIR, _SANDBOX_CONFIG_PATH
-    
+
     # ========== 关键修复：基于当前文件位置定位配置目录 ==========
     current_dir = os.path.dirname(os.path.abspath(__file__))
     onyx_root = os.path.dirname(current_dir)
     parent_of_onyx = onyx_root
     _SANDBOX_CONFIG_PATH = os.path.abspath(os.path.join(parent_of_onyx, "etc", "onyx", "sandbox"))
-    config_dir = os.path.dirname(_SANDBOX_CONFIG_PATH)
-    
-    cur_lang = get_current_lang()
-    
+
     # 1. 如果配置文件已存在，读取其内容
     if os.path.exists(_SANDBOX_CONFIG_PATH):
         try:
@@ -1348,122 +1350,25 @@ def init_sandbox_config() -> None:
                 content = f.read().strip().lower()
                 _SANDBOX_ENABLED = (content == "true")
             log_info(f"沙箱配置加载：{_SANDBOX_CONFIG_PATH} -> enabled={_SANDBOX_ENABLED}", str(uuid.uuid4()))
-        except:
+        except Exception:
             _SANDBOX_ENABLED = True
         return
 
-    # 2. 配置文件不存在，根据系统类型决定行为
-    sys_type_local = detect_system()
-    is_root = False
-    if sys.platform.startswith("linux") or sys.platform == "darwin" or "termux" in sys.prefix.lower():
-        try:
-            is_root = (os.geteuid() == 0)
-        except:
-            is_root = False
-
-    # ========== 新增：检查是否为 OS 模式（虚拟根目录 == 真实根目录） ==========
-    # 获取真实根目录
-    if sys_type_local == "Windows":
-        real_root = os.path.splitdrive(os.path.abspath("."))[0] + "\\"
-    else:
-        real_root = "/"
-    
-    virtual_root = ROOT_DIR  # 当前 ROOT_DIR 值
-    normalized_virtual = os.path.normpath(virtual_root)
-    normalized_real = os.path.normpath(real_root)
-    is_os_mode = (normalized_virtual == normalized_real)
-    
-    # ========== 关键修改：OS 模式下静默启用沙箱（无影响，不询问） ==========
-    if is_os_mode:
-        _SANDBOX_ENABLED = True
-        log_info(f"OS 模式（根目录重合），沙箱静默启用（实际无影响）", str(uuid.uuid4()))
-        # 不创建配置文件，不询问用户
-        return
-
-    # ========== 新增：Linux（非Termux）强制启用沙箱，静默跳过，不询问 ==========
-    # 判断是否为 Linux（排除 Termux、Windows、macOS）
-    is_linux = (sys_type_local == "Linux/macOS" or sys_type_local == "SpecialLinux") and "termux" not in sys.prefix.lower()
-    
-    if is_linux:
-        # Linux 强制启用沙箱，静默跳过，不询问用户，不输出任何提示
-        _SANDBOX_ENABLED = True
-        log_info("Linux系统，强制启用沙箱（静默模式）", str(uuid.uuid4()))
-        # 将配置写入文件，方便用户后续通过 manage 修改
+    # 2. 配置文件不存在 -> 默认启用并静默补齐（首次启动向导已询问用户，此处不再询问）
+    _SANDBOX_ENABLED = True
+    log_info("未找到沙箱配置文件，默认启用沙箱（首次启动向导中可配置）", str(uuid.uuid4()))
+    try:
+        config_dir = os.path.dirname(_SANDBOX_CONFIG_PATH)
         if not os.path.exists(config_dir):
             os.makedirs(config_dir, mode=0o755)
-        try:
-            with open(_SANDBOX_CONFIG_PATH, "w", encoding="utf-8") as f:
-                f.write("true")
-            if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
-                os.chmod(_SANDBOX_CONFIG_PATH, 0o644)
-            log_info(f"沙箱配置已保存：{_SANDBOX_CONFIG_PATH} -> {_SANDBOX_ENABLED}", str(uuid.uuid4()))
-        except Exception as e:
-            log_error(f"沙箱配置保存失败：{str(e)}", str(uuid.uuid4()))
-        return
-
-    # Linux 普通用户 -> 强制启用沙箱，不询问不创建文件（保留原有逻辑）
-    if sys_type_local == "Linux/macOS" and not is_root:
-        _SANDBOX_ENABLED = True
-        log_info("Linux普通用户，强制启用沙箱", str(uuid.uuid4()))
-        return
-
-    # ========== Termux 或 Windows 或 Linux root（且非OS模式）-> 询问用户（保持不变） ==========
-    if not os.path.exists(config_dir):
-        os.makedirs(config_dir, mode=0o755)
-    
-    prompt_msg = {
-        "chinese": "未检测到沙箱配置文件。是否启用沙箱？(y/N，启用后更安全；输入 n 后将使用系统真实根目录，可通过修改 {} 文件更改): ",
-        "english": "Sandbox config not found. Enable sandbox? (y/N, safer; if n, use real system root. You can change later by editing {}): "
-    }
-    
-    # 交叉平台输入——确保终端处于 cooked 模式，用 try/finally 保证恢复
-    answer = "n"
-    fd = None
-    old_tty = None
-    try:
-        import termios
-        fd = sys.stdin.fileno()
-        old_tty = termios.tcgetattr(fd)
-        new = termios.tcgetattr(fd)
-        # 开启 ICANON（行缓冲）、ECHO（回显）、ICRNL（\r→\n 转换）
-        new[3] |= (termios.ICANON | termios.ECHO)
-        new[0] |= termios.ICRNL
-        termios.tcsetattr(fd, termios.TCSANOW, new)
-        sys.stdout.write(Fore.YELLOW + prompt_msg[cur_lang].format(_SANDBOX_CONFIG_PATH) + Style.RESET_ALL + " ")
-        sys.stdout.flush()
-        answer = sys.stdin.readline().strip().lower()
-    except BaseException:
-        # 如果 termios 不可用或 stdin 不是 tty，回退到 input()
-        try:
-            print(Fore.YELLOW + prompt_msg[cur_lang].format(_SANDBOX_CONFIG_PATH) + Style.RESET_ALL, end="")
-            answer = input().strip().lower()
-        except BaseException:
-            answer = "n"
-    finally:
-        if old_tty is not None and fd is not None:
-            try:
-                import termios as _t
-                _t.tcsetattr(fd, _t.TCSANOW, old_tty)
-            except Exception:
-                pass
-    if answer == 'y':
-        _SANDBOX_ENABLED = True
-    else:
-        _SANDBOX_ENABLED = False
-        # 对于 Linux root，额外将 ROOT_DIR 改为 /
-        if sys_type_local == "Linux/macOS" and is_root:
-            ROOT_DIR = "/"
-            log_info("沙箱禁用，ROOT_DIR 已改为 /", str(uuid.uuid4()))
-    
-    # 将用户选择写入配置文件
-    try:
         with open(_SANDBOX_CONFIG_PATH, "w", encoding="utf-8") as f:
-            f.write("true" if _SANDBOX_ENABLED else "false")
-        if sys_type in ["Linux/macOS", "macOS", "Termux", "SpecialLinux"]:
+            f.write("true")
+        if os.name == "posix":
             os.chmod(_SANDBOX_CONFIG_PATH, 0o644)
         log_info(f"沙箱配置已保存：{_SANDBOX_CONFIG_PATH} -> {_SANDBOX_ENABLED}", str(uuid.uuid4()))
     except Exception as e:
         log_error(f"沙箱配置保存失败：{str(e)}", str(uuid.uuid4()))
+
 
 def check_admin_permission() -> None:
     global user_info
@@ -1482,7 +1387,11 @@ def check_admin_permission() -> None:
         # 强制覆盖 user_info，不保留旧缓存
         user_info["is_admin"] = is_admin
         user_info["permission_flag"] = "#" if is_admin else "$"
-        user_info["name"] = "root" if is_admin else (os.getlogin() if hasattr(os, "getlogin") else os.getenv("USER", "default"))
+        try:
+            _uname = getpass.getuser()
+        except Exception:
+            _uname = os.getenv("USER") or os.getenv("USERNAME") or os.getenv("LOGNAME") or "default"
+        user_info["name"] = "root" if is_admin else _uname
         
     except Exception as e:
         print(Fore.RED + f"权限检测失败：{str(e)}" + Style.RESET_ALL)
@@ -2074,8 +1983,8 @@ def get_ai_tool_output(request_id: str) -> str:
 def handle_ai(cmd_parts: List[str], request_id: str) -> None:
     """
     AI命令处理包装器（依赖注入版）
-    - 带子命令标志 (-mcp, -c, -tui, -key) → 一次性调用 bin.ai_cmd.handle_ai
-    - 纯对话 → 进入 bin.ai_interactive.ai_interactive_session 持久 REPL
+    - 带子命令标志 (-mcp, -c, -key) → 一次性调用 bin.ai_cmd.handle_ai
+    - 裸 ai / 模式标志 (-repl, -tui) → 进入持久会话（默认模式见 bin/ai_lib/mode.DEFAULT_AI_MODE）
     """
     # ── 沙盒会话边界：每次 ai 命令启动重置沙盒，下次 handle_ai init 时
     #    重新固定到启动时的 cwd（会话内不随 cd 漂移）──
@@ -2086,22 +1995,23 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
         pass
 
 
-    # ── 首次使用：检查并引导配置 key.conf ──
-    from bin.ai_cmd import load_key_conf, _setup_key_conf_interactive
-    _conf = load_key_conf()
-    if not _conf or not _conf.get("api_key"):
-        _setup_key_conf_interactive(get_current_lang())
-        _conf = load_key_conf()
-        if not _conf or not _conf.get("api_key"):
-            return  # 用户取消配置
+    # ── 首次使用：检查并引导配置 key.json ──
+    from bin.ai_lib.config import ensure_api_key_configured
+    if not ensure_api_key_configured(get_current_lang()):
+        return  # 用户取消配置
 
-    # 仅裸 ai（cmd_parts == ["ai"]）进入持久 REPL，其他走原有一次性逻辑
-    is_bare_ai = len(cmd_parts) == 1
+    # ── 模式标志：-repl / -tui 选择交互模式；裸 ai 走默认模式（bin/ai_lib/mode.DEFAULT_AI_MODE）──
+    from bin.ai_lib import mode as _ai_mode
+    _mode_flag, _effective_parts = _ai_mode.split_mode_flag(cmd_parts)
+
+    # 裸 ai（cmd_parts == ["ai"]）或显式 -repl/-tui → 进入持久会话；其他走一次性逻辑
+    is_bare_ai = len(_effective_parts) == 1
+    _enter_session = is_bare_ai or _mode_flag is not None
 
     # ── AI 会话 cwd 守卫：会话结束（含异常）自动恢复 cwd + 停用 AI 沙盒 ──
     from bin.ai_lib import sandbox as _ai_sandbox
     with _ai_sandbox.session_guard():
-        if not is_bare_ai:
+        if not _enter_session:
             from bin.ai_cmd import handle_ai as _handle_ai
             _handle_ai(
                 cmd_parts=cmd_parts,
@@ -2125,8 +2035,9 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
                 security_log=security_log,
             )
         else:
-            from bin.ai_interactive import ai_interactive_session
-            ai_interactive_session(
+            # ── 交互会话：按模式分发（REPL / TUI 各自独立实现，互不感知）──
+            _resolved_mode = _ai_mode.resolve_ai_mode(_mode_flag)
+            _session_kwargs = dict(
                 user_home_dir=USER_HOME_DIR,
                 onyx_module=sys.modules[__name__],
                 global_config=global_config,
@@ -2145,6 +2056,12 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
                 log_warning=log_warning,
                 security_log=security_log,
             )
+            if _resolved_mode == "tui":
+                from bin.ai_tui import ai_tui_session
+                ai_tui_session(**_session_kwargs)
+            else:
+                from bin.ai_interactive import ai_interactive_session
+                ai_interactive_session(**_session_kwargs)
 
 
 
@@ -2930,6 +2847,14 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
 
     # 获取当前语言配置
     current_lang = get_current_lang()
+
+    # ========== TUI 依赖自举（默认模式为 TUI 时确保 textual 可用；失败静默回退 REPL）==========
+    try:
+        from bin.ai_lib.tui_deps import ensure_tui_deps_at_startup as _ensure_tui
+        _ensure_tui(quiet=True)
+    except Exception:
+        pass
+
     lang_msgs = {
         "chinese": {
             "fatal_user_home_fail": "致命错误：用户主目录初始化失败，程序无法启动",

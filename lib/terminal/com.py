@@ -64,7 +64,15 @@ DEFAULT_PTK_CONFIG = {
         "completion_prev": "s-tab",
         "clear_screen": "c-l",
         "completion_page_up": "pageup",
-        "completion_page_down": "pagedown"
+        "completion_page_down": "pagedown",
+        # ↓ 原先硬编码在 kb.py 里的键，现在全部可配置（见 kb.REPL_KEY_ACTIONS）
+        "completion_menu_up": "c-up",
+        "completion_menu_down": "c-down",
+        "completion_trigger": "c-space",
+        "completion_alt_next": "c-n",
+        "completion_alt_prev": "c-p",
+        "completion_lock": "escape, space",
+        "multiline_editor": "escape, enter"
     },
     "colors": {
         "completion-menu": "bg:#2d2d30 #cccccc",
@@ -118,7 +126,11 @@ def load_ptk_config() -> Dict[str, Any]:
         with open(config_path, 'r', encoding='utf-8') as f:
             user_config = json.load(f)
         # 深度合并默认配置，确保所有键存在
-        merged = DEFAULT_PTK_CONFIG.copy()
+
+
+
+        import copy as _copy
+        merged = _copy.deepcopy(DEFAULT_PTK_CONFIG)
         for key, value in user_config.items():
             if isinstance(value, dict) and key in merged and isinstance(merged[key], dict):
                 merged[key].update(value)
@@ -1999,6 +2011,32 @@ class FirstSuggestionAutoSuggest(AutoSuggest):
         return AutoSuggestFromHistory().get_suggestion(buffer, document)
 
 
+# ===================== 匹配工具（smart-case 排序 + 模糊子序列） =====================
+def _prefix_match(query: str, candidate: str) -> bool:
+    """前缀匹配（大小写不敏感，保持既有行为）。空查询视为匹配。"""
+    if not query:
+        return True
+    return candidate.lower().startswith(query.lower())
+
+def _prefix_match_exact(query: str, candidate: str) -> bool:
+    """大小写完全一致的前缀匹配（用于 smart-case 排序优先，不用于排除）。"""
+    return bool(query) and candidate.startswith(query)
+
+def _subsequence_positions(needle: str, haystack: str) -> Optional[List[int]]:
+    """needle 作为 haystack 子序列时的匹配位置列表；不匹配返回 None。"""
+    if not needle:
+        return []
+    positions: List[int] = []
+    start = 0
+    for ch in needle:
+        idx = haystack.find(ch, start)
+        if idx < 0:
+            return None
+        positions.append(idx)
+        start = idx + 1
+    return positions
+
+
 # ===================== 智能补全器 =====================
 class SmartCompleter(Completer):
     def __init__(self, cmd_list: List[str], show_hidden: bool = True, 
@@ -2480,19 +2518,44 @@ class SmartCompleter(Completer):
                 )
             return
 
+        # 1) 前缀命中：大小写完全一致者优先（smart-case 排序），其余按频率序；
+        #    大小写不敏感匹配，保证既有“输大写也能补全”的行为不被破坏。
+        prefix_hits = set()
+        exact_hits: List[str] = []
+        loose_hits: List[str] = []
         for cmd in self.cmd_list:
-            if cmd.lower().startswith(current_word.lower()):
-                yield Completion(
-                    cmd,
-                    start_position=safe_start,
-                    display_meta=display_meta,
-                    style=style
-                )
+            if _prefix_match(current_word, cmd):
+                prefix_hits.add(cmd)
+                if _prefix_match_exact(current_word, cmd):
+                    exact_hits.append(cmd)
+                else:
+                    loose_hits.append(cmd)
+        for cmd in exact_hits + loose_hits:
+            yield Completion(
+                cmd,
+                start_position=safe_start,
+                display_meta=display_meta,
+                style=style
+            )
+
+        # 2) 模糊（子序列）命中：前缀之外补充，查询 ≥2 字符时启用，避免噪声
+        if len(current_word) >= 2:
+            needle = current_word.lower()
+            for cmd in self.cmd_list:
+                if cmd in prefix_hits:
+                    continue
+                if _subsequence_positions(needle, cmd.lower()) is not None:
+                    yield Completion(
+                        cmd,
+                        start_position=safe_start,
+                        display_meta=display_meta,
+                        style=style
+                    )
 
     def _complete_subcommand(self, current_word: str, start_pos: int, cmd: str):
         subcmds = self.subcommand_map.get(cmd, [])
         for subcmd in subcmds:
-            if not current_word or subcmd.lower().startswith(current_word.lower()):
+            if _prefix_match(current_word, subcmd):
                 yield Completion(
                     subcmd,
                     start_position=start_pos,
@@ -2519,7 +2582,7 @@ class SmartCompleter(Completer):
             key = f"{cmd}:{subcmd}"
             options = self.option_map.get(key, [])
             for opt in options:
-                if opt.startswith(current_word):
+                if _prefix_match(current_word, opt):
                     yield Completion(
                         opt,
                         start_position=start_pos,
@@ -2529,7 +2592,7 @@ class SmartCompleter(Completer):
 
         options = self.option_map.get(cmd, [])
         for opt in options:
-            if opt.startswith(current_word):
+            if _prefix_match(current_word, opt):
                 yield Completion(
                     opt,
                     start_position=start_pos,
@@ -2551,7 +2614,7 @@ class SmartCompleter(Completer):
             arguments = self.argument_map.get(cmd, [])
         
         for arg in arguments:
-            if not current_word or arg.lower().startswith(current_word.lower()):
+            if _prefix_match(current_word, arg):
                 yield Completion(
                     arg,
                     start_position=start_pos,

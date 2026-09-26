@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/storage/emulated/0/abPython/PythonProject/工具/Hacker--V1.00.1/src/Hacker/onyx-test/home/u0_a305/onyx/onyx/test/virtual/test_web_search_tool.py", line 648, in <module>
+    test_multi_query_multi_engine_dedup_and_filter()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/storage/emulated/0/abPython/PythonProject/工具/Hacker--V1.00.1/src/Hacker/onyx-test/home/u0_a305/onyx/onyx/test/virtual/test_web_search_tool.py", line 71, in test_multi_query_multi_engine_dedup_and_filter
+    assert out.count("Example Docs") == 1, f"跨引擎应去重: {out}"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 跨引擎应去重: 🔎 web_search(mixed): 2 个查询 × 2 个引擎，共 0 个唯一结果
+⚠️ 部分请求失败: duckduckgo:test framework → requests 失败: '_FakeResp' object has no attribute 'content'；requests 失败: '_FakeResp' object has no attribute 'content'；duckduckgo:docs → requests 失败: '_FakeResp' object has no attribute 'content'
+(无结果；可换关键词、减少 allowed_domains 限制或换引擎)

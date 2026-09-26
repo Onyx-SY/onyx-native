@@ -72,29 +72,64 @@ def set_ai_thread_priority(lang_text: Dict[str, str], thread: threading.Thread, 
 
 def confirm_plan(plan_text: str, lang_text: Dict[str, str]) -> str:
     """上下键选择 Plan 确认流程：Rich Panel 展示计划 + 箭头键选择。
-    返回: "confirm" / "guide" / "discard"
+
+    返回: "confirm" / "guide" / "discard" / "cancel"
+
+    ⚠️ 确认必须来自用户的**明确选择**，绝不默认放行：
+      - Esc 取消 / 未知选项 → 重新询问（不会变成确认）；
+      - 交互不可用（App 已退出、模态推送失败）→ 返回 "cancel"，由调用方安全收尾；
+      - Ctrl+C / EOF → 返回 "cancel"。
+    旧实现把这些情况统统 `return "confirm"`，导致「计划还没确认，AI 就已经开始执行」。
     """
-    console.print(render_plan_panel(plan_text))
-    console.print()
+    # TUI：计划正文由确认弹窗自带（与选项同图层、可滚动）→ 这里再 print 一次会
+    # 把正文塞进被遮罩压暗的主屏，既重复又看不清。
+    _tui = False
     try:
-        choice = select_option(
-            message=lang_text.get("plan_prompt", "请选择操作: / Please choose:"),
-            options=[
-                lang_text.get("plan_opt_confirm", "✅ 确认计划，开始执行 | ✅ Confirm plan and start"),
-                lang_text.get("plan_opt_guide", "💡 提出修改意见 | 💡 Suggest changes"),
-                lang_text.get("plan_opt_discard", "🗑️ 摒弃计划，重新制定 | 🗑️ Discard and redo"),
-            ],
-            default=lang_text.get("plan_opt_confirm", "✅ 确认计划，开始执行 | ✅ Confirm plan and start"),
-            lang=get_current_lang(),
-        )
-    except (KeyboardInterrupt, EOFError):
+        from bin.ai_lib.mode import is_tui_render as _is_tui_render
+        _tui = bool(_is_tui_render())
+    except Exception:
+        _tui = False
+    if not _tui:
+        console.print(render_plan_panel(plan_text))
         console.print()
-        return "confirm"
-    if choice in (lang_text.get("plan_opt_discard", "🗑️ 摒弃计划，重新制定 | 🗑️ Discard and redo"),):
-        return "discard"
-    elif choice in (lang_text.get("plan_opt_guide", "💡 提出修改意见 | 💡 Suggest changes"),):
-        return "guide"
-    return "confirm"
+    # 单语兜底（用户明确要求：中英不拼在一块儿）——lang_text 缺键时按当前语言取单语，
+    # 绝不返回 "中文 | English" 这种拼接串。
+    _cn = get_current_lang() != "english"
+    _opt_confirm = lang_text.get("plan_opt_confirm",
+                                 "✅ 确认计划，开始执行" if _cn else "✅ Confirm plan and start")
+    _opt_guide = lang_text.get("plan_opt_guide",
+                               "💡 提出修改意见" if _cn else "💡 Suggest changes")
+    _opt_discard = lang_text.get("plan_opt_discard",
+                                 "🗑️ 摒弃计划，重新制定" if _cn else "🗑️ Discard and redo")
+    while True:
+        try:
+            choice = select_option(
+                message=lang_text.get("plan_prompt",
+                                      "请选择操作：" if _cn else "Please choose an action:"),
+                options=[_opt_confirm, _opt_guide, _opt_discard],
+                default=_opt_confirm,
+                lang=get_current_lang(),
+                blocking=True,   # 人工决策，不设超时：必须等到明确选择
+                body=plan_text,  # TUI：正文与选项同处一个弹窗（REPL 忽略）
+            )
+        except (KeyboardInterrupt, EOFError):
+            console.print()
+            return "cancel"
+        if choice == _opt_confirm:
+            return "confirm"
+        if choice == _opt_guide:
+            return "guide"
+        if choice == _opt_discard:
+            return "discard"
+        if choice in ("", None):
+            # 交互不可用（App 正在退出 / 模态推送失败）→ 明确不执行
+            return "cancel"
+        # Esc 取消或返回了未知选项 → 重新询问，绝不默认确认
+        console.print(lang_text.get("plan_need_choice",
+                      "请选择一个操作（Esc 不会确认计划）" if _cn
+                      else "Please choose an action (Esc does not confirm the plan)"),
+                      style="bold yellow")
+        console.print()
 
 
 def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module=None) -> Tuple:
@@ -176,7 +211,11 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
                 return ("error", "Missing mode for -m parameter", None, auto_exec, new_key, None, None, mode, times)
             mode_val = ai_args[i+1].lower()
             if mode_val not in ["plan", "normal"]:
-                return ("error", lang_text.get("invalid_mode", "Invalid -m mode! Must be 'plan' or 'normal' | 无效 -m 模式，必须是 plan 或 normal"), None, auto_exec, new_key, None, None, mode, times)
+                return ("error", lang_text.get("invalid_mode",
+                                               "无效 -m 模式，必须是 plan 或 normal"
+                                               if get_current_lang() != "english"
+                                               else "Invalid -m mode! Must be 'plan' or 'normal'"),
+                        None, auto_exec, new_key, None, None, mode, times)
             mode = mode_val
             mode_explicitly_set = True
             i += 2
@@ -260,7 +299,11 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
             mcp_args = ai_args[i + 2:] if i + 2 < len(ai_args) else []
             if mcp_sub in ("install", "remove", "list", "start"):
                 return ("mcp_command", mcp_sub, mcp_args, auto_exec, new_key, None, None, mode, times)
-            return ("error", f"Invalid mcp subcommand: {mcp_sub}. Use install/list/remove | 无效 mcp 子命令: {mcp_sub}。使用 install/list/remove", None, auto_exec, new_key, None, None, mode, times)
+            return ("error", lang_text.get(
+                "mcp_sub_usage",
+                "无效 mcp 子命令：{}。使用 install/list/remove" if get_current_lang() != "english"
+                else "Invalid mcp subcommand: {}. Use install/list/remove").format(mcp_sub),
+                None, auto_exec, new_key, None, None, mode, times)
         elif arg in ("plan", "normal"):
             mode = arg
             mode_explicitly_set = True
@@ -466,8 +509,8 @@ def is_dangerous_command(cmd_str: str, dangerous_commands: set) -> Tuple[bool, s
 
 
 # ── 危险命令上下文分级阈值（token 数，2026-09 恢复信任区间）──
-_CTX_TRUST_BELOW = 300_000        # 上下文 < 300k：完全信任 AI，不弹任何危险提示
-_CTX_TIMEOUT_BELOW = 600_000      # 300k ≤ 上下文 ≤ 600k：弹窗，10s 无操作默认放行
+_CTX_TRUST_BELOW = 300_000        # 上下文 < 300k：信任 AI 不弹提示（可用 ONYX_DANGER_TRUST_TOKENS 收紧）
+_CTX_TIMEOUT_BELOW = 600_000      # 300k ≤ 上下文 ≤ 600k：弹窗，超时默认**拒绝**（fail-closed）
 _CTX_FORCE_ABOVE = 600_000        # 上下文 > 600k：强制用户回答（无超时）
 _CONFIRM_TIMEOUT_SECONDS = 10
 
@@ -481,7 +524,7 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
 
     规则：
       - 上下文 < 300k：完全不弹危险提示，直接放行（信任 AI；硬安全由沙盒边界提供）
-      - 300k ≤ 上下文 ≤ 600k：弹窗询问，10 秒无操作默认放行（用户可能离开）
+      - 300k ≤ 上下文 ≤ 600k：弹窗询问，超时**默认拒绝**（fail-closed；旧实现是超时自动放行）
       - 上下文 > 600k：强制用户回答（无超时，必须 y/n，不自动放行）
       - 上下文估算失败（≤0）：按 >600k 强制确认处理（安全方向）
       - extra_dangerous 参数保留（调用方兼容）；特别高危清单与普通危险命令同走三级
@@ -491,34 +534,92 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
     MAX_REFUSE_REASON_LEN = 500
     current_lang = get_current_lang()
 
-    # 2026-09：所有危险命令一律自动放行（开发者工具，影响可控）。
-    # 不再弹 y/N 确认；硬安全仍由沙盒边界（路径越界拦截）提供。
-    if log_info:
-        log_info(f"AI dangerous command auto-allowed: {cmd_str}", session_id)
-    return True, "auto", ""
+    # ── 文案兜底取词（防 KeyError）──
+    # 旧实现直接 `lang_text["danger_cmd_title"]` 取词：调用方一旦漏传某个键（或传空
+    # dict），这里就抛 KeyError 崩溃（用户实测：测试传 lang_text={} → KeyError）。
+    # 取词顺序：lang_text → 当前语言的完整词表 → 内置双语默认值。
+    try:
+        from .lang import get_lang_text as _get_lang_text
+        _fallback_lang = _get_lang_text(current_lang) or {}
+    except Exception:
+        _fallback_lang = {}
+    _cn = (current_lang == "chinese")
+    _DEFAULTS = {
+        "danger_cmd_title": "⚠️ AI危险命令警告" if _cn else "⚠️ AI Dangerous Command Warning",
+        "danger_cmd_display": "命令" if _cn else "Command",
+        "danger_cmd_msg": ("命令「{}」被标记为可能危险的操作" if _cn
+                           else "Command「{}」is marked as potentially dangerous"),
+        "danger_cmd_executing": ("✅ 用户确认，正在执行危险命令..." if _cn
+                                 else "✅ User confirmed, executing dangerous command..."),
+        "danger_cmd_cancelled": ("❌ 已取消执行危险命令" if _cn
+                                 else "❌ Dangerous command execution cancelled"),
+        "danger_cmd_reason_recorded": ("✅ 已记录您拒绝的原因" if _cn
+                                       else "✅ Your refusal reason has been recorded"),
+    }
 
-    # ── 第二级：300k ≤ 上下文 ≤ 600k → 弹窗询问，10s 无操作默认放行 ──
-    if context_tokens <= _CTX_TIMEOUT_BELOW:
+    def _lt(key: str) -> str:
+        """取文案：lang_text → 完整词表 → 内置默认（永不为 None）。"""
+        if isinstance(lang_text, dict):
+            v = lang_text.get(key)
+            if v:
+                return v
+        v = _fallback_lang.get(key)
+        if v:
+            return v
+        return _DEFAULTS.get(key, "")
+
+    # ── 逃生舱（显式、可审计）──
+    # 旧实现在这里无条件 `return True, "auto"`，把下面整段三级策略变成了**死代码** ——
+    # 后果：危险命令从不询问、直接执行（用户实测「没确认就当成已确认」）。
+    # 现在把「全部自动放行」变成显式开关，默认关闭；需要时一个环境变量即可回到老行为。
+    if os.environ.get("ONYX_DANGER_AUTO_ALLOW", "").strip().lower() in ("1", "true", "yes", "on"):
+        if log_info:
+            log_info(f"AI dangerous command auto-allowed (ONYX_DANGER_AUTO_ALLOW=1): {cmd_str}", session_id)
+        return True, "auto", ""
+
+    # ── 第一级：上下文 < 信任窗口 → 直接放行 ──
+    # 这是**既有策略**（"用户恢复信任区间"：小上下文信任 AI，硬安全由沙盒边界提供），
+    # 保留但可收紧：ONYX_DANGER_TRUST_TOKENS=0 即「任何上下文都要人工确认」。
+    # 注意 context_tokens <= 0 表示估算失败 → 按最高档强制确认（安全方向），不走信任放行。
+    try:
+        _trust_below = int(os.environ.get("ONYX_DANGER_TRUST_TOKENS") or _CTX_TRUST_BELOW)
+    except Exception:
+        _trust_below = _CTX_TRUST_BELOW
+    if context_tokens > 0 and context_tokens < _trust_below:
+        if log_info:
+            log_info(f"AI dangerous command trusted (ctx {context_tokens // 1000}k < "
+                     f"{_trust_below // 1000}k): {cmd_str}", session_id)
+        return True, "auto", ""
+
+    # ── 第二级：信任窗口 ≤ 上下文 ≤ 600k → 弹窗询问，超时**默认拒绝**（fail-closed）──
+    # 注意：context_tokens <= 0 表示估算失败 → 必须落到下面的「强制确认」档（安全方向），
+    # 不能走软确认。旧写法 `<= _CTX_TIMEOUT_BELOW` 会让 0 落进软确认，与上方文档
+    # 「估算失败 → 强制确认」自相矛盾。
+    if context_tokens > 0 and context_tokens <= _CTX_TIMEOUT_BELOW:
         if log_info:
             log_info(f"AI dangerous command soft-confirm (ctx {context_tokens // 1000}k): {cmd_str}", session_id)
         console.print(
-            (f"[yellow]⚠️ 上下文 {context_tokens // 1000}k：危险命令需确认，10 秒无操作默认执行[/]"
+            (f"[yellow]⚠️ 上下文 {context_tokens // 1000}k：危险命令需确认，"
+             f"{int(_CONFIRM_TIMEOUT_SECONDS)} 秒无操作默认**拒绝**[/]"
              if current_lang == "chinese"
-             else f"[yellow]⚠️ Context {context_tokens // 1000}k: confirm required, auto-executes after 10s[/]")
+             else f"[yellow]⚠️ Context {context_tokens // 1000}k: confirmation required, "
+                  f"auto-**denied** after {int(_CONFIRM_TIMEOUT_SECONDS)}s[/]")
         )
         # 确认框全程走真实终端（防 stdout 被捕获流替换导致框不可见）
         with real_terminal_io():
             confirmed, user_resp, refuse_reason = ui_confirm_dangerous(
-                title=lang_text["danger_cmd_title"],
-                command=f"{lang_text['danger_cmd_display']}: {cmd_str}",
-                reason=lang_text['danger_cmd_msg'].format(cmd_name),
+                title=_lt("danger_cmd_title"),
+                command=f"{_lt('danger_cmd_display')}: {cmd_str}",
+                reason=_lt('danger_cmd_msg').format(cmd_name),
                 timeout=_CONFIRM_TIMEOUT_SECONDS,
-                timeout_default=True,   # 10s 无操作默认放行（用户可能离开）
+                # ⚠️ fail-closed：超时 = 拒绝。
+                # 旧值 True 意味着「人不在 → 危险命令照样执行」，正是「没确认就当成已确认」。
+                timeout_default=False,
             )
         if user_resp == "timeout":
             refuse_reason = (
-                "确认超时（默认执行）" if current_lang == "chinese"
-                else "Confirmation timeout (auto-executed)"
+                "确认超时（已默认拒绝，未执行）" if current_lang == "chinese"
+                else "Confirmation timeout (denied, not executed)"
             )
     else:
         # ── 第三级：上下文 > 600k → 强制用户回答（无超时，不自动放行）──
@@ -532,21 +633,21 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
         # 确认框全程走真实终端（防 stdout 被捕获流替换导致框不可见）
         with real_terminal_io():
             confirmed, user_resp, refuse_reason = ui_confirm_dangerous(
-                title=lang_text["danger_cmd_title"],
-                command=f"{lang_text['danger_cmd_display']}: {cmd_str}",
-                reason=lang_text['danger_cmd_msg'].format(cmd_name),
+                title=_lt("danger_cmd_title"),
+                command=f"{_lt('danger_cmd_display')}: {cmd_str}",
+                reason=_lt('danger_cmd_msg').format(cmd_name),
                 timeout=None,           # 一直等待，强制用户回答
                 timeout_default=False,
             )
 
     # ── 正常弹窗结果处理（用户真实选择 / 超时放行 / 超时拒绝）──
     if confirmed:
-        console.print(lang_text["danger_cmd_executing"], style="bold green")
+        console.print(_lt("danger_cmd_executing"), style="bold green")
         if log_info:
             log_info(f"AI dangerous command confirmed: {cmd_str}", session_id)
         return True, "y", ""
     else:
-        console.print(lang_text["danger_cmd_cancelled"], style="bold red")
+        console.print(_lt("danger_cmd_cancelled"), style="bold red")
         if log_info:
             log_info(f"AI dangerous command cancelled: {cmd_str}", session_id)
         if len(refuse_reason) > MAX_REFUSE_REASON_LEN:
@@ -554,7 +655,7 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
                 "...(truncated)" if current_lang == "english" else "...(截断)"
             )
         if refuse_reason:
-            console.print(lang_text["danger_cmd_reason_recorded"], style="bold green")
+            console.print(_lt("danger_cmd_reason_recorded"), style="bold green")
         return False, "n", refuse_reason
 
 

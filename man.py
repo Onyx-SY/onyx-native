@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 跨平台手册页扫描器 —— 纯异步后台扫描模式
-支持增量更新，每处理一个命令立即保存，不阻塞主程序
+支持增量更新：一次性建立 man 页索引 + 节流批量落盘，不阻塞主程序
 """
 
 import os
@@ -56,6 +56,7 @@ class AsyncManScanner:
         self._stop_flag = False
         self._scan_thread = None
         self._current_progress = self._load_progress()
+        self._man_index: Optional[Dict[str, List[Path]]] = None
         
     def _detect_system(self) -> SystemConfig:
         """检测当前系统环境"""
@@ -171,9 +172,14 @@ class AsyncManScanner:
                 except OSError:
                     pass
     
-    def find_manpage_files(self, cmd_name: str) -> List[Path]:
-        """查找命令的手册页文件"""
-        manpage_paths = []
+    def _build_man_index(self) -> Dict[str, List[Path]]:
+        """一次性建立 man 手册页索引：{命令名: [手册页路径]}
+
+        对每个 man 分区目录只 listdir 一次，避免逐命令重复 listdir（原实现是 O(N×M)）。
+        语义与原 find_manpage_files 一致：按「命令名.」前缀匹配，每个分区取首个匹配。
+        """
+        index: Dict[str, List[Path]] = {}
+        seen: Set[Tuple[str, str]] = set()
         try:
             for man_dir in self.config.man_dirs:
                 if not os.path.exists(man_dir):
@@ -184,14 +190,27 @@ class AsyncManScanner:
                         continue
                     try:
                         for file in os.listdir(man_section_dir):
-                            if file.startswith(f"{cmd_name}."):
-                                manpage_paths.append(Path(man_section_dir) / file)
-                                break
+                            if '.' not in file:
+                                continue
+                            base = file.split('.', 1)[0]
+                            if not base:
+                                continue
+                            key = (base, man_section_dir)
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            index.setdefault(base, []).append(Path(man_section_dir) / file)
                     except (PermissionError, OSError):
                         continue
         except Exception as e:
-            logger.debug(f"查找手册页失败 {cmd_name}: {e}")
-        return manpage_paths
+            logger.debug(f"建立手册页索引失败: {e}")
+        return index
+
+    def find_manpage_files(self, cmd_name: str) -> List[Path]:
+        """查找命令的手册页文件（走一次性索引，O(1)）"""
+        if self._man_index is None:
+            self._man_index = self._build_man_index()
+        return list(self._man_index.get(cmd_name, []))
     
     def read_manpage_content(self, manpage_path: Path) -> str:
         """读取手册页内容"""
@@ -334,6 +353,11 @@ class AsyncManScanner:
             self._current_progress["total_commands"] = len(all_commands)
             self._save_progress()
 
+            # 节流落盘参数：每 SAVE_EVERY 条 或 每 SAVE_INTERVAL 秒落一次盘
+            SAVE_EVERY = 100
+            SAVE_INTERVAL = 2.0
+            last_save = time.time()
+
             for i, cmd in enumerate(to_scan):
                 if self._stop_flag:
                     break
@@ -355,12 +379,22 @@ class AsyncManScanner:
                 except Exception as e:
                     logger.debug(f"扫描命令失败 {cmd}: {e}")
 
-                self._current_progress["scanned"] = list(existing.keys())
-                self._current_progress["last_index"] = i + 1
+                # 节流落盘：不再每条都全量写盘（原为 O(N²)），每 100 条或每 2 秒落一次
+                if (i + 1) % SAVE_EVERY == 0 or (time.time() - last_save) >= SAVE_INTERVAL:
+                    self._current_progress["scanned"] = list(existing.keys())
+                    self._current_progress["last_index"] = i + 1
+                    self._save_commands(existing)
+                    self._save_progress()
+                    last_save = time.time()
+                # 温和让出 CPU，避免长时间独占
+                if (i + 1) % 50 == 0:
+                    time.sleep(0)
 
-                # 每处理一个命令就立即保存
-                self._save_commands(existing)
-                self._save_progress()
+            # 结束/中断：强制落盘一次最终结果
+            self._current_progress["scanned"] = list(existing.keys())
+            self._current_progress["last_index"] = len(to_scan)
+            self._save_commands(existing)
+            self._save_progress()
 
             # 扫描完成，清理进度文件
             if os.path.exists(SCAN_PROGRESS_PATH):

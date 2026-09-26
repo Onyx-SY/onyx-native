@@ -1,0 +1,51 @@
+❯ 
+
+
+
+
+
+ 
+ ❯ READY │ ↑ 历史 · Ctrl+R 搜索 · Tab 补全 · Ctrl+X Ctrl+R 模糊历史 · F1 帮助 ·                                                                                  ── ① 单行：完整命令直接提交 ──────────────────────────
+❯ echo hi
+❯ 
+
+
+
+
+
+ 
+ ❯ READY │ ↑ 历史 · Ctrl+R 搜索 · Tab 补全 · Ctrl+X Ctrl+R 模糊历史 · F1 帮助 ·                                                                                     结果 = 'echo hi'
+── ② 多行：Enter 自动续行 + 自动缩进 ─────────────────
+❯ if true; then
+…     echo hi
+…     fi
+
+
+
+ 
+        ❯ if true; then
+…     echo hi
+…     fi
+❯ 
+
+
+
+
+
+ 
+ ❯ READY │ ↑ 历史 · Ctrl+R 搜索 · Tab 补全 · Ctrl+X Ctrl+R 模糊历史 · F1 帮助 ·                                                                                     结果 = 'if true; then\n    echo hi\n    fi'
+── ③ 补全：Tab 取候选（异步驱动，等补全就绪）──────────
+git❯ git
+   结果 = 'git'
+   补全器类型 = OnyxCompleter
+── ④ 会话复用：同签名同一对象，签名变化才重建 ─────────
+   同签名复用 = True | 变签名重建 = True | stats = {'name': 'unit', 'builds': 2, 'hits': 1, 'has_session': True}
+── ⑤ 工具条 / 帮助文本 ──────────────────────────────
+   工具条 = ❯ SHELL │ ↑ 历史 · Ctrl+R 搜索 · Tab 补全 · Ctrl+X Ctrl+R 模糊历史 · F1 帮助 · 🔍 git 1/3
+   帮助浮层 43 行，含 Ctrl+W: True / F1: True
+── ⑥ 真实换行必须穿过 _clean_display_text ────────────
+   'if true; then\n    echo hi\nfi'
+── ⑦ 开关默认值 ─────────────────────────────────────
+   _REPL_V2 = True（默认应为 True）
+
+FAILS: none

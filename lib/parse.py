@@ -886,13 +886,90 @@ def resolve_paths_in_multiline_text(text: str, resolve_path_func=None) -> str:
     return '\n'.join(processed_lines)
 
 
+# ── shebang 处理：脚本自带 shebang 就交给系统执行，不再改写成 Onyx 自执行 ──
+
+def read_shebang(file_path: str) -> Optional[str]:
+    """读取脚本首行 shebang，返回 `#!` 之后的正文（如 '/usr/bin/env python3'）。
+
+    不是文本脚本 / 没有 shebang / 读取失败 → None。
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            first = f.readline(256)
+    except Exception:
+        return None
+    if not first.startswith(b'#!'):
+        return None
+    try:
+        body = first.decode('utf-8', 'replace').strip()
+    except Exception:
+        return None
+    body = body[2:].strip()
+    return body or None
+
+
+def _shebang_command(shebang_body: str) -> List[str]:
+    """把 shebang 正文拆成 [解释器, *参数]，正确处理 `/usr/bin/env` 前缀。
+
+    - `#!/bin/bash -e`               → ['/bin/bash', '-e']
+    - `#!/usr/bin/env python3`       → ['python3']
+    - `#!/usr/bin/env -S python3 -u` → ['python3', '-u']
+    """
+    if not shebang_body:
+        return []
+    try:
+        parts = shlex.split(shebang_body)
+    except Exception:
+        parts = shebang_body.split()
+    if not parts:
+        return []
+
+    if os.path.basename(parts[0]) != 'env':
+        return parts
+
+    rest = parts[1:]
+    while rest and rest[0].startswith('-'):
+        opt = rest.pop(0)
+        if opt == '-S' and rest:
+            # -S 后面是「命令 + 参数」的整体串
+            try:
+                return shlex.split(rest[0]) + rest[1:]
+            except Exception:
+                return rest
+        if opt in ('-u', '--unset', '-C', '--chdir', '-P', '--path'):
+            if rest:
+                rest.pop(0)          # 该选项带一个操作数
+    return rest
+
+
+def _build_shebang_cmd(shebang_body: str, script_path: str, has_quotes: bool) -> str:
+    """按 shebang 构造「交给系统执行」的命令。
+
+    - 文件有可执行位 → 直接返回脚本路径，由内核按 shebang 启动（标准行为）；
+    - 没有可执行位 → 显式用 shebang 里的解释器运行，否则 shell 只会报 Permission denied。
+    """
+    quoted = f'"{script_path}"' if has_quotes else script_path
+    try:
+        if os.access(script_path, os.X_OK):
+            return quoted
+    except Exception:
+        pass
+
+    cmd = _shebang_command(shebang_body)
+    if not cmd:
+        return quoted
+    return ' '.join(cmd + [quoted])
+
+
 def handle_executable_path(command_token: str, resolve_path_func=None, 
                            virtual_root_dir: str = None) -> str:
     """
     处理可执行文件路径
     
     - 如果路径指向二进制可执行文件 → 返回解析后的路径
-    - 如果路径指向非二进制文件 → 返回 'python <虚拟根目录>/onyx/cmd.py source <原始路径>'
+    - 如果路径指向文本脚本：
+        · 有 shebang → 交给系统按 shebang 执行（有 +x 直接给路径，没有则用解释器显式运行）
+        · 无 shebang → 返回 'python <虚拟根目录>/onyx/cmd.py source <原始路径>'（Onyx 自执行）
     
     Args:
         command_token: 命令 token（可能是文件路径）
@@ -922,7 +999,12 @@ def handle_executable_path(command_token: str, resolve_path_func=None,
                     return f"{quote_char}{resolved}{quote_char}"
                 return resolved
             elif os.path.isfile(resolved):
-                # 非二进制文件，转换为 source 调用
+                # ① 脚本自带 shebang → 交给系统按 shebang 执行
+                #    （有 +x 直接给路径；没有 +x 用解释器显式运行，避免 Permission denied）
+                _shebang = read_shebang(resolved)
+                if _shebang:
+                    return _build_shebang_cmd(_shebang, resolved, has_quotes)
+                # ② 没有 shebang → 由 Onyx 自己执行（source 语义，走完整安全检查）
                 if virtual_root_dir:
                     cmd_py_path = os.path.join(virtual_root_dir, 'onyx', 'cmd.py')
                     if has_quotes:

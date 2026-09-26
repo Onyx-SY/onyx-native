@@ -1,0 +1,3 @@
+echo zulu_from_prev_run
+echo typed_in_this_run
+echo zulu_from_prev_run

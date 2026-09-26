@@ -87,7 +87,7 @@ def _set_c_perm_rules():
 
 
 def _load_c_library():
-    global C_LIB, C_LIB_AVAILABLE
+    global C_LIB, C_LIB_AVAILABLE, C_LIB_PATH
     C_LIB_PATH = get_lib_path("resolve_path")
     if not C_LIB_PATH:
         return

@@ -52,9 +52,16 @@ def compile_c(source: str, output: str = "", extra_flags: list = None) -> str:
 
     cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
     if not cc:
-        if _sys() in ("linux", "termux") and shutil.which("apt"):
-            subprocess.run(["apt", "install", "-y", "gcc"], capture_output=True)
-            cc = shutil.which("gcc")
+        # Termux/Android 上只有 `pkg`（`apt` 是 stub，且无 root/sudo）→ 必须分开处理，
+        # 旧实现统一跑 `apt install -y gcc` 在 Termux 上是静默失败。
+        if _sys() == "termux" or shutil.which("pkg"):
+            subprocess.run(["pkg", "install", "-y", "clang"], capture_output=True)
+            cc = shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
+        if not cc and _sys() in ("linux", "termux") and shutil.which("apt"):
+            _sudo = [] if (os.geteuid() == 0 if hasattr(os, "geteuid") else False) else (["sudo"] if shutil.which("sudo") else [])
+            if _sudo or not shutil.which("sudo"):
+                subprocess.run(_sudo + ["apt", "install", "-y", "gcc"], capture_output=True)
+                cc = shutil.which("gcc")
         if _sys() == "darwin" and shutil.which("xcode-select"):
             subprocess.run(["xcode-select", "--install"], capture_output=True)
             cc = shutil.which("clang") or shutil.which("gcc")

@@ -1,5 +1,5 @@
 {
-  "_comment": "AI platform & model registry | price: USD / 1 Million Tokens ",
+  "_comment": "AI platform & model registry | price: USD / 1 Million Tokens | Updated: 2026-09-24",
   "deepseek": {
     "name": "深度求索DeepSeek",
     "api_url": "https://api.deepseek.com/v1/chat/completions",
@@ -29,10 +29,11 @@
         "output": 3.96
       },
       "deepseek-v4-flash": {
-        "input": 0.3,
-        "output": 1.2
+        "input": 0.14,
+        "output": 0.28
       }
-    }
+    },
+    "_note": "V4.1 Flash 已发布，deepseek-v4-flash 路由至 V4.1 Flash；V4-Pro 请求暂时自动路由至 Flash。峰谷定价（空闲/高峰=1/2），此处取高峰价近似。"
   },
   "openai": {
     "name": "OpenAI",
@@ -40,39 +41,43 @@
     "stream_format": "openai",
     "supports_prompt_cache": true,
     "models": [
-      "gpt-5.5",
-      "gpt-5.5-instant",
-      "gpt-5.5-pro",
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
-      "gpt-5.6-luna"
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.5-pro"
     ],
     "protocols": {
-      "gpt-5.5": "openai",
-      "gpt-5.5-instant": "openai",
-      "gpt-5.5-pro": "openai",
+      "gpt-6-astra": "openai",
+      "gpt-6-sol": "openai",
+      "gpt-6-luna": "openai",
       "gpt-5.6-sol": "openai",
       "gpt-5.6-terra": "openai",
-      "gpt-5.6-luna": "openai"
+      "gpt-5.6-luna": "openai",
+      "gpt-5.5": "openai",
+      "gpt-5.5-pro": "openai"
     },
-    "default_model": "gpt-5.5",
+    "default_model": "gpt-6-sol",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
       "max_tokens": 32768
     },
     "price_per_million_tokens": {
-      "gpt-5.5-instant": {
-        "input": 3.0,
-        "output": 12.0
+      "gpt-6-astra": {
+        "input": 10.0,
+        "output": 50.0
       },
-      "gpt-5.5": {
-        "input": 5.0,
-        "output": 18.0
+      "gpt-6-sol": {
+        "input": 2.0,
+        "output": 10.0
       },
-      "gpt-5.5-pro": {
-        "input": 12.5,
-        "output": 75.0
+      "gpt-6-luna": {
+        "input": 0.1,
+        "output": 0.5
       },
       "gpt-5.6-sol": {
         "input": 5.0,
@@ -85,8 +90,17 @@
       "gpt-5.6-luna": {
         "input": 0.2,
         "output": 1.2
+      },
+      "gpt-5.5": {
+        "input": 5.0,
+        "output": 18.0
+      },
+      "gpt-5.5-pro": {
+        "input": 12.5,
+        "output": 75.0
       }
-    }
+    },
+    "_note": "GPT-6 Sol 和 Luna 于 2026-09-22 发布，价格永久下调 50%。Luna 输入 $0.10 进入 DeepSeek 腹地，Sol 以 $2/$10 覆盖主流专业任务，Astra 继续把守 $10/$50 旗舰价位。"
   },
   "anthropic": {
     "name": "Anthropic",
@@ -94,32 +108,28 @@
     "stream_format": "anthropic",
     "supports_prompt_cache": true,
     "models": [
-      "claude-sonnet-5",
-      "claude-sonnet-4-6",
-      "claude-sonnet-4-5",
-      "claude-sonnet-4",
+      "claude-fable-5-1",
+      "claude-mythos-5-1",
+      "claude-fable-5",
       "claude-opus-5",
+      "claude-sonnet-5",
       "claude-opus-4-8",
       "claude-opus-4-7",
       "claude-opus-4-6",
-      "claude-opus-4-5",
-      "claude-haiku-4-5",
-      "claude-fable-5",
-      "claude-mythos-5"
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5"
     ],
     "protocols": {
-      "claude-sonnet-5": "anthropic",
-      "claude-sonnet-4-6": "anthropic",
-      "claude-sonnet-4-5": "anthropic",
-      "claude-sonnet-4": "anthropic",
+      "claude-fable-5-1": "anthropic",
+      "claude-mythos-5-1": "anthropic",
+      "claude-fable-5": "anthropic",
       "claude-opus-5": "anthropic",
+      "claude-sonnet-5": "anthropic",
       "claude-opus-4-8": "anthropic",
       "claude-opus-4-7": "anthropic",
       "claude-opus-4-6": "anthropic",
-      "claude-opus-4-5": "anthropic",
-      "claude-haiku-4-5": "anthropic",
-      "claude-fable-5": "anthropic",
-      "claude-mythos-5": "anthropic"
+      "claude-sonnet-4-6": "anthropic",
+      "claude-haiku-4-5": "anthropic"
     },
     "default_model": "claude-sonnet-5",
     "params": {
@@ -128,25 +138,25 @@
       "max_tokens": 32768
     },
     "price_per_million_tokens": {
-      "claude-sonnet-5": {
-        "input": 2.0,
-        "output": 10.0
+      "claude-fable-5-1": {
+        "input": 10.0,
+        "output": 50.0
       },
-      "claude-sonnet-4-6": {
-        "input": 3.0,
-        "output": 15.0
+      "claude-mythos-5-1": {
+        "input": 10.0,
+        "output": 50.0
       },
-      "claude-sonnet-4-5": {
-        "input": 3.0,
-        "output": 15.0
-      },
-      "claude-sonnet-4": {
-        "input": 3.0,
-        "output": 15.0
+      "claude-fable-5": {
+        "input": 10.0,
+        "output": 50.0
       },
       "claude-opus-5": {
         "input": 5.0,
         "output": 25.0
+      },
+      "claude-sonnet-5": {
+        "input": 2.0,
+        "output": 10.0
       },
       "claude-opus-4-8": {
         "input": 5.0,
@@ -160,23 +170,126 @@
         "input": 5.0,
         "output": 25.0
       },
-      "claude-opus-4-5": {
-        "input": 5.0,
-        "output": 25.0
+      "claude-sonnet-4-6": {
+        "input": 3.0,
+        "output": 15.0
       },
       "claude-haiku-4-5": {
         "input": 1.0,
         "output": 5.0
-      },
-      "claude-fable-5": {
-        "input": 10.0,
-        "output": 50.0
-      },
-      "claude-mythos-5": {
-        "input": 12.0,
-        "output": 60.0
       }
-    }
+    },
+    "_note": "Fable 5.1 和 Mythos 5.1 于 2026-09-01 发布。Opus 5 以 $5/$25 提供接近 Fable 5 的智能但价格减半。Haiku 4.5 是最便宜选项，适合高吞吐场景。"
+  },
+  "google": {
+    "name": "Google Gemini",
+    "api_url": "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse",
+    "stream_format": "google",
+    "supports_prompt_cache": true,
+    "models": [
+      "gemini-3.8-flash",
+      "gemini-3.8-flash-cyber",
+      "gemini-3.7-flash",
+      "gemini-3.5-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-pro",
+      "gemini-3-flash"
+    ],
+    "protocols": {
+      "gemini-3.8-flash": "google",
+      "gemini-3.8-flash-cyber": "google",
+      "gemini-3.7-flash": "google",
+      "gemini-3.5-flash": "google",
+      "gemini-3.5-flash-lite": "google",
+      "gemini-3.1-pro": "google",
+      "gemini-3-flash": "google"
+    },
+    "default_model": "gemini-3.8-flash",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 32768
+    },
+    "price_per_million_tokens": {
+      "gemini-3.8-flash": {
+        "input": 0.75,
+        "output": 3.75
+      },
+      "gemini-3.8-flash-cyber": {
+        "input": 0.75,
+        "output": 3.75
+      },
+      "gemini-3.7-flash": {
+        "input": 1.5,
+        "output": 7.5
+      },
+      "gemini-3.5-flash": {
+        "input": 1.5,
+        "output": 9.0
+      },
+      "gemini-3.5-flash-lite": {
+        "input": 0.3,
+        "output": 2.5
+      },
+      "gemini-3.1-pro": {
+        "input": 2.0,
+        "output": 12.0
+      },
+      "gemini-3-flash": {
+        "input": 0.5,
+        "output": 3.0
+      }
+    },
+    "_note": "Gemini 3.8 Flash 于 2026-09-01 发布，保持与 3.7 Flash 相同的入门价 $0.75/$3.75。3.8 Flash Cyber 专注网络安全。Gemini 3.8 Audio 基于 Gemini 3 Pro 提供实时语音对话能力。"
+  },
+  "xai": {
+    "name": "xAI Grok",
+    "api_url": "https://api.x.ai/v1/chat/completions",
+    "stream_format": "openai",
+    "supports_prompt_cache": true,
+    "models": [
+      "grok-4.7",
+      "grok-4.6",
+      "grok-4.5",
+      "grok-4.3",
+      "grok-build-0.1"
+    ],
+    "protocols": {
+      "grok-4.7": "openai",
+      "grok-4.6": "openai",
+      "grok-4.5": "openai",
+      "grok-4.3": "openai",
+      "grok-build-0.1": "openai"
+    },
+    "default_model": "grok-4.6",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 32768
+    },
+    "price_per_million_tokens": {
+      "grok-4.7": {
+        "input": 2.0,
+        "output": 6.0
+      },
+      "grok-4.6": {
+        "input": 2.0,
+        "output": 6.0
+      },
+      "grok-4.5": {
+        "input": 2.0,
+        "output": 6.0
+      },
+      "grok-4.3": {
+        "input": 1.25,
+        "output": 2.5
+      },
+      "grok-build-0.1": {
+        "input": 1.0,
+        "output": 2.0
+      }
+    },
+    "_note": "Grok 4.7 于 2026-09-21 发布，$2/$6 定价直接对标 GPT-6 Sol。Grok Build 是面向 Agentic Coding 的专用模型。超过 200K prompt tokens 后价格翻倍。"
   },
   "kimi": {
     "name": "月之暗面Kimi",
@@ -184,14 +297,16 @@
     "stream_format": "openai",
     "supports_prompt_cache": true,
     "models": [
-      "kimi-k2.6",
+      "kimi-k3",
       "kimi-k2.7-code",
-      "kimi-k3"
+      "kimi-k2.6",
+      "kimi-k2.5"
     ],
     "protocols": {
-      "kimi-k2.6": "openai",
+      "kimi-k3": "openai",
       "kimi-k2.7-code": "openai",
-      "kimi-k3": "openai"
+      "kimi-k2.6": "openai",
+      "kimi-k2.5": "openai"
     },
     "default_model": "kimi-k3",
     "params": {
@@ -200,19 +315,24 @@
       "max_tokens": 32768
     },
     "price_per_million_tokens": {
-      "kimi-k2.6": {
-        "input": 0.8,
-        "output": 3.5
+      "kimi-k3": {
+        "input": 3.0,
+        "output": 15.0
       },
       "kimi-k2.7-code": {
         "input": 0.95,
         "output": 4.0
       },
-      "kimi-k3": {
-        "input": 3.0,
-        "output": 15.0
+      "kimi-k2.6": {
+        "input": 0.95,
+        "output": 4.0
+      },
+      "kimi-k2.5": {
+        "input": 0.6,
+        "output": 3.0
       }
-    }
+    },
+    "_note": "Kimi K3 为旗舰，1M 上下文。K2.7 Code 支持多模态和 256K 上下文。"
   },
   "glm": {
     "name": "智谱GLM",
@@ -220,35 +340,96 @@
     "stream_format": "openai",
     "supports_prompt_cache": false,
     "models": [
+      "glm-5.3",
+      "glm-5.3-flash",
+      "glm-5.3-flashx",
+      "glm-5.2",
+      "glm-5.1",
       "glm-5",
       "glm-5-turbo",
-      "glm-5.2"
+      "glm-5v-turbo",
+      "glm-4.7",
+      "glm-4.7-flash",
+      "glm-4.7-flashx",
+      "glm-4.6",
+      "glm-4.5-air",
+      "glm-4.5-airx",
+      "glm-4.5-flash",
+      "glm-4-flash-250414",
+      "glm-4-long",
+      "glm-4-flashx-250414",
+      "cogvideox-3",
+      "glm-image",
+      "glm-ocr",
+      "glm-asr-2512",
+      "glm-tts",
+      "embedding-3"
     ],
     "protocols": {
+      "glm-5.3": "openai",
+      "glm-5.3-flash": "openai",
+      "glm-5.3-flashx": "openai",
+      "glm-5.2": "openai",
+      "glm-5.1": "openai",
       "glm-5": "openai",
       "glm-5-turbo": "openai",
-      "glm-5.2": "openai"
+      "glm-5v-turbo": "openai",
+      "glm-4.7": "openai",
+      "glm-4.7-flash": "openai",
+      "glm-4.7-flashx": "openai",
+      "glm-4.6": "openai",
+      "glm-4.5-air": "openai",
+      "glm-4.5-airx": "openai",
+      "glm-4.5-flash": "openai",
+      "glm-4-flash-250414": "openai",
+      "glm-4-long": "openai",
+      "glm-4-flashx-250414": "openai"
     },
-    "default_model": "glm-5.2",
+    "default_model": "glm-5.3",
     "params": {
       "temperature": 0.1,
       "top_p": 0.2,
       "max_tokens": 32768
     },
     "price_per_million_tokens": {
-      "glm-5-turbo": {
-        "input": 0.45,
-        "output": 1.8
+      "glm-5.3": {
+        "input": 1.4,
+        "output": 4.4
       },
-      "glm-5": {
-        "input": 0.9,
-        "output": 3.6
+      "glm-5.3-flash": {
+        "input": 0.15,
+        "output": 0.5
+      },
+      "glm-5.3-flashx": {
+        "input": 0.38,
+        "output": 1.25
       },
       "glm-5.2": {
-        "input": 1.2,
-        "output": 4.1
+        "input": 1.4,
+        "output": 4.4
+      },
+      "glm-5.1": {
+        "input": 1.4,
+        "output": 4.4
+      },
+      "glm-5": {
+        "input": 1.0,
+        "output": 3.2
+      },
+      "glm-4.7-flash": {
+        "input": 0.0,
+        "output": 0.0
+      },
+      "glm-4.5-flash": {
+        "input": 0.0,
+        "output": 0.0
+      },
+      "glm-4-flash-250414": {
+        "input": 0.0,
+        "output": 0.0
       }
-    }
+    },
+    "_note": "GLM-5.3 系列为当前主力。GLM-5.3-Flash 原生多模态，总参 320B 激活 18B。GLM-5.3-FlashX 推理速度 200 tok/s。GLM-4.7-Flash、GLM-4.5-Flash、GLM-4-Flash-250414 为免费文本模型。另有多模态模型：CogVideoX-3（视频）、GLM-Image（图像）、GLM-OCR、GLM-ASR-2512（语音识别）、GLM-TTS（语音合成）、Embedding-3（向量）。"
   },
   "qwen": {
     "name": "通义千问qwen",
@@ -256,19 +437,27 @@
     "stream_format": "openai",
     "supports_prompt_cache": false,
     "models": [
-      "qwen3.5-plus",
-      "qwen3.6-plus",
-      "qwen3.7-plus",
-      "qwen3.7-flash",
       "qwen3.8-max",
+      "qwen3.8-flash",
+      "qwen3.8-omni-flash",
+      "qwen3.7-max",
+      "qwen3.7-plus",
+      "qwen3.6-plus",
+      "qwen3.6-flash",
+      "qwen3.5-flash",
+      "qwen3-max-2026-01-23",
       "qwen3-coder-next"
     ],
     "protocols": {
-      "qwen3.5-plus": "openai",
-      "qwen3.6-plus": "openai",
-      "qwen3.7-plus": "openai",
-      "qwen3.7-flash": "openai",
       "qwen3.8-max": "openai",
+      "qwen3.8-flash": "openai",
+      "qwen3.8-omni-flash": "openai",
+      "qwen3.7-max": "openai",
+      "qwen3.7-plus": "openai",
+      "qwen3.6-plus": "openai",
+      "qwen3.6-flash": "openai",
+      "qwen3.5-flash": "openai",
+      "qwen3-max-2026-01-23": "openai",
       "qwen3-coder-next": "openai"
     },
     "default_model": "qwen3.7-plus",
@@ -278,31 +467,48 @@
       "max_tokens": 32768
     },
     "price_per_million_tokens": {
-      "qwen3.5-plus": {
-        "input": 0.4,
-        "output": 2.4
+      "qwen3.8-max": {
+        "input": 2.5,
+        "output": 7.5
       },
-      "qwen3.6-plus": {
-        "input": 0.75,
-        "output": 2.2
+      "qwen3.8-flash": {
+        "input": 0.15,
+        "output": 0.6
+      },
+      "qwen3.8-omni-flash": {
+        "input": 0.15,
+        "output": 0.47
+      },
+      "qwen3.7-max": {
+        "input": 2.5,
+        "output": 7.5
       },
       "qwen3.7-plus": {
-        "input": 1.25,
-        "output": 3.75
+        "input": 0.4,
+        "output": 1.6
       },
-      "qwen3.7-flash": {
-        "input": 0.6,
-        "output": 1.8
+      "qwen3.6-plus": {
+        "input": 0.5,
+        "output": 3.0
       },
-      "qwen3.8-max": {
-        "input": 2.0,
+      "qwen3.6-flash": {
+        "input": 0.2,
+        "output": 1.2
+      },
+      "qwen3.5-flash": {
+        "input": 0.1,
+        "output": 0.5
+      },
+      "qwen3-max-2026-01-23": {
+        "input": 1.5,
         "output": 6.0
       },
       "qwen3-coder-next": {
         "input": 1.3,
         "output": 3.9
       }
-    }
+    },
+    "_note": "Qwen3.8-Max 为 2.4T 参数旗舰，激活 95B，1M 上下文。Qwen3.8-Omni-Flash 原生全模态，音视频价格大幅下降。Qwen3.8-Flash 为高性价比主力。旧版 3.6-Flash 和 3.5-Flash 仍在列。"
   },
   "doubao": {
     "name": "字节跳动豆包Doubao",
@@ -310,14 +516,14 @@
     "stream_format": "openai",
     "supports_prompt_cache": false,
     "models": [
-      "doubao-seed-2.1-turbo",
       "doubao-seed-2.1-pro",
+      "doubao-seed-2.1-turbo",
       "doubao-seed-thinking-v1.5",
       "doubao-code"
     ],
     "protocols": {
-      "doubao-seed-2.1-turbo": "openai",
       "doubao-seed-2.1-pro": "openai",
+      "doubao-seed-2.1-turbo": "openai",
       "doubao-seed-thinking-v1.5": "openai",
       "doubao-code": "openai"
     },
@@ -328,13 +534,13 @@
       "max_tokens": 32768
     },
     "price_per_million_tokens": {
-      "doubao-seed-2.1-turbo": {
-        "input": 0.45,
-        "output": 1.5
-      },
       "doubao-seed-2.1-pro": {
         "input": 0.9,
         "output": 4.5
+      },
+      "doubao-seed-2.1-turbo": {
+        "input": 0.45,
+        "output": 1.5
       },
       "doubao-seed-thinking-v1.5": {
         "input": 1.1,
@@ -344,7 +550,101 @@
         "input": 1.2,
         "output": 5.5
       }
-    }
+    },
+    "_note": "Doubao-Seed-2.1-Pro 更新至 0915 版本，多模态 Coding 能力强化。豆包视频生成模型 Seedance 2.5 将于 7 月上线，支持 30 秒直出和 50 素材融合。"
+  },
+  "minimax": {
+    "name": "MiniMax",
+    "api_url": "https://api.minimax.chat/v1/chat/completions",
+    "stream_format": "openai",
+    "supports_prompt_cache": true,
+    "models": [
+      "minimax-m3",
+      "minimax-m2.7",
+      "minimax-m2.5"
+    ],
+    "protocols": {
+      "minimax-m3": "openai",
+      "minimax-m2.7": "openai",
+      "minimax-m2.5": "openai"
+    },
+    "default_model": "minimax-m3",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 32768
+    },
+    "price_per_million_tokens": {
+      "minimax-m3": {
+        "input": 0.3,
+        "output": 1.2
+      },
+      "minimax-m2.7": {
+        "input": 0.3,
+        "output": 1.2
+      },
+      "minimax-m2.5": {
+        "input": 0.3,
+        "output": 1.2
+      }
+    },
+    "_note": "MiniMax 系列以极致性价比为特点，M2.5/M2.7/M3 均维持在 $0.3/$1.2 价格带，缓存读取 $0.06。"
+  },
+  "stepfun": {
+    "name": "阶跃星辰 StepFun",
+    "api_url": "https://api.stepfun.com/v1/chat/completions",
+    "stream_format": "openai",
+    "supports_prompt_cache": true,
+    "models": [
+      "step-5-preview",
+      "step-5-preview-fast"
+    ],
+    "protocols": {
+      "step-5-preview": "openai",
+      "step-5-preview-fast": "openai"
+    },
+    "default_model": "step-5-preview",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 32768
+    },
+    "price_per_million_tokens": {
+      "step-5-preview": {
+        "input": 1.0,
+        "output": 2.7
+      },
+      "step-5-preview-fast": {
+        "input": 0.7,
+        "output": 2.0
+      }
+    },
+    "_note": "Step 5 Preview 于 2026-09-19 发布，600B 总参 / 27B 激活，1M 上下文，AA 综合智能指数 44 分（全球开源 Top 3）。单任务成本仅为 Claude Opus 5 的 1/8。10 月 15 日全面开源。"
+  },
+  "china-telecom": {
+    "name": "中国电信 星辰",
+    "api_url": "https://api.teleai.com.cn/v1/chat/completions",
+    "stream_format": "openai",
+    "supports_prompt_cache": false,
+    "models": [
+      "xing-4.0-29b-a4b"
+    ],
+    "protocols": {
+      "xing-4.0-29b-a4b": "openai"
+    },
+    "default_model": "xing-4.0-29b-a4b",
+    "params": {
+      "temperature": 0.1,
+      "top_p": 0.2,
+      "max_tokens": 32768
+    },
+    "price_per_million_tokens": {
+      "xing-4.0-29b-a4b": {
+        "input": 0.2,
+        "output": 0.8
+      }
+    },
+    "_note": "Xing4.0-29B-A4B 于 2026-09-17 发布，29B 总参 / 4B 激活，256K 原生上下文（可扩至 512K），昇腾芯片训练。4-bit 量化后 15GB 显存，RTX 3090/4090 可本地运行。SuperCLUE 智能体能力 93.52 分。已开源。"
   },
   "zen": {
     "name": "OpenCode Zen",
@@ -356,12 +656,12 @@
       "openai_responses": "https://opencode.ai/zen/v1/responses",
       "google": "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse"
     },
-    "supports_prompt_cache": false,
-    "_note": "OpenCode Zen 网关（opencode.ai/zen）统一平台：62 个模型按各自协议自动路由（选模型时标签显示协议，端点见 protocol_api_urls）。密钥：https://opencode.ai/zen 控制台获取，或复用 opencode 登录（~/.local/share/opencode/auth.json → zen.api.key，Onyx 会自动兜底读取）。4 种原生协议：openai→/v1/chat/completions、anthropic→/v1/messages、openai_responses→/v1/responses、google→/v1/models/{model}:streamGenerateContent?alt=sse。免费模型（价格 0/0，选模型时带『免费』标记）：big-pickle / laguna-s-2.1-free / mimo-v2.5-free / ling-3.0-flash-fin-free / nemotron-3-ultra-free / nemotron-3.5-lightning-free / muse-spark-1.2-contributor-free。注意：muse-spark-1.2-contributor-free 在部分地区返回 403 RegionError，若调用 403 请换 big-pickle / laguna-s-2.1-free 等免费模型。付费模型需 Zen 账号绑定支付方式（否则 401 CreditsError）。修改模型：models 增删 id、protocols 标注协议、price_per_million_tokens 维护价格（USD/1M tokens）。",
+    "supports_prompt_cache": true,
     "models": [
       "deepseek-v4-pro",
       "deepseek-v4-flash",
-      "deepseek-v4-flash-free",
+      "glm-5.3",
+      "glm-5.3-flash",
       "glm-5.2",
       "glm-5.1",
       "glm-5",
@@ -378,17 +678,13 @@
       "nemotron-3-ultra-free",
       "nemotron-3.5-lightning-free",
       "laguna-s-2.1-free",
-      "claude-sonnet-5",
-      "claude-sonnet-4-6",
-      "claude-sonnet-4-5",
-      "claude-sonnet-4",
-      "claude-opus-5",
-      "claude-opus-4-8",
-      "claude-opus-4-7",
-      "claude-opus-4-6",
-      "claude-opus-4-5",
-      "claude-haiku-4-5",
+      "claude-fable-5-1",
       "claude-fable-5",
+      "claude-opus-5",
+      "claude-sonnet-5",
+      "claude-haiku-4-5",
+      "qwen3.7-max",
+      "qwen3.7-plus",
       "qwen3.6-plus",
       "qwen3.5-plus",
       "gpt-5.6-sol",
@@ -414,8 +710,8 @@
       "grok-build-0.1",
       "grok-4.6",
       "grok-4.5",
-      "muse-spark-1.2",
-      "muse-spark-1.2-contributor-free",
+      "muse-spark-1.3",
+      "muse-spark-1.3-contributor-free",
       "gemini-3.7-flash",
       "gemini-3.6-flash",
       "gemini-3.5-flash",
@@ -426,6 +722,8 @@
     "protocols": {
       "deepseek-v4-pro": "openai",
       "deepseek-v4-flash": "openai",
+      "glm-5.3": "openai",
+      "glm-5.3-flash": "openai",
       "glm-5.2": "openai",
       "glm-5.1": "openai",
       "glm-5": "openai",
@@ -442,17 +740,13 @@
       "nemotron-3-ultra-free": "openai",
       "nemotron-3.5-lightning-free": "openai",
       "laguna-s-2.1-free": "openai",
-      "claude-sonnet-5": "anthropic",
-      "claude-sonnet-4-6": "anthropic",
-      "claude-sonnet-4-5": "anthropic",
-      "claude-sonnet-4": "anthropic",
-      "claude-opus-5": "anthropic",
-      "claude-opus-4-8": "anthropic",
-      "claude-opus-4-7": "anthropic",
-      "claude-opus-4-6": "anthropic",
-      "claude-opus-4-5": "anthropic",
-      "claude-haiku-4-5": "anthropic",
+      "claude-fable-5-1": "anthropic",
       "claude-fable-5": "anthropic",
+      "claude-opus-5": "anthropic",
+      "claude-sonnet-5": "anthropic",
+      "claude-haiku-4-5": "anthropic",
+      "qwen3.7-max": "anthropic",
+      "qwen3.7-plus": "anthropic",
       "qwen3.6-plus": "anthropic",
       "qwen3.5-plus": "anthropic",
       "gpt-5.6-sol": "openai_responses",
@@ -478,8 +772,8 @@
       "grok-build-0.1": "openai_responses",
       "grok-4.6": "openai_responses",
       "grok-4.5": "openai_responses",
-      "muse-spark-1.2": "openai_responses",
-      "muse-spark-1.2-contributor-free": "openai_responses",
+      "muse-spark-1.3": "openai_responses",
+      "muse-spark-1.3-contributor-free": "openai_responses",
       "gemini-3.7-flash": "google",
       "gemini-3.6-flash": "google",
       "gemini-3.5-flash": "google",
@@ -494,254 +788,67 @@
       "max_tokens": 32768
     },
     "price_per_million_tokens": {
-      "deepseek-v4-pro": {
-        "input": 1.32,
-        "output": 3.96
-      },
-      "deepseek-v4-flash": {
-        "input": 0.3,
-        "output": 1.2
-      },
-      "glm-5.2": {
-        "input": 1.4,
-        "output": 4.4
-      },
-      "glm-5.1": {
-        "input": 1.4,
-        "output": 4.4
-      },
-      "glm-5": {
-        "input": 1.0,
-        "output": 3.2
-      },
-      "minimax-m3": {
-        "input": 0.3,
-        "output": 1.2
-      },
-      "minimax-m2.7": {
-        "input": 0.3,
-        "output": 1.2
-      },
-      "minimax-m2.5": {
-        "input": 0.3,
-        "output": 1.2
-      },
-      "kimi-k3": {
-        "input": 3.0,
-        "output": 15.0
-      },
-      "kimi-k2.7-code": {
-        "input": 0.95,
-        "output": 4.0
-      },
-      "kimi-k2.6": {
-        "input": 0.95,
-        "output": 4.0
-      },
-      "kimi-k2.5": {
-        "input": 0.6,
-        "output": 3.0
-      },
-      "big-pickle": {
-        "input": 0.0,
-        "output": 0.0
-      },
-      "mimo-v2.5-free": {
-        "input": 0.0,
-        "output": 0.0
-      },
-      "ling-3.0-flash-fin-free": {
-        "input": 0.0,
-        "output": 0.0
-      },
-      "nemotron-3-ultra-free": {
-        "input": 0.0,
-        "output": 0.0
-      },
-      "nemotron-3.5-lightning-free": {
-        "input": 0.0,
-        "output": 0.0
-      },
-      "laguna-s-2.1-free": {
-        "input": 0.0,
-        "output": 0.0
-      },
-      "claude-sonnet-5": {
-        "input": 2.0,
-        "output": 10.0
-      },
-      "claude-sonnet-4-6": {
-        "input": 3.0,
-        "output": 15.0
-      },
-      "claude-sonnet-4-5": {
-        "input": 3.0,
-        "output": 15.0
-      },
-      "claude-sonnet-4": {
-        "input": 3.0,
-        "output": 15.0
-      },
-      "claude-opus-5": {
-        "input": 5.0,
-        "output": 25.0
-      },
-      "claude-opus-4-8": {
-        "input": 5.0,
-        "output": 25.0
-      },
-      "claude-opus-4-7": {
-        "input": 5.0,
-        "output": 25.0
-      },
-      "claude-opus-4-6": {
-        "input": 5.0,
-        "output": 25.0
-      },
-      "claude-opus-4-5": {
-        "input": 5.0,
-        "output": 25.0
-      },
-      "claude-haiku-4-5": {
-        "input": 1.0,
-        "output": 5.0
-      },
-      "claude-fable-5": {
-        "input": 10.0,
-        "output": 50.0
-      },
-      "qwen3.6-plus": {
-        "input": 0.5,
-        "output": 3.0
-      },
-      "qwen3.5-plus": {
-        "input": 0.2,
-        "output": 1.2
-      },
-      "gpt-5.6-sol": {
-        "input": 2.0,
-        "output": 10.0
-      },
-      "gpt-5.6-terra": {
-        "input": 2.0,
-        "output": 12.0
-      },
-      "gpt-5.6-luna": {
-        "input": 0.2,
-        "output": 1.2
-      },
-      "gpt-5.5": {
-        "input": 5.0,
-        "output": 30.0
-      },
-      "gpt-5.5-pro": {
-        "input": 30.0,
-        "output": 180.0
-      },
-      "gpt-5.4": {
-        "input": 2.5,
-        "output": 15.0
-      },
-      "gpt-5.4-pro": {
-        "input": 30.0,
-        "output": 180.0
-      },
-      "gpt-5.4-mini": {
-        "input": 0.75,
-        "output": 4.5
-      },
-      "gpt-5.4-nano": {
-        "input": 0.2,
-        "output": 1.25
-      },
-      "gpt-5.3-codex-spark": {
-        "input": 1.75,
-        "output": 14.0
-      },
-      "gpt-5.3-codex": {
-        "input": 1.75,
-        "output": 14.0
-      },
-      "gpt-5.2": {
-        "input": 1.75,
-        "output": 14.0
-      },
-      "gpt-5.2-codex": {
-        "input": 1.75,
-        "output": 14.0
-      },
-      "gpt-5.1": {
-        "input": 1.07,
-        "output": 8.5
-      },
-      "gpt-5.1-codex-max": {
-        "input": 1.25,
-        "output": 10.0
-      },
-      "gpt-5.1-codex": {
-        "input": 1.07,
-        "output": 8.5
-      },
-      "gpt-5.1-codex-mini": {
-        "input": 0.25,
-        "output": 2.0
-      },
-      "gpt-5": {
-        "input": 1.07,
-        "output": 8.5
-      },
-      "gpt-5-codex": {
-        "input": 1.07,
-        "output": 8.5
-      },
-      "gpt-5-nano": {
-        "input": 0.05,
-        "output": 0.4
-      },
-      "grok-build-0.1": {
-        "input": 1.0,
-        "output": 2.0
-      },
-      "grok-4.6": {
-        "input": 2.0,
-        "output": 6.0
-      },
-      "grok-4.5": {
-        "input": 2.0,
-        "output": 6.0
-      },
-      "muse-spark-1.2": {
-        "input": 1.25,
-        "output": 4.25
-      },
-      "muse-spark-1.2-contributor-free": {
-        "input": 0.0,
-        "output": 0.0
-      },
-      "gemini-3.7-flash": {
-        "input": 1.5,
-        "output": 7.5
-      },
-      "gemini-3.6-flash": {
-        "input": 1.5,
-        "output": 7.5
-      },
-      "gemini-3.5-flash": {
-        "input": 1.5,
-        "output": 9.0
-      },
-      "gemini-3.5-flash-lite": {
-        "input": 0.3,
-        "output": 2.5
-      },
-      "gemini-3.1-pro": {
-        "input": 2.0,
-        "output": 12.0
-      },
-      "gemini-3-flash": {
-        "input": 0.5,
-        "output": 3.0
-      }
-    }
+      "deepseek-v4-pro": { "input": 1.74, "output": 3.48 },
+      "deepseek-v4-flash": { "input": 0.14, "output": 0.28 },
+      "glm-5.3": { "input": 1.4, "output": 4.4 },
+      "glm-5.3-flash": { "input": 0.15, "output": 0.5 },
+      "glm-5.2": { "input": 1.4, "output": 4.4 },
+      "glm-5.1": { "input": 1.4, "output": 4.4 },
+      "glm-5": { "input": 1.0, "output": 3.2 },
+      "minimax-m3": { "input": 0.3, "output": 1.2 },
+      "minimax-m2.7": { "input": 0.3, "output": 1.2 },
+      "minimax-m2.5": { "input": 0.3, "output": 1.2 },
+      "kimi-k3": { "input": 3.0, "output": 15.0 },
+      "kimi-k2.7-code": { "input": 0.95, "output": 4.0 },
+      "kimi-k2.6": { "input": 0.95, "output": 4.0 },
+      "kimi-k2.5": { "input": 0.6, "output": 3.0 },
+      "big-pickle": { "input": 0.0, "output": 0.0 },
+      "mimo-v2.5-free": { "input": 0.0, "output": 0.0 },
+      "ling-3.0-flash-fin-free": { "input": 0.0, "output": 0.0 },
+      "nemotron-3-ultra-free": { "input": 0.0, "output": 0.0 },
+      "nemotron-3.5-lightning-free": { "input": 0.0, "output": 0.0 },
+      "laguna-s-2.1-free": { "input": 0.0, "output": 0.0 },
+      "claude-fable-5-1": { "input": 10.0, "output": 50.0 },
+      "claude-fable-5": { "input": 10.0, "output": 50.0 },
+      "claude-opus-5": { "input": 5.0, "output": 25.0 },
+      "claude-sonnet-5": { "input": 2.0, "output": 10.0 },
+      "claude-haiku-4-5": { "input": 1.0, "output": 5.0 },
+      "qwen3.7-max": { "input": 2.5, "output": 7.5 },
+      "qwen3.7-plus": { "input": 0.4, "output": 1.6 },
+      "qwen3.6-plus": { "input": 0.5, "output": 3.0 },
+      "qwen3.5-plus": { "input": 0.2, "output": 1.2 },
+      "gpt-5.6-sol": { "input": 2.0, "output": 10.0 },
+      "gpt-5.6-terra": { "input": 2.0, "output": 12.0 },
+      "gpt-5.6-luna": { "input": 0.2, "output": 1.2 },
+      "gpt-5.5": { "input": 5.0, "output": 30.0 },
+      "gpt-5.5-pro": { "input": 30.0, "output": 180.0 },
+      "gpt-5.4": { "input": 2.5, "output": 15.0 },
+      "gpt-5.4-pro": { "input": 30.0, "output": 180.0 },
+      "gpt-5.4-mini": { "input": 0.75, "output": 4.5 },
+      "gpt-5.4-nano": { "input": 0.2, "output": 1.25 },
+      "gpt-5.3-codex-spark": { "input": 1.75, "output": 14.0 },
+      "gpt-5.3-codex": { "input": 1.75, "output": 14.0 },
+      "gpt-5.2": { "input": 1.75, "output": 14.0 },
+      "gpt-5.2-codex": { "input": 1.75, "output": 14.0 },
+      "gpt-5.1": { "input": 1.07, "output": 8.5 },
+      "gpt-5.1-codex-max": { "input": 1.25, "output": 10.0 },
+      "gpt-5.1-codex": { "input": 1.07, "output": 8.5 },
+      "gpt-5.1-codex-mini": { "input": 0.25, "output": 2.0 },
+      "gpt-5": { "input": 1.07, "output": 8.5 },
+      "gpt-5-codex": { "input": 1.07, "output": 8.5 },
+      "gpt-5-nano": { "input": 0.05, "output": 0.4 },
+      "grok-build-0.1": { "input": 1.0, "output": 2.0 },
+      "grok-4.6": { "input": 2.0, "output": 6.0 },
+      "grok-4.5": { "input": 2.0, "output": 6.0 },
+      "muse-spark-1.3": { "input": 1.25, "output": 4.25 },
+      "muse-spark-1.3-contributor-free": { "input": 0.0, "output": 0.0 },
+      "gemini-3.7-flash": { "input": 1.5, "output": 7.5 },
+      "gemini-3.6-flash": { "input": 1.5, "output": 7.5 },
+      "gemini-3.5-flash": { "input": 1.5, "output": 9.0 },
+      "gemini-3.5-flash-lite": { "input": 0.3, "output": 2.5 },
+      "gemini-3.1-pro": { "input": 2.0, "output": 12.0 },
+      "gemini-3-flash": { "input": 0.5, "output": 3.0 }
+    },
+    "_note": "Zen 网关统一平台，模型列表和价格依据 2026-09 官方文档。GLM-5.3 Flash 新增；Claude Fable 5.1 加入；Muse Spark 更新为 1.3；Kimi K3 定价同步 Moonshot 官方。免费模型：big-pickle、mimo-v2.5-free、ling-3.0-flash-fin-free、nemotron-3-ultra-free、nemotron-3.5-lightning-free、laguna-s-2.1-free、muse-spark-1.3-contributor-free。"
   }
 }

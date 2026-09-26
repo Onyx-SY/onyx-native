@@ -21,7 +21,7 @@ HELP_TEXT_CN = """
 
 普通命令行模式:
   ai <问题>          直接向 AI 提问
-  ai -tui            进入 TUI 模式
+  ai -repl / ai -tui  选择交互模式（REPL / TUI）
   ai -m plan <问题>   以计划模式提问
   ai -m normal <问题> 以普通模式提问
   ai -f <文件>        将文件内容作为问题上下文
@@ -55,7 +55,7 @@ Shortcuts:
 
 Normal CLI mode:
   ai <question>          Ask AI directly
-  ai -tui                Enter TUI mode
+  ai -repl / ai -tui     Select interactive mode (REPL / TUI)
   ai -m plan <question>   Ask in plan mode
   ai -m normal <question> Ask in normal mode
   ai -f <file>           Use file content as context

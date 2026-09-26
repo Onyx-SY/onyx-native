@@ -411,6 +411,195 @@ def _convert_messages_to_google(messages: list, tools: Optional[list], p: dict) 
     return payload
 
 
+def _sse_data(line):
+    """取 SSE 行的 data 段，兼容 `data: {...}` 与 `data:{...}` 两种写法。
+
+    OpenAI / DeepSeek 用带空格的写法，但部分兼容平台（自建网关、部分国产平台）
+    不带空格。旧实现只认 `data: ` → 整条流被当成「空响应」，表现为「AI 不说话」。
+    """
+    if not line:
+        return None
+    s = line if isinstance(line, str) else str(line)
+    s = s.strip()
+    if not s.startswith("data:"):
+        return None
+    return s[5:].lstrip()
+
+
+def _norm_text_content(value) -> str:
+    """把各家平台的 `content` / `reasoning_content` 形态归一成字符串。
+
+    实测差异：字符串 / [{"type":"text","text":...}] / [{"text":...}] / {"text":...} 都有。
+    DeepSeek 只发字符串，所以只对接 DeepSeek 时这个差异不会暴露，换平台就崩
+    （`full_content += content` 对 list 直接 TypeError）。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for k in ("text", "content", "value"):
+            v = value.get(k)
+            if isinstance(v, str):
+                return v
+        return ""
+    if isinstance(value, (list, tuple)):
+        return "".join(_norm_text_content(v) for v in value)
+    return str(value)
+
+
+def _norm_tool_arguments(value) -> str:
+    """工具调用参数归一成 JSON 字符串（部分平台直接给 dict / list）。"""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
+def _parse_nonstream_openai_json(text, on_content=None, on_tool_call=None, tool_calls_acc=None):
+    """把**非流式** OpenAI 响应体解析成 (content, usage)。
+
+    兜底场景：部分兼容平台忽略 `stream: true`，直接回一整段 JSON（没有 `data:` 行）。
+    旧实现会跳过所有行 → 内容与工具调用全空。
+    """
+    try:
+        data = json.loads(text)
+    except Exception:
+        return "", {}
+    if not isinstance(data, dict):
+        return "", {}
+    choices = data.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return "", data.get("usage") or {}
+    msg = choices[0].get("message") or {}
+    if not isinstance(msg, dict):
+        return "", data.get("usage") or {}
+    content = _norm_text_content(msg.get("content"))
+    if content and on_content:
+        on_content(content)
+    for i, tc in enumerate(msg.get("tool_calls") or []):
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") or {}
+        if not isinstance(fn, dict):
+            fn = {}
+        name = fn.get("name") or ""
+        args = _norm_tool_arguments(fn.get("arguments"))
+        if tool_calls_acc is not None:
+            tool_calls_acc[i] = {
+                "id": tc.get("id") or "",
+                "type": tc.get("type") or "function",
+                "function": {"name": name, "arguments": args},
+            }
+        if name and on_tool_call:
+            on_tool_call(name)
+    return content, data.get("usage") or {}
+
+
+# 可选参数：不是所有 OpenAI 兼容平台都认（严格的服务端收到未知字段直接 400）。
+# DeepSeek 全支持，所以只对接 DeepSeek 时不会暴露。
+_OPTIONAL_PARAM_KEYS = ("thinking", "reasoning_effort", "stream_options")
+# 「未知 / 不支持参数」类报错的特征串（各家措辞都不同）
+_UNSUPPORTED_PARAM_HINTS = (
+    "unknown parameter", "unrecognized", "unexpected keyword", "extra fields",
+    "unknown field", "unsupported parameter", "not permitted",
+    "未知参数", "不支持", "额外的字段",
+)
+
+
+def _plat_cap(plat_info: dict, name: str, default):
+    """平台能力开关：key.json 的 platform 配置里可用 `capabilities` 覆盖。
+
+    例：{"capabilities": {"stream_options": false}} → 不发 stream_options。
+    """
+    try:
+        caps = (plat_info or {}).get("capabilities") or {}
+        if name in caps:
+            return caps[name]
+    except Exception:
+        pass
+    return default
+
+
+def _degrade_optional_params(payload: dict, detail: str) -> bool:
+    """平台报「未知/不支持参数」时，摘掉可选字段。返回是否真的摘掉了东西。
+
+    这样换平台不需要改配置：先按最全字段发，被拒就自动降级重试一次。
+    """
+    try:
+        low = (detail or "").lower()
+        if not any(h in low for h in _UNSUPPORTED_PARAM_HINTS):
+            return False
+        removed = False
+        for k in _OPTIONAL_PARAM_KEYS:
+            if k in payload:
+                payload.pop(k, None)
+                removed = True
+        return removed
+    except Exception:
+        return False
+
+
+def _apply_openai_delta(choices, tool_calls_acc, on_content=None, on_tool_call=None):
+    """把一个 SSE chunk 的 `choices` 应用到工具调用累积器。
+
+    返回 (正文增量, 思考增量)。抽成独立函数是为了可单测 —— 各家 OpenAI 兼容平台的
+    delta 形态差异（delta 为 null / content 是分片数组 / tool_calls 缺 index /
+    arguments 直接给 dict）都在这里兜住，而不是散落在长流程里。
+
+    DeepSeek 的报文最规整，只对接 DeepSeek 时这些差异不会暴露。
+    """
+    if not choices or not isinstance(choices[0], dict):
+        return "", ""
+    delta = choices[0].get("delta") or {}
+    if not isinstance(delta, dict):
+        return "", ""
+    reasoning = _norm_text_content(delta.get("reasoning_content"))
+    content = _norm_text_content(delta.get("content"))
+    tc_delta = delta.get("tool_calls")
+    if tc_delta and isinstance(tc_delta, list):
+        for tc_chunk in tc_delta:
+            if not isinstance(tc_chunk, dict):
+                continue
+            func_delta = tc_chunk.get("function") or {}
+            if not isinstance(func_delta, dict):
+                func_delta = {}
+            tc_idx = tc_chunk.get("index")
+            if tc_idx is None:
+                # 无 index 的平台：同一位置出现「不同工具名」→ 视为新调用
+                tc_idx = 0
+                _nm = func_delta.get("name")
+                _prev = tool_calls_acc.get(tc_idx) or {}
+                _prev_name = (_prev.get("function") or {}).get("name") or ""
+                if _nm and _prev_name and _prev_name != _nm:
+                    tc_idx = (max(tool_calls_acc) + 1) if tool_calls_acc else 1
+            try:
+                tc_idx = int(tc_idx)
+            except (TypeError, ValueError):
+                tc_idx = 0
+            if tc_idx not in tool_calls_acc:
+                tool_calls_acc[tc_idx] = {"id": "", "type": "function",
+                                          "function": {"name": "", "arguments": ""}}
+                _tc_name = func_delta.get("name") or ""
+                if _tc_name and on_tool_call:
+                    on_tool_call(_tc_name)
+            tcc = tool_calls_acc[tc_idx]
+            if tc_chunk.get("id"):
+                tcc["id"] = tc_chunk["id"]
+            if tc_chunk.get("type"):
+                tcc["type"] = tc_chunk["type"]
+            if func_delta.get("name"):
+                tcc["function"]["name"] = func_delta["name"]
+            if func_delta.get("arguments"):
+                # 少数平台参数直接给 dict / list → 归一成 JSON 字符串
+                tcc["function"]["arguments"] += _norm_tool_arguments(func_delta["arguments"])
+    return content, reasoning
+
+
 def _parse_sse_openai_responses(lines, on_content=None, on_tool_call=None, should_stop=None):
     """解析 OpenAI Responses API SSE 流（原生）。
 
@@ -427,9 +616,9 @@ def _parse_sse_openai_responses(lines, on_content=None, on_tool_call=None, shoul
     for line in lines:
         if should_stop and should_stop():
             break
-        if not line or not line.startswith("data: "):
+        data_str = _sse_data(line)
+        if not data_str:
             continue
-        data_str = line[6:]
         try:
             chunk = json.loads(data_str)
         except json.JSONDecodeError:
@@ -498,9 +687,9 @@ def _parse_sse_google(lines, on_content=None, on_tool_call=None, should_stop=Non
     for line in lines:
         if should_stop and should_stop():
             break
-        if not line or not line.startswith("data: "):
+        data_str = _sse_data(line)
+        if not data_str:
             continue
-        data_str = line[6:]
         try:
             chunk = json.loads(data_str)
         except json.JSONDecodeError:
@@ -588,9 +777,10 @@ def call_ai_api_sse(question: str = "", type: Optional[str] = None,
                     conf["api_key"] = _zen_key
             except Exception:
                 pass
-    if not conf or not conf.get("api_key"):
-        return {"error": prompts.get("license_invalid_or_quota", "未配置 API 密钥，请重新运行 ai 命令"), "answer": "no", "ask": "", "txt": "", "analysis": ""}
-    api_key = conf["api_key"]
+    api_key = (conf.get("api_key") or "").strip() if conf else ""
+    if not api_key:
+        _hint = "（请检查密钥是否含多余空格或换行）" if lang == "chinese" else " (check the key for stray spaces or newlines)"
+        return {"error": prompts.get("license_invalid_or_quota", "未配置 API 密钥，请重新运行 ai 命令") + _hint, "answer": "no", "ask": "", "txt": "", "analysis": ""}
     if plat_key == "custom":
         plat_info = {
             "name": "Custom",
@@ -909,10 +1099,12 @@ Onyx Mode: {onyx_mode}
     # ── thinking / reasoning_effort：key.conf params 可覆盖平台默认 ──
     # key.json: {"params": {"thinking": false}} → 关闭思考（不发送 thinking 字段）
     _thinking_cfg = _resolve_thinking(user_params.get("thinking"), plat_info.get("thinking"))
-    if _thinking_cfg and stream_fmt in ("openai", "anthropic"):
+    if (_thinking_cfg and stream_fmt in ("openai", "anthropic")
+            and _plat_cap(plat_info, "thinking", True)):
         payload["thinking"] = _thinking_cfg
     _effort = user_params.get("reasoning_effort") or plat_info.get("reasoning_effort")
-    if _effort and stream_fmt in ("openai", "anthropic"):
+    if (_effort and stream_fmt in ("openai", "anthropic")
+            and _plat_cap(plat_info, "reasoning_effort", True)):
         payload["reasoning_effort"] = _effort
 
     # ⚠️ 不要在这里再次 payload["tools"] = tools：
@@ -920,7 +1112,7 @@ Onyx Mode: {onyx_mode}
     #     此处覆盖会还原成 OpenAI 格式 → Anthropic API 校验失败/工具失效；
     #   - OpenAI/DeepSeek 分支已在分支内赋值（tools 前置，前缀缓存优化）。
     # stream_options 是 OpenAI 兼容字段；Anthropic 对未知顶层字段返回 400，不能发送。
-    if stream_fmt == "openai":
+    if stream_fmt == "openai" and _plat_cap(plat_info, "stream_options", True):
         payload["stream_options"] = {"include_usage": True}
 
     # ── 写入 AI 真实看到的完整内容到 <home>/.ai_s/tmp/（每次覆盖）──
@@ -1014,6 +1206,12 @@ Onyx Mode: {onyx_mode}
 
             if response.status_code in (400, 422):
                 _detail = response.text[:2000]
+                # ── 自动降级：平台不认可选字段（thinking / reasoning_effort /
+                # stream_options）时，摘掉它们重试一次，避免「换个平台就 400 全挂」。
+                if retry < max_retries - 1 and _degrade_optional_params(payload, _detail):
+                    console.print("[yellow]⚠️ 平台不认可选参数，已自动降级重试"
+                                  "（thinking / reasoning_effort / stream_options 已摘除）[/]")
+                    continue
                 # ── 写入调试文件：完整请求 payload + 响应 body ──
                 _deb_path = ""
                 try:
@@ -1038,7 +1236,8 @@ Onyx Mode: {onyx_mode}
                 except Exception:
                     pass
                 console.print(f"[red]❌ API 请求错误 ({response.status_code})[/]")
-                console.print(f"[dim]   调试文件: {_deb_path} | Debug file: {_deb_path}[/]")
+                console.print(f"[dim]   调试文件: {_deb_path}[/]" if lang == "chinese"
+                              else f"[dim]   Debug file: {_deb_path}[/]")
                 if _detail:
                     console.print(f"[red]   {_detail[:300]}[/]")
                 return {
@@ -1049,9 +1248,19 @@ Onyx Mode: {onyx_mode}
                     "ask": ""
                 }
             if response.status_code == 401:
-                return {"error": "API key 无效 (401)", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+                _hint = ("API Key 无效 (401)：请检查密钥是否正确，或是否含多余空格/换行（可用 ai -key 重新设置）"
+                         if lang == "chinese" else
+                         "Invalid API key (401): check the key for stray spaces/newlines (reset with `ai -key`)")
+                return {"error": _hint, "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code == 402:
-                return {"error": "⚠️ API 余额不足 (402)，请充值后重试 | Insufficient balance, please top up", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+                return {"error": ("⚠️ API 余额不足 (402)，请充值后重试" if lang == "chinese"
+                                  else "Insufficient balance (402), please top up"),
+                        "answer": "no", "ask": "", "txt": "", "analysis": ""}
+            if response.status_code == 403:
+                _hint = ("API 访问被拒绝 (403)：密钥可能无权访问该模型，或受区域/权限限制"
+                         if lang == "chinese" else
+                         "Access denied (403): the key may lack permission for this model, or is region/scope restricted")
+                return {"error": _hint, "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code == 429:
                 last_error = "请求过于频繁 (429)"
                 if retry < max_retries - 1:
@@ -1059,7 +1268,9 @@ Onyx Mode: {onyx_mode}
                     console.print(f"[yellow]⚠️ API 限流 (429)，{_wait}秒后重试 (第 {retry+1}/{max_retries} 次)...[/]" if lang == "chinese" else f"[yellow]⚠️ API rate limited (429), retrying in {_wait}s ({retry+1}/{max_retries})...[/]")
                     threading.Event().wait(_wait)  # 可中断重试退避
                     continue
-                return {"error": "请求过于频繁 (429)，请稍后再试 | Rate limit reached, please retry later", "answer": "no", "ask": "", "txt": "", "analysis": ""}
+                return {"error": ("请求过于频繁 (429)，请稍后再试" if lang == "chinese"
+                                  else "Rate limit reached (429), please retry later"),
+                        "answer": "no", "ask": "", "txt": "", "analysis": ""}
             if response.status_code in (500, 502, 503):
                 last_error = f"AI 服务暂时不可用 ({response.status_code})"
                 if retry < max_retries - 1:
@@ -1085,14 +1296,19 @@ Onyx Mode: {onyx_mode}
             _ACTIVE_RESPONSES[session_id or "_default"] = response
 
             if stream_fmt == "openai":
+                # 非 SSE 行缓冲：兜住「平台忽略 stream:true、直接回整段 JSON」的情况
+                _raw_lines: List[str] = []
                 for line in response.iter_lines(decode_unicode=True):
                     if _mcp_state._AI_INTERRUPTED:
                         response.close()
                         _ACTIVE_RESPONSES.pop(session_id or "_default", None)
                         return {"txt": "", "analysis": "", "answer": "yes", "ask": "", "_interrupted": True}
-                    if not line or not line.startswith("data: "):
+                    data_str = _sse_data(line)
+                    if data_str is None:
+                        # 不是 SSE 数据行：可能是「平台忽略 stream 参数」的整段 JSON
+                        if line and line.strip():
+                            _raw_lines.append(line)
                         continue
-                    data_str = line[6:]
                     if data_str.strip() == "[DONE]":
                         break
                     try:
@@ -1108,43 +1324,26 @@ Onyx Mode: {onyx_mode}
                         choices = chunk.get("choices", [])
                         if not choices or not isinstance(choices[0], dict):
                             continue
-                        delta = choices[0].get("delta", {})
-                        if not isinstance(delta, dict):
-                            continue
-                        reasoning = delta.get("reasoning_content")
-                        if reasoning:
-                            _reasoning_display.append(reasoning)
+                        # delta 形态差异（null / 分片 content / 缺 index / dict 参数）
+                        # 全部在 _apply_openai_delta 里兜住（可单测）
+                        _c, _r = _apply_openai_delta(choices, _tool_calls_acc,
+                                                     on_content=on_content,
+                                                     on_tool_call=on_tool_call)
+                        if _r:
+                            _reasoning_display.append(_r)
                             if on_reasoning:
-                                on_reasoning(reasoning)
-                        content = delta.get("content")
-                        if content:
-                            full_content += content
-                            if on_content:
-                                on_content(content)
-                        tc_delta = delta.get("tool_calls")
-                        if tc_delta and isinstance(tc_delta, list):
-                            for tc_chunk in tc_delta:
-                                if not isinstance(tc_chunk, dict):
-                                    continue
-                                tc_idx = tc_chunk.get("index", 0)
-                                _is_new = tc_idx not in _tool_calls_acc
-                                if _is_new:
-                                    _tool_calls_acc[tc_idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
-                                    _tc_name = tc_chunk.get("function", {}).get("name", "")
-                                    if _tc_name and on_tool_call:
-                                        on_tool_call(_tc_name)
-                                tcc = _tool_calls_acc[tc_idx]
-                                if tc_chunk.get("id"):
-                                    tcc["id"] = tc_chunk["id"]
-                                if tc_chunk.get("type"):
-                                    tcc["type"] = tc_chunk["type"]
-                                func_delta = tc_chunk.get("function", {})
-                                if func_delta.get("name"):
-                                    tcc["function"]["name"] = func_delta["name"]
-                                if func_delta.get("arguments"):
-                                    tcc["function"]["arguments"] += func_delta["arguments"]
+                                on_reasoning(_r)
+                        if _c:
+                            full_content += _c
                     except json.JSONDecodeError:
                         continue
+                # ── 非流式兜底：平台忽略 stream:true → 整段 JSON，没有 data: 行 ──
+                if not full_content and not _tool_calls_acc and _raw_lines:
+                    _c, _u = _parse_nonstream_openai_json("".join(_raw_lines), on_content, on_tool_call, _tool_calls_acc)
+                    if _c:
+                        full_content = _c
+                    if _u:
+                        _usage = _u
             elif stream_fmt == "openai_responses":
                 # ── OpenAI Responses API SSE 解析（原生）──
                 full_content, _usage, _resp_fc_acc, _reasoning_display = _parse_sse_openai_responses(
@@ -1172,9 +1371,9 @@ Onyx Mode: {onyx_mode}
                         response.close()
                         _ACTIVE_RESPONSES.pop(session_id or "_default", None)
                         return {"txt": "", "analysis": "", "answer": "yes", "ask": "", "_interrupted": True}
-                    if not line or not line.startswith("data: "):
+                    data_str = _sse_data(line)
+                    if not data_str:
                         continue
-                    data_str = line[6:]
                     try:
                         chunk = json.loads(data_str)
                         if not isinstance(chunk, dict):

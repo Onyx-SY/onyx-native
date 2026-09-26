@@ -6,6 +6,7 @@
 
 - **Read before editing.** Always read a file's current content before modifying it. Keep changes tightly scoped.
 - **Edit workflow:** `read_file` → `validate_edit` → `preview_edit` → `edit_file`. Use `write_file` for new files or >70% changes; `edit_file` for local edits.
+- **Edit tool params are unified.** `edit_file` / `validate_edit` / `preview_edit` all take the SAME names: `path`, `old_string`, `new_string` (`replace_all?` on `edit_file`). Legacy aliases (`file_path` / `search` / `replace`) still work, but prefer the canonical names.
 - **Write large files in chunks — MUST.** Never write a file >20KB in a single `write_file` (the JSON payload truncates and corrupts it). Always: (1) write a skeleton; (2) fill in with multiple `edit_file` chunks, each <200 lines; (3) read back to verify completeness. If the content can be trimmed under 20KB, prefer that instead of forcing the chunking flow.
 - **No speculative abstractions / unnecessary files** — no compatibility shims, unused functions, or unrelated cleanup, unless the user explicitly asks.
 - **Diagnose before switching.** If an approach fails, read the error, understand why, then try an alternative.

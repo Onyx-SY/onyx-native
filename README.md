@@ -104,6 +104,17 @@ OpenAI-compatible endpoint.  Streaming via SSE with real-time Markdown rendering
 Model list is maintained in `etc/ai/models.json` — edit it to add or change models without
 touching code.
 
+### API Key Configuration
+
+The first time you run `ai`, an interactive wizard asks for the platform and API key. You can also
+set or reconfigure it later:
+
+- `ai -key <API Key>` — set the key for the current platform
+- Inside AI chat: `/key` (view / change) and `/config` (platform / model / key / params / URL)
+
+Keys are stored obfuscated with `0600` permissions in `~/.config/onyx/ai/key.json`; stray
+whitespace and newlines are stripped on input and on read.
+
 ### Execution Pipeline
 
 ```
@@ -303,6 +314,15 @@ AI 通过 Onyx 的执行管线操作，而不是绕过终端运行时。
 支持 DeepSeek、OpenAI、Ollama、Claude、Gemini、Grok、xAI、GitHub Copilot
 及任何 OpenAI 兼容端点。SSE 流式传输，实时 Markdown 渲染。
 模型列表维护在 `etc/ai/models.json` —— 编辑它即可增改模型，无需改代码。
+
+### API Key 配置
+
+首次运行 `ai` 会进入交互式配置向导，也可稍后设置 / 重新配置：
+
+- `ai -key <API Key>` —— 为当前平台设置密钥
+- AI 对话内：`/key`（查看 / 更换）与 `/config`（平台 / 模型 / 密钥 / 参数 / URL）
+
+密钥以混淆形式存于 `~/.config/onyx/ai/key.json`（权限 0600）；输入与读取时都会自动去除首尾空白与换行。
 
 ### 执行管线
 

@@ -15,6 +15,7 @@ cost.py — 成本估算模块（models.json 价格表驱动）
 import os
 import json
 import threading
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Union
 import urllib.request
@@ -148,7 +149,8 @@ def get_balance(platform: str, api_key: str) -> Tuple[float, str, str]:
     - (余额, 货币单位, 状态信息)
     - 状态信息: "success", "no_key", "network_error", "parse_error", "quota_unavailable"
     """
-    if not api_key or not api_key.strip():
+    api_key = (api_key or "").strip()
+    if not api_key:
         return 0.0, "", "no_key"
     
     config = _BALANCE_CONFIG.get(platform.lower())
@@ -209,6 +211,55 @@ def get_balance(platform: str, api_key: str) -> Tuple[float, str, str]:
         return 0.0, "", f"parse_error:{str(e)}"
     except Exception as e:
         return 0.0, "", f"unknown_error:{str(e)}"
+
+
+# ── 带 TTL 的余额缓存（状态栏用）──
+# get_balance 是同步网络请求（最长 10s），每轮都查会拖慢会话；这里做进程级缓存：
+# 命中 TTL 直接返回；未命中则后台线程刷新（不阻塞调用方），本次返回旧值/占位。
+_BALANCE_CACHE: Dict[str, Tuple[float, str, str, float]] = {}
+_BALANCE_LOCK = threading.Lock()
+
+
+def get_cached_balance(platform: str, api_key: str, ttl: float = 600.0,
+                       background: bool = True, force: bool = False,
+                       on_update=None) -> Tuple[float, str, str]:
+    """带缓存的余额查询。默认后台刷新，不阻塞调用方。
+
+    返回 (余额, 货币, 状态)；首次查询且后台模式下返回 (0.0, "", "pending")。
+
+    force=True：忽略 TTL，强制后台刷新一次（状态栏每轮结束后用它把余额刷成最新）。
+    on_update(result)：刷新完成后在**后台线程**回调（result 同返回值），
+    调用方可借此把新余额立刻推给 UI（否则要等下一次轮询才看得到）。
+    """
+    key = (platform or "").lower()
+    now = time.time()
+    with _BALANCE_LOCK:
+        ent = _BALANCE_CACHE.get(key)
+
+    def _refresh():
+        try:
+            r = get_balance(platform, api_key)
+            with _BALANCE_LOCK:
+                _BALANCE_CACHE[key] = (r[0], r[1], r[2], time.time())
+            if on_update is not None:
+                try:
+                    on_update(r)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if not force and ent and (now - ent[3]) < ttl:
+        return ent[0], ent[1], ent[2]
+    if background:
+        threading.Thread(target=_refresh, daemon=True).start()
+        if ent:
+            return ent[0], ent[1], ent[2]
+        return 0.0, "", "pending"
+    r = get_balance(platform, api_key)
+    with _BALANCE_LOCK:
+        _BALANCE_CACHE[key] = (r[0], r[1], r[2], time.time())
+    return r
 
 
 def get_all_balances(api_keys: Dict[str, str]) -> Dict[str, Dict]:

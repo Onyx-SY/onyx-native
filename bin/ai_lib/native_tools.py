@@ -92,10 +92,10 @@ def build_native_tools_prompt() -> str:
     lines.append("### Available Tools")
     lines.append("- `get_file_info(path)` — Get file info (size/lines/mtime)")
     lines.append("- `read_file(path, range?)` — Read file, range='10-30' for line range")
-    lines.append("- `edit_file(path, old_string, new_string)` — SEARCH/REPLACE edit")
+    lines.append("- `edit_file(path, old_string, new_string, replace_all?)` — SEARCH/REPLACE edit")
     lines.append("- `write_file(path, content)` — Create/overwrite file")
-    lines.append("- `validate_edit(file_path, search, replace)` — Validate SEARCH exists and unique")
-    lines.append("- `preview_edit(file_path, search, replace)` — Preview diff")
+    lines.append("- `validate_edit(path, old_string, new_string)` — Validate SEARCH exists and unique")
+    lines.append("- `preview_edit(path, old_string, new_string)` — Preview diff")
     lines.append("")
     lines.append("### Guidelines")
     lines.append("1. **Check first**: Call `get_file_info` then `read_file` before editing")
@@ -241,7 +241,7 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
                 "path": {"type": "string", "description": "可选搜索根目录"},
                 "glob": {"type": "string", "description": "可选文件过滤，如 '*.py'"},
                 "context": {"type": "integer", "description": "可选上下各行数，默认 0"},
-                "-i": {"type": "boolean", "description": "可选忽略大小写，默认 false"},
+                "ignore_case": {"type": "boolean", "description": "可选忽略大小写，默认 false（旧名 -i 仍兼容）"},
                 "head_limit": {"type": "integer", "description": "可选结果数量上限"},
             },
             ["pattern"],
@@ -331,36 +331,36 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         ),
         _make_tool(
             "edit_file",
-            "SEARCH/REPLACE 精确替换；old_string 须逐字节匹配且唯一；改前先 validate_edit 校验；保留缩进。写入大文件必须分块：骨架 + 多次 edit_file（每块 <200 行），禁止一次性全量 write_file。",
+            "SEARCH/REPLACE 精确替换；old_string 须逐字节匹配且唯一（replace_all=true 时不要求唯一）；改前先 validate_edit 校验；保留缩进。写入大文件必须分块：骨架 + 多次 edit_file（每块 <200 行），禁止一次性全量 write_file。",
             {
-                "path": {"type": "string", "description": "目标文件路径"},
-                "old_string": {"type": "string", "description": "要替换的旧文本（逐字节精确匹配，必须唯一）"},
+                "path": {"type": "string", "description": "目标文件路径（旧名 file_path 仍兼容）"},
+                "old_string": {"type": "string", "description": "要替换的旧文本（逐字节精确匹配；默认必须唯一，replace_all=true 时除外）"},
                 "new_string": {"type": "string", "description": "替换后的新文本"},
-                "replace_all": {"type": "boolean", "description": "可选：是否替换所有匹配项（默认只替换第一个）"},
+                "replace_all": {"type": "boolean", "description": "可选：是否替换所有匹配项（默认 false，只替换第一个）"},
             },
             ["path", "old_string", "new_string"],
             PERM_WORKSPACE_WRITE,
         ),
         _make_tool(
             "validate_edit",
-            "校验 SEARCH 文本在目标文件中存在且唯一；每次 edit_file 前务必先调用。",
+            "校验 SEARCH 文本在目标文件中存在且唯一；每次 edit_file 前务必先调用。参数与 edit_file 完全一致（path / old_string / new_string）。",
             {
-                "file_path": {"type": "string", "description": "目标文件路径"},
-                "search": {"type": "string", "description": "要搜索的旧文本（逐字节精确匹配）"},
-                "replace": {"type": "string", "description": "替换后的新文本"},
+                "path": {"type": "string", "description": "目标文件路径（同 edit_file；旧名 file_path 仍兼容）"},
+                "old_string": {"type": "string", "description": "要搜索的旧文本（逐字节精确匹配；旧名 search 仍兼容）"},
+                "new_string": {"type": "string", "description": "替换后的新文本（旧名 replace 仍兼容）"},
             },
-            ["file_path", "search", "replace"],
+            ["path", "old_string", "new_string"],
             PERM_READONLY,  # 校验是安全的
         ),
         _make_tool(
             "preview_edit",
-            "预览 edit_file 的 unified diff，确认正确后再编辑。",
+            "预览 edit_file 的 unified diff，确认正确后再编辑。参数与 edit_file 完全一致（path / old_string / new_string）。",
             {
-                "file_path": {"type": "string", "description": "目标文件路径"},
-                "search": {"type": "string", "description": "要搜索的旧文本"},
-                "replace": {"type": "string", "description": "替换后的新文本"},
+                "path": {"type": "string", "description": "目标文件路径（同 edit_file；旧名 file_path 仍兼容）"},
+                "old_string": {"type": "string", "description": "要搜索的旧文本（旧名 search 仍兼容）"},
+                "new_string": {"type": "string", "description": "替换后的新文本（旧名 replace 仍兼容）"},
             },
-            ["file_path", "search", "replace"],
+            ["path", "old_string", "new_string"],
             PERM_READONLY,  # 预览是安全的
         ),
         _make_tool(
@@ -691,12 +691,12 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
     ))
     native.append(_make_tool(
         "MemorySearch",
-        "在记忆文件中搜关键字，默认显示匹配行上下各 3 行（含行号）；uuid 指定单个会话或 all；scope 限定范围（all=library+chat+onyx_ai，不含 tmp/time/projects）。结果按 TTL 缓存。",
+        "在记忆文件中搜关键字，默认显示匹配行上下各 3 行（含行号）；session_id 指定单个会话或 all；scope 限定范围（all=library+chat+onyx_ai，不含 tmp/time/projects）。结果按 TTL 缓存。",
         {
             "pattern": {"type": "string", "description": "搜索关键字或正则"},
-            "uuid": {"type": "string", "description": "目标记忆 UUID，或 'all' 表示全范围查找（默认 all）"},
+            "session_id": {"type": "string", "description": "目标会话 UUID，或 'all' 表示全范围查找（默认 all；旧名 uuid 仍兼容）"},
             "context": {"type": "integer", "description": "可选上下文行数，默认 3"},
-            "-i": {"type": "boolean", "description": "可选忽略大小写，默认 true"},
+            "ignore_case": {"type": "boolean", "description": "可选忽略大小写，默认 true（旧名 -i 仍兼容）"},
             "scope": {"type": "string", "description": "可选搜索范围：all(默认, library+chat+onyx_ai) / library / chat"},
         },
         ["pattern"], PERM_READONLY,
@@ -760,7 +760,7 @@ def build_native_tools(user_home_dir: str = None) -> List[Dict]:
         "Recursively show directory tree structure. Dirs marked with /, max depth 2 by default.",
         {
             "path": {"type": "string", "description": "Root directory, defaults to current directory"},
-            "maxDepth": {"type": "integer", "description": "Max recursion depth, default 2, max 5"},
+            "max_depth": {"type": "integer", "description": "Max recursion depth, default 2, max 5（旧名 maxDepth 仍兼容）"},
         },
         [],
         PERM_READONLY,

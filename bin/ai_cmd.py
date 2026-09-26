@@ -40,6 +40,7 @@ from .ai_lib.ui import (
     render_ai_panel,
     render_tool_table,
     render_separator,
+    tui_plain,
 )
 
 # ── 从子模块导入配置 / 密钥 / 情感 / URL / 语言等 ──
@@ -52,7 +53,6 @@ from .ai_lib.config import (
     load_key_conf, save_key_conf, _setup_key_conf_interactive,
     _render_edit_diff,
     get_server_url, get_current_lang, get_prompt_text,
-    load_ai_key, verify_ai_key,
     AI_KEY, SERVER_URL,
 )
 
@@ -305,6 +305,10 @@ def _exec_choose_ask(question: str, options: list) -> str:
             default=all_options[0],
         )
 
+        if not selected:
+            # Esc 取消 / 交互不可用 → 不能当成「选了第一项」，明确回传「未选择」
+            return _mcp_t("⏹ 用户未选择（已取消）", "⏹ User made no selection (cancelled)")
+
         if selected == none_label:
             # 自由输入 — 先回显用户选择，建立视觉连续性（避免 InquirerPy select 清屏后出现空白断层）
             from rich.console import Console as _RC
@@ -495,16 +499,173 @@ def extract_subagent_command_head(cmd: str) -> str:
     return _first.split(maxsplit=1)[0].strip().lower()
 
 
-def _refresh_subagent_status(_sa_mod, final: bool = False) -> None:
-    """把子代理最近活动（灰色）刷新到当前 Status spinner，证明没卡住。"""
+_QUIET_CONSOLE = None
+
+
+def _live_console():
+    """TUI 下给 Live/Status 用的静默 Console。
+
+    TUI 主 console 被强制成「终端」（为输出 ANSI 颜色）；若 Live/Status 也用它，就会
+    往日志里写光标控制序列（\\x1b[?25l / \\r / \\x1b[2K）把输出冲乱。这里返回一个
+    非终端 Console（写进 StringIO）→ Rich 判定非终端 + transient → 完全不输出。
+    REPL 下照旧返回主 console。
+    """
+    global _QUIET_CONSOLE
     try:
+        from .ai_lib.mode import is_tui_render
+        if not is_tui_render():
+            return console
+    except Exception:
+        return console
+    if _QUIET_CONSOLE is None:
+        import io as _io
+        _QUIET_CONSOLE = Console(file=_io.StringIO(), width=100)
+    return _QUIET_CONSOLE
+
+
+def _tui_write_rich(renderable) -> bool:
+    """TUI：把 Rich renderable 直写日志区（保留 Markdown 颜色 / 面板）。返回是否已写。"""
+    try:
+        from .ai_lib.ui import get_ui_adapter
+        _ad = get_ui_adapter()
+        if _ad is None or not hasattr(_ad, "write_rich"):
+            return False
+        _ad.write_rich(renderable)
+        return True
+    except Exception:
+        return False
+
+
+def _tui_stream(text: str, kind: str = "reply") -> None:
+    """TUI：把累积的流式文本推给 #stream 做实时预览（节流在 TUI 侧）。
+
+    kind="reply" → 正文；kind="reason" → 思考过程（灰字，对齐 REPL）。
+    """
+    try:
+        from .ai_lib.ui import get_ui_adapter
+        _ad = get_ui_adapter()
+        if _ad is not None and hasattr(_ad, "update_stream"):
+            _ad.update_stream(text, kind)
+    except Exception:
+        pass
+
+
+def _tui_end_stream() -> None:
+    """TUI：结束流式预览（清空并隐藏 #stream）。"""
+    try:
+        from .ai_lib.ui import get_ui_adapter
+        _ad = get_ui_adapter()
+        if _ad is not None and hasattr(_ad, "end_stream"):
+            _ad.end_stream()
+    except Exception:
+        pass
+
+
+def _tui_activity(thinking=None, text=None) -> None:
+    """把「思考中 / 子代理活动」推送到 TUI 活动行（REPL 无适配器则跳过）。"""
+    try:
+        from .ai_lib.ui import get_ui_adapter
+        _ad = get_ui_adapter()
+        if _ad is None:
+            return
+        if thinking is not None and hasattr(_ad, "set_thinking"):
+            _ad.set_thinking(bool(thinking))
+        if text is not None and hasattr(_ad, "set_subagents"):
+            _ad.set_subagents(str(text))
+    except Exception:
+        pass
+
+
+# ── AI 命令执行计时器：运行期间实时显示「AI 正在执行命令: n 秒」──
+class AICmdTimer:
+    """AI 执行命令期间，在终端**强制**实时显示已运行秒数。
+
+    为什么需要：AI 跑长命令（安装/编译/下载）时界面长时间无输出，用户无法判断是
+    卡住还是在跑。这里用守护线程每秒刷新一行 `⏳ AI 正在执行命令: n 秒`。
+
+    渲染策略：
+      - REPL：直接写「实时流」（命令捕获器的 live_stream，即真实终端）并用
+        `\\r` + 清行原地刷新；结束时清掉这一行；
+      - TUI：写终端会污染 Textual 画面 → 改推送到活动行（_tui_activity）。
+    线程安全：只写一行、用 `\\r` 覆盖，不与捕获器的缓冲混写（不写 sys.stdout）。
+    """
+
+    def __init__(self, live_stream=None, tui: bool = False):
+        self._stream = live_stream
+        self._tui = bool(tui)
+        self._stop = threading.Event()
+        self._t = None
+        self._start = 0.0
+
+    def _render(self, text: str) -> None:
+        if self._tui:
+            _tui_activity(text=text)
+            return
+        try:
+            stream = self._stream or sys.__stdout__
+            stream.write("\r\x1b[K" + text)
+            stream.flush()
+        except Exception:
+            pass
+
+    def _loop(self) -> None:
+        while not self._stop.wait(1.0):
+            try:
+                secs = int(time.time() - self._start)
+                self._render(f"⏳ AI 正在执行命令: {secs} 秒")
+            except Exception:
+                pass
+
+    def __enter__(self):
+        self._start = time.time()
+        self._render("⏳ AI 正在执行命令: 0 秒")
+        self._t = threading.Thread(target=self._loop, daemon=True)
+        self._t.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        try:
+            if self._t is not None:
+                self._t.join(timeout=0.3)
+        except Exception:
+            pass
+        if self._tui:
+            _tui_activity(text="")
+        else:
+            try:
+                stream = self._stream or sys.__stdout__
+                stream.write("\r\x1b[K")
+                stream.flush()
+            except Exception:
+                pass
+        return False
+
+
+def _ai_cmd_timer(live_stream=None) -> AICmdTimer:
+    """构造 AI 命令计时器（自动判断 TUI/REPL 渲染方式）。"""
+    try:
+        from .ai_lib.mode import is_tui_render as _itr
+        _tui = bool(_itr())
+    except Exception:
+        _tui = False
+    return AICmdTimer(live_stream=live_stream, tui=_tui)
+
+
+def _refresh_subagent_status(_sa_mod, final: bool = False) -> None:
+    """把子代理最近活动刷新到 Status spinner / TUI 活动行，证明没卡住。"""
+    try:
+        if final:
+            _tui_activity(text="")
+            _status = _SUBAGENT_STATUS
+            if _status is not None:
+                _status.update(_mcp_t("  [dim]🧩 子代理运行完成[/]", "  [dim]🧩 Subagents finished[/]"))
+            return
+        _act = _sa_mod.get_manager().format_activity(4)
+        _tui_activity(text=("🧩 " + _act) if _act else "")
         _status = _SUBAGENT_STATUS
         if _status is None:
             return
-        if final:
-            _status.update(_mcp_t("  [dim]🧩 子代理运行完成[/]", "  [dim]🧩 Subagents finished[/]"))
-            return
-        _act = _sa_mod.get_manager().format_activity(4)
         if _act:
             _status.update(_mcp_t("  [dim]🧩 子代理运行中…\n" + _act + "[/]", "  [dim]🧩 Subagents running…\n" + _act + "[/]"))
         else:
@@ -959,8 +1120,9 @@ def handle_ai(
                         _exe_mod.AI_EXECUTION_MODE = True
                         _exe_mod.AI_LAST_EXIT_CODE = None
                     try:
-                        if parse_and_execute:
-                            parse_and_execute(_cmd)
+                        with _ai_cmd_timer(getattr(_out_catcher, "_live_stream", None)):
+                            if parse_and_execute:
+                                parse_and_execute(_cmd)
                     finally:
                         if _exe_mod:
                             _exe_mod.AI_EXECUTION_MODE = False
@@ -1318,8 +1480,16 @@ def handle_ai(
     if content_type == "key_only":
         # ai -key <API Key>：快速设置当前 AI 平台的 API Key（写入 key.json，混淆存储）。
         # 旧语义：32 位许可证密钥 + 许可证服务器验证（call_ai_api_sse + new_key），已废弃。
+        new_key = (new_key or "").strip()
         if not new_key:
             console.print(f"❌ {lang_text.get('key_usage', 'Usage: ai -key <API Key>')}", style="bold red")
+            return
+        from bin.ai_lib.config import _valid_api_key as _vkey
+        if not _vkey(new_key):
+            console.print(_mcp_t(
+                "❌ 密钥格式无效：长度需 ≥ 8，且不含空格或换行。",
+                "❌ Invalid key: at least 8 chars, no spaces/newlines.",
+            ), style="bold red")
             return
         conf = load_key_conf()
         if not conf or not conf.get("platform"):
@@ -1338,8 +1508,8 @@ def handle_ai(
                 params=conf.get("params") or {},
                 api_url=conf.get("api_url", "") or "",
             )
-            key_len = len(new_key)
-            masked = new_key[:4] + "*" * 8 + new_key[-4:] if key_len > 16 else new_key[:4] + "****"
+            from bin.ai_lib.config import mask_api_key as _mask_key
+            masked = _mask_key(new_key)
             console.print(f"[green]{plat_name} — {lang_text['key_set_success']}: {masked}[/]")
         except Exception as e:
             console.print(f"❌ 保存 API Key 失败: {e}", style="bold red")
@@ -1372,6 +1542,18 @@ def handle_ai(
 
     def _on_interrupt(signum, frame):
         global _AI_INTERRUPTED
+        # ── 优先：若当前有 AI 命令在跑，Ctrl+C 只杀命令、不打断 AI 循环 ──
+        # 场景：命令跑在工作线程里（signal.signal 装不上 handler）→ 主线程这个
+        # handler 接管；把信号转发给命令进程组（重复按逐级升级），转发成功即返回，
+        # 不置位 _AI_INTERRUPTED、不抛 KeyboardInterrupt → AI 循环继续。
+        try:
+            _exe_mod = sys.modules.get('lib.terminal.exe')
+            if _exe_mod is None:
+                from lib.terminal import exe as _exe_mod
+            if _exe_mod is not None and _exe_mod.interrupt_active_ai_cmds():
+                return
+        except Exception:
+            pass
         _AI_INTERRUPTED = True
         # 立即恢复原始 SIGINT 处理器（避免泄漏）
         _signal.signal(_signal.SIGINT, _original_sigint)
@@ -1384,7 +1566,16 @@ def handle_ai(
             return
         raise KeyboardInterrupt("User interrupted")
 
-    _signal.signal(_signal.SIGINT, _on_interrupt)
+    # ⚠️ 只有主线程能改信号处理器：TUI 的 AI 调用跑在工作线程
+    # （_worker_loop → _call_ai_engine → handle_ai），直接安装会抛
+    # ValueError("signal only works in main thread of the main interpreter")，
+    # 被上层捕获后显示成「AI 请求失败: signal only works ...」。
+    # 工作线程里跳过（TUI 的中断交给 Textual：Ctrl+Q / Ctrl+D）。
+    if threading.current_thread() is threading.main_thread():
+        try:
+            _signal.signal(_signal.SIGINT, _on_interrupt)
+        except Exception:
+            pass
 
     # 重置中断标志（避免上次 Ctrl+C 残留导致本次立即中断；ai_cmd 与 mcp_state 双份）
     # 重置中断标志（避免上次 Ctrl+C 残留导致本次立即中断；ai_cmd 与 mcp_state 双份）。
@@ -1656,6 +1847,56 @@ def handle_ai(
     # ── Layer 4 / Reactive 响应式兜底：上下文超限报错时允许强制压缩一次 ──
     _reactive_compact_done = False
 
+    try:
+        from .ai_lib.mode import is_tui_render as _is_tui_render
+        _tui_mode = bool(_is_tui_render())
+    except Exception:
+        _tui_mode = False
+
+    def _push_status_bar(_cache_supported: bool = True, _force_balance: bool = False) -> None:
+        """把 路径 / 上下文 / 缓存率 / 余额 推送到 TUI 状态栏（REPL 无适配器则跳过）。
+
+        _force_balance=True：忽略余额缓存的 TTL，强制后台刷新一次，并在刷新落地后
+        自动再推一次状态 —— 这样每轮结束余额就立刻更新（旧行为要等下一轮、或等
+        600s TTL 过期才刷新，用户看到的一直是旧值）。
+        """
+        try:
+            from .ai_lib.ui import get_ui_adapter
+            _ad = get_ui_adapter()
+            if _ad is None or not hasattr(_ad, "set_status"):
+                return
+            _ctx = getattr(_thread_locals, "last_prompt_tokens", 0) or 0
+            _hit = getattr(_thread_locals, "last_cache_hit", 0) or 0
+            _miss = getattr(_thread_locals, "last_cache_miss", 0) or 0
+            _cache_pct = (_hit / (_hit + _miss) * 100.0) if (_hit + _miss) else None
+            _bal = None
+            _plat = ""
+            try:
+                from .ai_lib.cost import get_cached_balance
+                _kc = load_key_conf() or {}
+                _plat = _kc.get("platform", "")
+                _key = _kc.get("api_key", "")
+                if _plat and _key:
+                    # 刷新落地（后台线程）→ 再推一次：UI 随即显示新余额（不再等下一轮）
+                    _on_upd = ((lambda _r: _push_status_bar(_cache_supported))
+                               if _force_balance else None)
+                    _b, _cur, _st = get_cached_balance(_plat, _key,
+                                                       force=_force_balance, on_update=_on_upd)
+                    if _st in ("success", "quota_unavailable"):
+                        _bal = f"{_b:,.2f} {_cur}".strip()
+            except Exception:
+                _bal = None
+            _ad.set_status({
+                "cwd": os.getcwd(),
+                "ctx": _ctx,
+                "cache_pct": _cache_pct,
+                "cache_supported": bool(_cache_supported),
+                "balance": _bal,
+                "balance_platform": _plat,
+            })
+        except Exception:
+            pass
+
     while continue_asking:
         # ── 异步 Explore 子代理：每轮开始时把已完成任务的结果注入上下文 ──
         # 安全：注入使用 user 角色 + 防注入声明（见 _subagent_result_message），
@@ -1678,6 +1919,24 @@ def handle_ai(
                     console.print(_act_tail, style="dim")
         except Exception:
             pass
+
+        # ── 实时引导：每轮边界（下一次 API 调用前）注入用户排队输入 ──
+        # TUI 在 AI 运行时把用户输入排入队列；此处在下一轮 API 调用前取出并作为
+        # user 消息注入 conversation_history，使 AI 在「本轮工具执行完成」后立即
+        # 看到引导，而不是等整个任务结束。REPL 无 provider → 恒为空，行为不变。
+        try:
+            from .ai_lib.ui import drain_pending_input as _drain_pending
+            _pending_inputs = _drain_pending()
+        except Exception:
+            _pending_inputs = []
+        if _pending_inputs:
+            _guide_text = "\n".join(_pending_inputs)
+            conversation_history.append({"role": "user", "content": _guide_text})
+            _user_input_round = True  # 用户引导视为真实用户输入（library 记录）
+            console.print(_mcp_t(
+                f"  [bold cyan]↪ 实时引导已注入本轮（{len(_pending_inputs)} 条），AI 将据此调整[/]",
+                f"  [bold cyan]↪ Live guidance injected this round ({len(_pending_inputs)}), AI will adapt[/]"))
+
         _tool_calls_processed_this_round = False
         _commands_processed_this_round = False
         if _AI_INTERRUPTED:
@@ -1753,8 +2012,8 @@ def handle_ai(
 
             # 纯 Markdown 直通：流式文本原样渲染为回复面板（无标记语言）
             if stream_text.strip():
-                parts.append(Panel(Markdown(stream_text.strip()),
-                                   title="💬 回复", border_style="green", box=ROUNDED))
+                parts.append(tui_plain(Markdown(stream_text.strip()),
+                                       title="💬 回复", border_style="green", box=ROUNDED))
 
             # MCP 工具执行结果（前4行）
             if tool_results_display:
@@ -1766,13 +2025,13 @@ def handle_ai(
                     _total = len(tr.get("output", ""))
                     if _total > 100:
                         body += "\n…" + _i18n("panel_output_kept", "bilingual", total=_total)
-                    parts.append(Panel(body, title=header, border_style=style, box=ROUNDED,
-                                       padding=(0, 1)))
+                    parts.append(tui_plain(body, title=header, border_style=style, box=ROUNDED,
+                                           padding=(0, 1)))
 
             if not parts:
-                return Panel(Spinner("dots", text=_i18n("thinking", "bilingual"),
-                                     style="bold cyan"),
-                            title="🤖 AI", border_style="green", box=ROUNDED)
+                return tui_plain(Spinner("dots", text=_i18n("thinking", "bilingual"),
+                                         style="bold cyan"),
+                                title="🤖 AI", border_style="green", box=ROUNDED)
 
             if len(parts) == 1:
                 return parts[0]
@@ -1821,6 +2080,8 @@ def handle_ai(
             return False, f"⛔ Path out of bounds: MCP tool '{tool}' attempted to access '{path}'"
 
 
+        _tui_push = [0.0]        # TUI 流式推送节流时间戳（worker 侧，见下）
+
         def on_stream_content(chunk: str) -> None:
             """实时流式回调：纯 Markdown 直通累积 + 更新复合 Panel"""
             nonlocal stream_text, _content_started
@@ -1835,9 +2096,21 @@ def handle_ai(
             if len(stream_text) > 100000:
                 stream_text = stream_text[-20000:]
 
-            # 更新 Live Panel
-            if live_ref[0]:
-                live_ref[0].update(_render_all_panels())
+            if _tui_mode:
+                # TUI：Live 面板挂在静默 Console 上（渲染结果直接丢弃），却仍要对**全文**
+                # 做一次 Markdown 解析 —— 每个 chunk 一次 O(n)，整轮 O(n²)。这里直接跳过。
+                #
+                # 节流也必须在这一侧做：适配器的 update_stream 走 call_from_thread，
+                # 那是**同步阻塞**的，放在主线程侧节流等于每个 chunk 都要跨线程往返一次
+                # （SSE 线程被 UI 渲染反向限流 → 观感「不是流式」）。
+                _now = time.monotonic()
+                if _now - _tui_push[0] >= 0.1:
+                    _tui_push[0] = _now
+                    _tui_stream(stream_text)
+            else:
+                # 更新 Live Panel
+                if live_ref[0]:
+                    live_ref[0].update(_render_all_panels())
         
         # 启动 Live Panel：动画 spinner + 流式展示
         from rich.spinner import Spinner
@@ -1859,10 +2132,18 @@ def handle_ai(
                 abort_active_response(current_session_id)
             except Exception:
                 pass
-        _signal.signal(_signal.SIGINT, _interrupt_handler)
+        # ⚠️ 只有主线程能改信号处理器：TUI 模式的 AI 调用跑在工作线程，
+        # 这里直接 signal.signal() 会抛 ValueError("signal only works in main thread
+        # of the main interpreter")，表现为界面上「AI 请求失败: signal only works ...」。
+        # 工作线程里跳过安装（TUI 的中断由 Textual 处理：Ctrl+Q / Ctrl+D）。
+        if threading.current_thread() is threading.main_thread():
+            try:
+                _signal.signal(_signal.SIGINT, _interrupt_handler)
+            except Exception:
+                pass
         
         spinner = Spinner("dots", text=_mcp_t(" 思考中...", " Thinking..."), style="bold cyan")
-        initial_panel = Panel(spinner, title="🤖 AI", border_style="green", box=ROUNDED)
+        initial_panel = tui_plain(spinner, title="🤖 AI", border_style="green", box=ROUNDED)
         
         ai_result = {}
         _live_shown = False  # 标记 Live Panel 是否已展示（避免重复 console.print）
@@ -1953,7 +2234,11 @@ def handle_ai(
                 except Exception:
                     pass
 
-            with Live(initial_panel, console=console, refresh_per_second=15, transient=False) as live:
+            _tui_activity(thinking=True)  # TUI：开始转圈（REPL 无适配器则跳过）
+            # TUI：Live 改用静默 Console + transient=True → 完全不输出（避免光标控制
+            # 序列污染日志），最终彩色回复由下方适配器 write_rich 直渲染。
+            with Live(initial_panel, console=_live_console(), refresh_per_second=15,
+                      transient=_tui_mode) as live:
                 live_ref[0] = live
                 loading_flag[0] = False  # Live Panel 已接管展示
                 
@@ -1990,12 +2275,14 @@ def handle_ai(
                             return  # 已切换到内容显示，不再更新思考面板
                         _reasoning_buffer.append(chunk)
                         _text = "".join(_reasoning_buffer[-100:])
-                        live.update(Panel(
+                        live.update(tui_plain(
                             RichText(_text, style="dim italic"),
                             title="🤖 AI 思考中...",
                             border_style="bright_black",
                             box=ROUNDED,
                         ))
+                        # TUI：Live 是静默的 → 思考过程改由 #stream 用灰字实时展示
+                        _tui_stream(_text, kind="reason")
                     def _on_tool_call(tool_name: str) -> None:
                         """流式检测到工具调用时立即更新面板"""
                         # 不展示工具调用信息给用户，保持界面清爽
@@ -2055,7 +2342,7 @@ def handle_ai(
                 
                 # Live Panel 最终更新
                 if (api_raw_result or {}).get("_interrupted"):
-                    live.update(Panel(_mcp_t("⏹ 已中断", "⏹ Interrupted"), title="🤖 AI", border_style="yellow", box=ROUNDED))
+                    live.update(tui_plain(_mcp_t("⏹ 已中断", "⏹ Interrupted"), title="🤖 AI", border_style="yellow", box=ROUNDED))
                 else:
                     parsed_txt = (api_raw_result or {}).get("txt", "").strip()
                     api_error = (api_raw_result or {}).get("error", "")
@@ -2064,7 +2351,7 @@ def handle_ai(
                         _live_shown = True
                     elif api_error:
                         err_short = api_error[:200] + ("..." if len(api_error) > 200 else "")
-                        live.update(Panel(f"❌ {err_short}", title="🤖 AI", border_style="red", box=ROUNDED))
+                        live.update(tui_plain(f"❌ {err_short}", title="🤖 AI", border_style="red", box=ROUNDED))
                         _live_shown = True
             
             # SSE返回的已经是解析好的dict
@@ -2082,6 +2369,8 @@ def handle_ai(
         finally:
             loading_flag[0] = False
             live_ref[0] = None
+            _tui_activity(thinking=False)  # TUI：停止转圈
+            _tui_end_stream()              # TUI：结束流式预览（正式回复随后落主日志）
             # 恢复原始 SIGINT 处理器（避免影响后续操作）
             try:
                 import signal as _sig_res
@@ -2111,7 +2400,16 @@ def handle_ai(
         
         if has_error:
             error_str = str(ai_result["error"])
-            if "Request failed" in error_str or "Connection" in error_str or "timeout" in error_str.lower():
+            _conn_fail = ("Request failed" in error_str or "Connection" in error_str
+                          or "timeout" in error_str.lower())
+            if _tui_mode:
+                # TUI：错误同样走「角色标签块」（与 AI 回复同一套视觉语言），
+                # 并且只在这里打印一次（下方原有一个 elif 分支会再打一遍）。
+                _err_body = (lang_text["api_conn_fail"] if _conn_fail
+                             else f"❌ {lang_text['api_error'].format(error_str)}")
+                _tui_write_rich(tui_plain(_err_body, title="🤖 AI",
+                                          border_style="red", box=ROUNDED))
+            elif _conn_fail:
                 console.print(lang_text["api_conn_fail"], style="bold red")
             else:
                 console.print(f"❌ {lang_text['api_error'].format(error_str)}", style="bold red")
@@ -2209,8 +2507,19 @@ def handle_ai(
         
         # 如果已通过流式或 Live Panel 展示了 txt 内容，不再重复打印
         # _live_shown 在 Live 块内设为 True，避免 Live 结束后 console.print 再打一遍
-        if has_txt and not _live_shown:
-            console.print(render_ai_panel(ai_result["txt"].strip()))
+        if has_txt:
+            _tui_end_stream()   # 兜底：确保流式预览一定收起，别把正文挤没
+            _reply_panel = render_ai_panel(ai_result["txt"].strip())
+            # TUI：Live 为 transient（退出不打印）→ 由此处补打，且经适配器直渲染
+            # 以保留 Markdown 颜色 / 蓝色面板；REPL 走原 console.print 逻辑。
+            _tui_wrote = _tui_write_rich(_reply_panel) if _tui_mode else False
+            if not _tui_wrote and (not _live_shown or _tui_mode):
+                console.print(_reply_panel)
+            if _tui_mode:
+                _tui_write_rich("")   # 回复块与后续内容之间留一行空白（统一呼吸感）
+        elif _tui_mode and has_error:
+            # 错误已在上面的 has_error 分支里以「角色标签块」打印过，这里不再重复。
+            pass
         
         ai_commands = extract_ai_commands(ai_result)
         # 硬限制：最多执行 10 条命令，超出的丢弃并通知 AI
@@ -2234,6 +2543,7 @@ def handle_ai(
         
         # ── Token usage stats (from stream_options.include_usage) ──
         _usage_info = ai_result.get("_usage") if isinstance(ai_result, dict) else None
+        _cache_supported = ai_result.get("_cache_supported", True) if isinstance(ai_result, dict) else True
         if _usage_info:
             _total = _usage_info.get("total_tokens", 0)
             _prompt = _usage_info.get("prompt_tokens", 0)
@@ -2288,7 +2598,9 @@ def handle_ai(
                     parts.append("💰 cache 0% hit")
             else:
                 parts.append("💰 cache n/a (platform)")
-            console.print(f"  [dim]{' · '.join(parts)}[/]")
+            # TUI：token/缓存数据已由状态栏承载，不再打进日志（否则会和 AI 回复糊成一块）
+            if not _tui_mode:
+                console.print(f"  [dim]{' · '.join(parts)}[/]")
         else:
             # 无 _usage 时回退：估算 token 数
             _parts = []
@@ -2296,9 +2608,13 @@ def handle_ai(
                 _total_chars = sum(len(str(m.get("content", ""))) for m in conversation_history)
                 _est = _total_chars // 3 + 1500
                 _parts.append(f"⚡ ~{_est} tokens")
-            if _parts:
+            if _parts and not _tui_mode:
                 console.print(f"  [dim]{' · '.join(_parts)}[/]")
         
+        # ── 推送状态栏（路径 / 上下文 / 缓存率 / 余额）──
+        # 余额强制刷新：每轮结束都重新查一次，刷新落地后自动再推一次（实时更新）
+        _push_status_bar(_cache_supported, _force_balance=True)
+
         # ---- Plan 确认流程（纯引导模式）----
         if plan_text and plan_text.strip():
             _plan_display = plan_text
@@ -2352,12 +2668,42 @@ def handle_ai(
                 continue_asking = True
                 continue
 
+            elif plan_choice == "cancel":
+                # 用户没做出确认（Esc / Ctrl+C / 交互不可用）→ 绝不执行，
+                # 结束本轮并保留 _pending_plan，等用户下次明确确认。
+                console.print(lang_text.get("plan_not_confirmed",
+                    "⏸️ 计划尚未确认，已暂停执行。请确认后再继续。"), style="bold yellow")
+                continue_asking = False
+                continue
+
         # Plan 模式安全限制：未确认计划前，拦截非计划类命令和工具调用
         # 既支持 mode=="plan"（用户输入 ai plan），也支持 _PLAN_MODE_ACTIVE（AI 调用 EnterPlanMode）
-        # 前 2 轮交互不拦截，让 AI 有机会探索代码库并生成计划
         # ⚠️ 注意：submit_plan / mark_step_complete / ExitPlanMode / choose_ask
         # 是 AI 在 plan 模式下唯一能用的工具，不能拦截它们
         _plan_tools = {"submit_plan", "mark_step_complete", "ExitPlanMode", "choose_ask"}
+
+        # ── 探索期硬闸门（2026-09 修复）──
+        # 旧逻辑用 `interaction_count > 2` 把**前 2 轮整体放行**，本意是让 AI 探索代码库，
+        # 但「整体放行」等于未确认计划时也能跑 shell、写文件 —— 用户实测「没确认就开干」。
+        # 现在从第 1 轮起就拦住**执行类**动作；只读探索（读文件/搜索/查环境）不受影响。
+        _plan_mutating_tools = {"write_file", "edit_file", "RunCommand", "apply_patch",
+                                "CronCreate", "CronDelete", "TaskRemove", "TaskStop"}
+        if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed:
+            _mut_calls = [tc for tc in tool_calls if tc.get("name", "") in _plan_mutating_tools]
+            if ai_commands or _mut_calls:
+                _blocked_names = sorted({tc.get("name", "") for tc in _mut_calls}
+                                        | ({"shell"} if ai_commands else set()))
+                _plan_blocked_msg = lang_text.get(
+                    "plan_blocked_early",
+                    "⛔ Plan 模式（计划未确认）：已拦截执行类动作 — {}。只读探索不受影响；请先提交并确认计划。"
+                    if current_lang == "chinese"
+                    else "⛔ Plan mode (plan not confirmed): execution actions blocked — {}. "
+                         "Read-only exploration is unaffected; submit and confirm the plan first.")
+                console.print(_plan_blocked_msg.format(", ".join(_blocked_names)), style="bold red")
+                ai_commands = []
+                tool_calls = [tc for tc in tool_calls
+                              if tc.get("name", "") not in _plan_mutating_tools]
+
         if (mode == "plan" or _PLAN_MODE_ACTIVE) and not plan_confirmed and interaction_count > 2:
             # 只拦截 ai_commands（shell 命令），不拦截 plan 类工具调用
             _non_plan_calls = [tc for tc in tool_calls if tc.get("name", "") not in _plan_tools]
@@ -2562,6 +2908,9 @@ def handle_ai(
                     # 其余一律是内置工具，不标 MCP。
                     _tag = " [MCP]" if tool_name.startswith("mcp_") else ""
                     _agent_mark = f" ×{_agent_n}" if _agent_n > 1 else ""
+                    if _tui_mode:
+                        # TUI 无面板框线 → 用空行把每个工具块与上下文隔开（REPL 有框，不加）
+                        console.print("")
                     console.print(f"  [bold green]🔧 {_tool_display_name}{_agent_mark}{_tag}[/]{_param_preview}")
 
                     # 流式执行：用 Status spinner 展示工具运行过程
@@ -2573,7 +2922,7 @@ def handle_ai(
                     _status_started = False
                     if tool_name not in ("choose_ask", "RunCommand"):
                         from rich.status import Status as _RichStatus
-                        _status = _RichStatus(_mcp_t(f"  [dim]⏳ {_tool_display_name} 运行中…[/]", f"  [dim]⏳ {_tool_display_name} running…[/]"), spinner="dots", console=console)
+                        _status = _RichStatus(_mcp_t(f"  [dim]⏳ {_tool_display_name} 运行中…[/]", f"  [dim]⏳ {_tool_display_name} running…[/]"), spinner="dots", console=_live_console())
                         _status.start()
                         _status_started = True
 
@@ -2675,6 +3024,9 @@ def handle_ai(
                         err_msg = _mcp_t(f"❌ 工具执行失败: {output}", f"❌ Tool execution failed: {output}")
                         tool_results.append(err_msg)
                         console.print(f"   {err_msg}", style="bold red")
+                    if _tui_mode and _tc_i == len(tool_calls) - 1:
+                        # 只在本轮最后一个工具后收尾，避免与下一块的「前置空行」叠成两行
+                        console.print("")
 
             except KeyboardInterrupt:
                 # Ctrl+C 强制打断工具执行
@@ -3002,14 +3354,9 @@ def handle_ai(
                         f"⚠️ Possibly not a command (alphanum ratio {ratio:.0%}):\n  {cmd[:120]}"
                     )
                     console.print(warn, style="bold yellow")
-                    # 提示词直达真实终端（防 stdout 被捕获流替换）
-                    from .ai_lib.ui import real_terminal_io as _rtio2
-                    with _rtio2():
-                        try:
-                            confirm = input(_mcp_t("  确认执行？(y/N): ", "  Execute anyway? (y/N): ")).strip().lower()
-                        except (KeyboardInterrupt, EOFError):
-                            confirm = 'n'
-                    if confirm != 'y':
+                    # 统一走 ui.confirm（TUI 下为模态框；REPL 下等价于原 y/N 提示）
+                    from .ai_lib.ui import confirm as _ui_confirm
+                    if not _ui_confirm(_mcp_t("确认执行？(y/N): ", "Execute anyway? (y/N): "), default=False):
                         console.print(_mcp_t("  已跳过", "  Skipped"), style="dim")
                         continue
                 filtered_commands.append(cmd)
@@ -3046,8 +3393,9 @@ def handle_ai(
                             if _exe_module:
                                 _exe_module.AI_EXECUTION_MODE = True
                             try:
-                                if parse_and_execute:
-                                    parse_and_execute(cmd)
+                                with _ai_cmd_timer(getattr(stdout_catcher, "_live_stream", None)):
+                                    if parse_and_execute:
+                                        parse_and_execute(cmd)
                             finally:
                                 if _exe_module:
                                     _exe_module.AI_EXECUTION_MODE = False
@@ -3246,12 +3594,13 @@ def handle_ai(
         if debug_info and debug_info.strip():
             from rich.panel import Panel as DebugPanel
             from rich.box import ROUNDED as DebugBox
-            console.print(DebugPanel(
+            from .ai_lib.ui import tui_plain as _tui_plain
+            console.print(_tui_plain(DebugPanel(
                 debug_info.strip(),
                 title="🔧 Debug",
                 border_style="dim",
                 box=DebugBox,
-            ))
+            )))
         
         # ── 自动判断是否继续循环（纯 Markdown 回复，无标记语言）──
         # 规则：仅当响应中只有纯文本且无挂起项时才停止循环；
@@ -3289,7 +3638,7 @@ def handle_ai(
                 if _subagent_wait.get_manager().has_pending() and not was_interrupted:
                     console.print(_mcp_t("  [bold cyan]🧩 等待子代理完成总结…[/]", "  [bold cyan]🧩 Waiting for subagent summaries…[/]"))
                     from rich.status import Status as _ExploreStatus
-                    with _ExploreStatus(_mcp_t("  [dim]🧩 子代理运行中…[/]", "  [dim]🧩 Subagents running…[/]"), spinner="dots", console=console) as _st:
+                    with _ExploreStatus(_mcp_t("  [dim]🧩 子代理运行中…[/]", "  [dim]🧩 Subagents running…[/]"), spinner="dots", console=_live_console()) as _st:
                         _deadline = time.time() + 600
                         while _subagent_wait.get_manager().has_pending() and time.time() < _deadline:
                             _act_tail = _subagent_wait.get_manager().format_activity(4)
@@ -3324,8 +3673,8 @@ def handle_ai(
                 event.app.exit(exception=KeyboardInterrupt())
 
             hint = lang_text.get("esc_hint",
-                "Press ESC to exit, Enter to exit") if current_lang == "chinese" else \
-                lang_text.get("esc_hint", "Press ESC to exit, Enter to exit")
+                "按 ESC 结束，回车继续提问" if current_lang == "chinese"
+                else "Press ESC to end, Enter to continue")
             try:
                 follow_up = prompt(
                     [('class:dim', hint + ' ')],
@@ -3338,9 +3687,12 @@ def handle_ai(
                     "Goodbye!" if current_lang == "english" else "再见！"), style="dim")
                 continue
 
-    # 恢复原始 SIGINT 处理器
+    # 恢复原始 SIGINT 处理器（工作线程里 signal.signal 不可用 → 容错）
     import signal as _signal
-    _signal.signal(_signal.SIGINT, _original_sigint)
+    try:
+        _signal.signal(_signal.SIGINT, _original_sigint)
+    except Exception:
+        pass
     _reset_ai_interrupt_flags()  # 兜底复位双份中断标志（防残留导致下次提问立即中断）
     cleanup_output_cache(AI_TOOL_OUTPUT_CACHE, MAX_CACHE_SIZE)
     _flush_pending_tool_logs()  # 兜底：确保工具结果记录落盘（中断/提前退出路径）

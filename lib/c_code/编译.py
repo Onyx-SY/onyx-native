@@ -151,6 +151,20 @@ class CCompiler:
     
     def _install_compiler_linux(self, compiler_type, target_arch=None, target_system=None):
         """在Linux上安装编译器"""
+        # Termux/Android：没有 sudo，`apt` 只是 stub，必须用 pkg；
+        # 而且 clang 才是官方工具链（gcc 通常由 clang 提供）。
+        if 'termux' in (sys.prefix or '').lower() or shutil.which('pkg'):
+            print("✓ 检测到 Termux 环境，使用 pkg")
+            try:
+                subprocess.run(['pkg', 'install', '-y', 'clang', 'make'],
+                               check=True, timeout=600)
+                print("\n✓ clang 编译器安装成功!")
+                return True
+            except Exception as e:
+                print(f"✗ 安装失败: {e}")
+                print("  可手动执行: pkg install -y clang make")
+                return False
+
         if shutil.which('apt'):
             package_manager = 'apt'
             install_cmd = ['sudo', 'apt', 'install', '-y']
@@ -207,10 +221,15 @@ class CCompiler:
             return False
         
         print(f"\n将安装以下包: {', '.join(packages)}")
-        confirm = input("是否继续安装？(y/N): ").strip().lower()
-        if confirm != 'y':
-            print("已取消安装")
-            return False
+        # 非交互环境（管道/后台/自动化）下 input() 会永久阻塞 → 只在真正的 TTY 里询问，
+        # 否则默认继续（安装编译器是用户显式发起的操作）。
+        if sys.stdin is not None and sys.stdin.isatty():
+            confirm = input("是否继续安装？(y/N): ").strip().lower()
+            if confirm != 'y':
+                print("已取消安装")
+                return False
+        else:
+            print("（非交互环境，直接继续安装）")
         
         try:
             cmd = install_cmd + packages

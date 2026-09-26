@@ -146,13 +146,9 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
         _sandbox.deactivate()
     except Exception:
         pass
-    from bin.ai_cmd import load_key_conf, _setup_key_conf_interactive
-    conf = load_key_conf()
-    if not conf or not conf.get("api_key"):
-        _setup_key_conf_interactive(ctx.global_config["display_info"]["language"]["current"])
-        conf = load_key_conf()
-        if not conf or not conf.get("api_key"):
-            return
+    from bin.ai_lib.config import ensure_api_key_configured
+    if not ensure_api_key_configured(ctx.global_config["display_info"]["language"]["current"]):
+        return
 
     is_bare = len(cmd_parts) == 1
     # ── AI 会话 cwd 守卫：会话结束（含异常）自动恢复 cwd + 停用 AI 沙盒 ──

@@ -38,6 +38,17 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
 
     kb = KeyBindings()
 
+    def _add(action_key: str):
+        """按 default_keys（来自 ptk.json）绑定 handler；支持 'escape, space' 多键序列。"""
+        raw = default_keys.get(action_key) or ""
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if not parts:
+            return lambda f: f
+        try:
+            return kb.add(*parts)
+        except Exception:
+            return lambda f: f
+
     # 默认键位映射
     default_keys = {
         "history_up": "up",
@@ -126,7 +137,7 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
                     buffer.cursor_position = new_pos
 
     # Ctrl+上下键：补全菜单选择
-    @kb.add('c-up')
+    @_add("completion_menu_up")
     def _(event):
         buffer = event.app.current_buffer
         if buffer.complete_state:
@@ -134,7 +145,7 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
         else:
             buffer.start_completion(select_first=False)
 
-    @kb.add('c-down')
+    @_add("completion_menu_down")
     def _(event):
         buffer = event.app.current_buffer
         if buffer.complete_state:
@@ -176,12 +187,12 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
             buffer.start_completion(select_first=False)
 
     # 手动触发补全
-    @kb.add('c-space')
+    @_add("completion_trigger")
     def _(event):
         buffer = event.app.current_buffer
         buffer.start_completion(select_first=False)
 
-    @kb.add('c-n')
+    @_add("completion_alt_next")
     def _(event):
         buffer = event.app.current_buffer
         if buffer.complete_state:
@@ -189,7 +200,7 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
         else:
             buffer.start_completion(select_first=False)
 
-    @kb.add('c-p')
+    @_add("completion_alt_prev")
     def _(event):
         buffer = event.app.current_buffer
         if buffer.complete_state:
@@ -231,7 +242,7 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
             buffer.start_completion(select_first=False)
 
     # ESC+Space：全局切换补全锁定（锁住后输入不弹补全，再按解锁）
-    @kb.add('escape', 'space')
+    @_add("completion_lock")
     def _(event):
         global _completion_locked
         buffer = event.app.current_buffer
@@ -261,4 +272,33 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
             if pos < len(buffer.text):
                 buffer.cursor_position = pos + 1
 
+    # Alt+Enter：进入独立全屏多行编辑区（键名可在 ptk.json 里改）
+    @_add("multiline_editor")
+    def _(event):
+        buffer = event.app.current_buffer
+        input_lib_module._request_multiline_editor(buffer.text)
+        event.app.exit(result=input_lib_module.MULTILINE_EDITOR_SENTINEL)
+
     return kb
+
+
+# 主 REPL 可配置动作表：(动作 id, ptk.json 里的键名, 中文说明, English)
+# 供 `config-onyx-repl keys` 与 TUI 按键设置界面使用。
+REPL_KEY_ACTIONS = [
+    ("history_up", "history_up", "历史上一条", "History previous"),
+    ("history_down", "history_down", "历史下一条", "History next"),
+    ("prefix_history_up", "prefix_history_up", "前缀历史上一条（Alt+↑）", "Prefix history prev"),
+    ("prefix_history_down", "prefix_history_down", "前缀历史下一条（Alt+↓）", "Prefix history next"),
+    ("completion_next", "completion_next", "补全下一项", "Completion next"),
+    ("completion_prev", "completion_prev", "补全上一项", "Completion previous"),
+    ("completion_page_up", "completion_page_up", "补全菜单上翻页", "Completion page up"),
+    ("completion_page_down", "completion_page_down", "补全菜单下翻页", "Completion page down"),
+    ("completion_menu_up", "completion_menu_up", "补全菜单选择：上", "Completion menu up"),
+    ("completion_menu_down", "completion_menu_down", "补全菜单选择：下", "Completion menu down"),
+    ("completion_trigger", "completion_trigger", "手动触发补全", "Trigger completion"),
+    ("completion_alt_next", "completion_alt_next", "补全下一项（备用键）", "Completion next (alt)"),
+    ("completion_alt_prev", "completion_alt_prev", "补全上一项（备用键）", "Completion prev (alt)"),
+    ("completion_lock", "completion_lock", "切换补全锁定", "Toggle completion lock"),
+    ("clear_screen", "clear_screen", "清屏", "Clear screen"),
+    ("multiline_editor", "multiline_editor", "进入全屏多行编辑区", "Open multi-line editor"),
+]

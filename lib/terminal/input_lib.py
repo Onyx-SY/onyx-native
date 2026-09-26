@@ -41,6 +41,8 @@ import threading
 import re
 import shlex
 import queue
+import shutil
+import traceback
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Tuple, Union, Iterable
 
@@ -52,6 +54,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion, AutoSuggestFromHistory
+from prompt_toolkit.history import History
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.validation import Validator, ValidationError
 
@@ -354,6 +357,32 @@ def _clean_display_text(cmd: str, decode_escapes: bool = True) -> str:
     
     return result
 
+# ── 终端控制序列泄漏过滤 ──
+# CPR 应答（ESC[row;colR 或其残余 row;colR）、鼠标上报、OSC 标题等，可能绕过
+# prompt_toolkit 落进输入缓冲；仅当整串剥离后无可见字符时才判为纯噪声丢弃。
+_CSI_NOISE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_OSC_NOISE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ESC_NOISE_RE = re.compile(r"\x1b[@-Z\\-_]")
+_CPR_RESIDUE_RE = re.compile(r"(?:\x1b\[)?[0-9]*;[0-9]+R")
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+def _strip_control_noise(text: str) -> str:
+    """
+    过滤终端控制序列泄漏（CPR 应答残余、鼠标上报、OSC 等）。
+
+    仅当整串在剥离控制序列后已无任何可见字符时才判定为“纯噪声”并返回空串，
+    否则原样返回 —— 保证 printf 等含普通字符的正常命令不受影响。
+    """
+    if not text:
+        return text
+    stripped = text
+    for pat in (_CSI_NOISE_RE, _OSC_NOISE_RE, _ESC_NOISE_RE, _CPR_RESIDUE_RE):
+        stripped = pat.sub("", stripped)
+    stripped = _CTRL_CHARS_RE.sub("", stripped)
+    if stripped.strip() == "":
+        return ""
+    return text
+
 def _history_writer_loop():
     batch = []
     file_path = _get_history_file_path()
@@ -463,6 +492,59 @@ def _save_history_buffer_async(cmd: str):
         return
     _start_history_writer()
     _history_write_queue.put(cmd)
+
+# ===================== prompt_toolkit 历史桥接 =====================
+class OnyxHistory(History):
+    """
+    把项目自己的历史缓冲（_HISTORY_BUFFER，来自 .onyx_history.txt）桥接给 prompt_toolkit，
+    使 Ctrl+R 反向增量搜索能覆盖【跨会话】的完整历史。
+
+    背景：此前 PromptSession 未传 history=，ptk 用的是空的 InMemoryHistory，
+    导致 Ctrl+R 只能搜到“本次进程运行期间”输入过的命令，搜不到历史文件里的旧命令
+    （↑/↓ 走的是项目自己的 _HISTORY_BUFFER，因此不受影响）。
+
+    - load_history_strings：ptk 要求 oldest-first，而 _HISTORY_BUFFER 最新在前 → 反转。
+    - store_string：故意不落盘 —— 落盘由既有的 add_to_history / _save_history_buffer_async
+      管线负责，避免重复写入；ptk 仍会把新命令追加进 buffer._working_lines 供搜索。
+    """
+
+    def load_history_strings(self):
+        try:
+            for cmd in reversed(list(_HISTORY_BUFFER)):
+                if cmd:
+                    yield cmd
+        except Exception:
+            return
+
+    def store_string(self, string: str) -> None:
+        # 持久化交给项目既有管线，这里不做任何事（否则会重复写历史文件）
+        return
+
+
+_PTK_HISTORY = OnyxHistory()
+
+
+def _detect_editor() -> Optional[str]:
+    """
+    探测可用的终端编辑器路径，供 Ctrl+X Ctrl+E（外部编辑器）使用。
+
+    prompt_toolkit 的内置回退表是硬编码的 /usr/bin/*，在 Termux/Android 上并不存在，
+    因此这里主动解析一个真实路径并通过 $EDITOR 告知 ptk。
+    """
+    for env in ("VISUAL", "EDITOR"):
+        val = os.environ.get(env)
+        if val:
+            try:
+                if shutil.which(val.split()[0]):
+                    return val
+            except Exception:
+                pass
+    for cand in ("nano", "vi", "vim", "micro", "emacs"):
+        path = shutil.which(cand)
+        if path:
+            return path
+    return None
+
 
 # ===================== 历史导航（修复版 - 使用索引追踪） =====================
 def init_history_navigation() -> None:
@@ -1408,6 +1490,25 @@ def _consume_pending_multiline_recall(user_input: str, virtual_root: str = "") -
     return user_input
 
 
+# ── Alt+Enter：独立全屏多行编辑区（kb.py 的 multiline_editor 键触发）──
+MULTILINE_EDITOR_SENTINEL = "\x00__ONYX_MULTILINE_EDITOR__\x00"
+_ML_EDITOR_REQUEST = {"text": None}
+
+
+def _request_multiline_editor(text: str) -> None:
+    """记录进入编辑区时的缓冲区内容（供 universal_input 取用）。"""
+    _ML_EDITOR_REQUEST["text"] = text or ""
+
+
+def _editor_lang() -> str:
+    """尽力取当前界面语言（失败回退 chinese）。"""
+    try:
+        from bin.manage import get_current_language
+        return get_current_language() or "chinese"
+    except Exception:
+        return "chinese"
+
+
 def universal_input(
     prompt_func: Callable[[], Union[FormattedText, str]],
     builtin_commands: Dict = None,
@@ -1434,6 +1535,10 @@ def universal_input(
     """主输入函数"""
     global _HISTORY_INITIALIZED, _CURRENT_LANG, _VIRTUAL_ROOT, META_TEXTS, _VALID_COMMANDS, _USER_HOME_DIR, _TERMINAL_TYPE
     global _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND, _PENDING_MULTILINE_RECALL, _MULTILINE_ABORTED
+
+    # 日志回调兜底：未注入时静默，避免对调用方产生额外依赖
+    _log_info = log_info_func if callable(log_info_func) else (lambda *a, **k: None)
+    _log_error = log_error_func if callable(log_error_func) else (lambda *a, **k: None)
 
     _CURRENT_LANG = language
     set_language(language)
@@ -1590,6 +1695,11 @@ def universal_input(
         if _SESSION_CACHE.get("key") == _cache_key and _SESSION_CACHE.get("session") is not None:
             session = _SESSION_CACHE["session"]
         else:
+            # Ctrl+X Ctrl+E 外部编辑器：ptk 的内置回退表硬编码 /usr/bin/*，
+            # Termux/Android 下不存在，需显式通过 $EDITOR 告知一个真实路径。
+            _editor = _detect_editor()
+            if _editor and not (os.environ.get("VISUAL") or os.environ.get("EDITOR")):
+                os.environ["EDITOR"] = _editor
             session = PromptSession(
                 completer=completer,
                 lexer=lexer,
@@ -1600,10 +1710,35 @@ def universal_input(
                 complete_in_thread=True,
                 reserve_space_for_menu=6,
                 auto_suggest=auto_suggest,
+                # Ctrl+R 反查覆盖【跨会话】历史（此前未传 history，只覆盖本次运行）
+                history=_PTK_HISTORY,
+                # Ctrl+R 搜索始终忽略大小写（更符合 shell 习惯）
+                search_ignore_case=True,
+                # Ctrl+X Ctrl+E 打开外部编辑器
+                enable_open_in_editor=bool(_editor),
             )
             _SESSION_CACHE["key"] = _cache_key
             _SESSION_CACHE["session"] = session
+            _log_info(
+                f"新建 PromptSession（终端={get_terminal_type()}，根={virtual_root}）",
+                session_id,
+            )
         user_input = session.prompt(prompt_text)
+
+        # ── Alt+Enter：进入独立全屏多行编辑区（可滚动回看、能改任意行）──
+        if user_input == MULTILINE_EDITOR_SENTINEL:
+            try:
+                from .mul_line import MultiLineEditor
+                _init_text = _ML_EDITOR_REQUEST.get("text") or ""
+                _ML_EDITOR_REQUEST["text"] = None
+                _edited = MultiLineEditor(syntax=get_terminal_type(),
+                                          lang=_editor_lang()).edit(_init_text)
+            except Exception:
+                _edited = None
+            if _edited is None:
+                reset_history_index()
+                return ""                      # 取消 → 当作空输入
+            user_input = _edited
 
         # ── 虚影补全接受的多行命令：以多行形式重放，不进入单行缓冲区 ──
         user_input = _consume_pending_multiline_recall(user_input, virtual_root)
@@ -1618,14 +1753,11 @@ def universal_input(
 
         user_input_stripped = user_input.strip()
 
-        # 2026-09 修复（双保险）：过滤终端 CPR 响应残余。
-        # 即使 PROMPT_TOOLKIT_NO_CPR 已设置，历史会话或第三方库仍可能产生
-        # ESC[6n 应答残余（";1R" / "1;1R" / "\x1b[1;1R"）。全串匹配即丢弃，
-        # 防止回车后作为命令提交给 bash（syntax error near `;'）。
-        if user_input_stripped and re.fullmatch(
-            r"(?:\x1b\[)?[0-9]*;[0-9]+R", user_input_stripped
-        ):
-            user_input_stripped = ""
+        # 2026-09 修复（增强）：过滤终端控制序列泄漏。
+        # 即使 PROMPT_TOOLKIT_NO_CPR 已设置，CPR 应答残余（";1R" / "1;1R" / "\x1b[1;1R"）、
+        # 鼠标上报、OSC 等仍可能落进输入缓冲。仅当整串由控制序列/控制字符构成时丢弃，
+        # 防止回车后作为命令提交给 bash（syntax error near `;'），同时不误伤正常命令。
+        user_input_stripped = _strip_control_noise(user_input_stripped)
 
         if user_input_stripped:
             # decode_escapes=False：不把字面 \n/\r/\t 拆成控制字符（避免破坏 printf 等命令）
@@ -1679,6 +1811,11 @@ def universal_input(
         sys.exit(0)
         return ""
     except Exception as e:
+        # 不再静默吞掉：记录完整堆栈便于定位（此前仅打印一行并返回空串）
+        try:
+            _log_error(f"输入处理异常: {type(e).__name__}: {e}\n{traceback.format_exc()}", session_id)
+        except Exception:
+            pass
         if Fore:
             print(Fore.RED + f"Input error: {e}" + (Style.RESET_ALL if Style else ""))
         reset_history_index()

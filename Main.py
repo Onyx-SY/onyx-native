@@ -187,11 +187,17 @@ MAIN_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # 记录系统原始 HOME（在 sandbox 更改之前捕获）
 _ORIGINAL_HOME = os.environ.get("HOME", "")
+# 记录启动时的工作目录（沙箱禁用时用于还原 cwd）
+try:
+    _ORIGINAL_CWD = os.getcwd()
+except OSError:
+    _ORIGINAL_CWD = ""
 
 # 获取当前登录用户名
 try:
-    USER = os.getlogin()
-except:
+    import getpass as _getpass
+    USER = _getpass.getuser()
+except Exception:
     USER = os.environ.get("USER", os.environ.get("USERNAME", "default"))
 
 # ========== 日志相关配置 ==========
@@ -278,13 +284,26 @@ REQUIRED_DEPENDENCIES: Dict[str, List[str]] = {
     ],
     "windows_pty_libs": ["pywinpty", "winpty"],
     "required_py_files": ["etc/config.json", "bin/ai_cmd.py", "Onyx.py"],
-    "optional_pyc_files": ["bin/ai_cmd.pyc", "Onyx.pyc"],
     "pip_mirrors": [
         "https://mirrors.aliyun.com/pypi/simple/",
         "https://pypi.doubanio.com/simple/",
         "https://pypi.tuna.tsinghua.edu.cn/simple/"
     ]
 }
+
+# 批量依赖检测：一次子进程问完所有 import 名（find_spec 不执行模块 → 无副作用、快）
+_BATCH_CHECK_SRC = (
+    "import importlib.util,json,sys\n"
+    "names=json.loads(sys.argv[1])\n"
+    "missing=[]\n"
+    "for n in names:\n"
+    "    try:\n"
+    "        if importlib.util.find_spec(n) is None:\n"
+    "            missing.append(n)\n"
+    "    except Exception:\n"
+    "        missing.append(n)\n"
+    "print(json.dumps(missing))\n"
+)
 
 # 双语文本配置
 LANGUAGE_TEXT = {
@@ -293,9 +312,8 @@ LANGUAGE_TEXT = {
             "系统检测", "Python/pip版本适配", 
             "Python依赖库检查与安装",
             "Windows PTY支持检查",
-            "PYC文件有效性检测", "核心PY文件检查", 
-            "config.json验证", "Main启动文件确认",
-            "MCP filesystem 服务器安装"
+            "核心PY文件检查", 
+            "config.json验证", "Main启动文件确认"
         ],
         "messages": {
             "start_check": "🚀 开始全面环境检查...",
@@ -320,16 +338,14 @@ LANGUAGE_TEXT = {
             "pty_install_success": "✓ PTY支持库安装成功",
             "pty_install_failed": "✗ PTY支持库安装失败（某些功能可能受限）",
             "checking_py_files": "检查核心PY文件",
-            "py_files_ready": "所有核心PY文件（或有效PYC）已就绪",
-            "missing_py_files": "缺失必须PY文件（且无有效PYC兜底）",
+            "py_files_ready": "所有核心PY文件已就绪",
+            "missing_py_files": "缺失必须PY文件",
             "validating_config": "正在验证 config.json...",
             "config_valid": "config.json 格式与核心配置项正常",
             "config_missing": "config.json 文件缺失",
             "config_invalid": "config.json 格式错误（非标准JSON）",
             "config_key_missing": "config.json 缺失核心项",
             "determine_start_file": "已确定启动文件",
-            "using_pyc": "（优先使用有效PYC）",
-            "using_py": "（PYC无效/缺失，使用PY兜底）",
             "check_passed": "=== 环境检查全部通过！===",
             "starting_main": "即将启动",
             "system_info": "系统信息",
@@ -378,6 +394,7 @@ LANGUAGE_TEXT = {
             "login_mode_force_home": "🔐 登录模式强制切换到虚拟 HOME",
             "first_run_title": "🔧 首次运行 — 强制环境检测 / First-Run Forced Environment Check",
             "first_run_subtitle": "正在逐阶段彻底检查运行环境，请稍候…",
+            "current_version": "当前版本",
             "first_run_stage_prefix": "阶段",
             "first_run_pass": "✓ 通过",
             "first_run_fail": "✗ 失败",
@@ -391,6 +408,11 @@ LANGUAGE_TEXT = {
             "first_run_proceeding": "🚀 正在进入 Onyx 主程序…",
             "setup_welcome": "🔧 欢迎！检测到这是首次启动，请完成初始配置。",
             "setup_step_lang": "第 1 步：选择语言",
+            "setup_step_sandbox": "第 2 步：沙箱设置",
+            "setup_sandbox_title": "是否启用沙箱？",
+            "setup_sandbox_option_on": "启用沙箱（推荐，限制在虚拟根目录内）",
+            "setup_sandbox_option_off": "禁用沙箱（使用系统真实根目录）",
+            "setup_sandbox_saved": "沙箱设置已保存：{}",
 
         }
     },
@@ -399,9 +421,8 @@ LANGUAGE_TEXT = {
             "System Detection", "Python/pip Version Adaptation", 
             "Python Library Check and Installation",
             "Windows PTY Support Check",
-            "PYC File Validation", "Core PY Files Check", 
-            "config.json Verification", "Main Startup File Confirmation",
-            "MCP filesystem Server Installation"
+            "Core PY Files Check", 
+            "config.json Verification", "Main Startup File Confirmation"
         ],
         "messages": {
             "start_check": "🚀 Starting comprehensive environment check...",
@@ -426,16 +447,14 @@ LANGUAGE_TEXT = {
             "pty_install_success": "✓ PTY support library installed successfully",
             "pty_install_failed": "✗ PTY support library installation failed (some features may be limited)",
             "checking_py_files": "Checking core PY files",
-            "py_files_ready": "All core PY files (or valid PYC) are ready",
-            "missing_py_files": "Missing required PY files (and no valid PYC fallback)",
+            "py_files_ready": "All core PY files are ready",
+            "missing_py_files": "Missing required PY files",
             "validating_config": "Validating config.json...",
             "config_valid": "config.json format and normal",
             "config_missing": "config.json file missing",
             "config_invalid": "config.json format error (non-standard JSON)",
             "config_key_missing": "config.json missing core items",
             "determine_start_file": "Startup file determined",
-            "using_pyc": "(Priority use of valid PYC)",
-            "using_py": "(PYC invalid/missing, using PY as fallback)",
             "check_passed": "=== All environment checks passed! ===",
             "starting_main": "About to start",
             "system_info": "System information",
@@ -484,6 +503,7 @@ LANGUAGE_TEXT = {
             "login_mode_force_home": "🔐 Login mode force switch to virtual HOME",
             "first_run_title": "🔧 First-Run Forced Environment Check / 首次运行 — 强制环境检测",
             "first_run_subtitle": "Running thorough stage-by-stage environment verification, please wait…",
+            "current_version": "Current Version",
             "first_run_stage_prefix": "Stage",
             "first_run_pass": "✓ PASS",
             "first_run_fail": "✗ FAIL",
@@ -497,6 +517,11 @@ LANGUAGE_TEXT = {
             "first_run_proceeding": "🚀 Proceeding to Onyx main program…",
             "setup_welcome": "🔧 Welcome! First launch detected — please complete initial setup.",
             "setup_step_lang": "Step 1: Select language",
+            "setup_step_sandbox": "Step 2: Sandbox settings",
+            "setup_sandbox_title": "Enable sandbox?",
+            "setup_sandbox_option_on": "Enable sandbox (recommended, restricted to the virtual root)",
+            "setup_sandbox_option_off": "Disable sandbox (use the real system root)",
+            "setup_sandbox_saved": "Sandbox setting saved: {}",
 
         }
     }
@@ -552,7 +577,6 @@ class UltraFastEnvironmentChecker:
             self.tqdm = None
             self.Fore = None
             self.Style = None
-            self.pyc_status = {}
             self.max_workers = min(4, os.cpu_count() or 2)
             
             # 永久缓存
@@ -692,9 +716,19 @@ class UltraFastEnvironmentChecker:
     
     @timer("detect_system")
     def detect_system(self) -> str:
-        """检测系统类型"""
-        is_termux = "termux" in sys.prefix.lower() or \
-                    (os.path.exists("/data/data/com.termux") if hasattr(os, 'path') else False)
+        """检测系统类型。
+
+        优先复用 lib.get_lib_path._is_termux_environment（全仓单一事实来源，看
+        Termux home/$PREFIX 是否同时存在 + sys.prefix），失败再退回本地判据 ——
+        避免「同一个系统在不同模块被判成不同平台」。
+        """
+        is_termux = False
+        try:
+            from lib.get_lib_path import _is_termux_environment
+            is_termux = bool(_is_termux_environment())
+        except Exception:
+            is_termux = "termux" in sys.prefix.lower() or \
+                        (os.path.exists("/data/data/com.termux") if hasattr(os, 'path') else False)
         
         if is_termux:
             system_type = "Termux"
@@ -759,9 +793,24 @@ class UltraFastEnvironmentChecker:
     
     @timer("check_lib_installed_fast")
     def check_lib_installed_fast(self, lib_name: str) -> bool:
-        """快速检查库是否安装"""
+        """检查单个库是否可导入（批量检测失败时的回退路径）。
+
+        旧实现 timeout=1s：Android/Termux 冷启动一次解释器常需 200~600ms，
+        高负载时超过 1s → 把「已安装」误判成「缺失」→ 反复重装。
+        """
         clean_lib = lib_name.split(';')[0].strip()
-        
+        import_name = self._lib_import_name(clean_lib)
+
+        try:
+            subprocess.run([self.python_exe, "-c", f"import {import_name}"],
+                           check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=8)
+            return True
+        except Exception:
+            return False
+
+    def _lib_import_name(self, clean_lib: str) -> str:
+        """pip 包名 → import 名（特例表 + `-`→`_` 兜底）。"""
         import_name_map = {
             'pywinpty': 'winpty',
             'msgpack-python': 'msgpack',
@@ -773,16 +822,34 @@ class UltraFastEnvironmentChecker:
             'pygments': 'pygments',
             'tqdm': 'tqdm',
         }
-        
-        import_name = import_name_map.get(clean_lib, clean_lib.replace('-', '_'))
-        
+        return import_name_map.get(clean_lib, clean_lib.replace('-', '_'))
+
+    @timer("batch_check_libs")
+    def batch_check_libs(self, import_names: List[str]) -> Optional[List[str]]:
+        """一次性检查多个库能否导入（**单次**子进程）。
+
+        旧实现每个库起一次解释器（Termux 首启 13~17 次，每次 200~600ms 纯属浪费）。
+        返回缺失的 import 名列表；任何异常返回 None，让调用方回退到逐库检测。
+        """
+        names = sorted({n for n in import_names if n})
+        if not names:
+            return []
         try:
-            subprocess.run([self.python_exe, "-c", f"import {import_name}"],
-                           check=True, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=1)
-            return True
-        except:
-            return False
+            result = subprocess.run(
+                [self.python_exe, "-c", _BATCH_CHECK_SRC, json.dumps(names)],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode != 0:
+                return None
+            lines = [ln for ln in (result.stdout or "").strip().splitlines() if ln.strip()]
+            if not lines:
+                return None
+            missing = json.loads(lines[-1])
+            if isinstance(missing, list):
+                return [str(x) for x in missing]
+        except Exception as e:
+            log_print(f"批量依赖检测失败，回退逐库检测: {e}")
+        return None
     
     @timer("parallel_check_libs_fast")
     def parallel_check_libs_fast(self, libs: List[str]) -> List[str]:
@@ -803,17 +870,29 @@ class UltraFastEnvironmentChecker:
             else:
                 platform_filtered_libs.append(lib)
         
-        missing = []
-        
-        for lib in platform_filtered_libs:
-            if not self.check_lib_installed_fast(lib):
-                missing.append(lib)
-        
-        return missing
+        if not platform_filtered_libs:
+            return []
+
+        # pip 包名 → import 名，一次子进程问完
+        import_of = {lib: self._lib_import_name(lib.split(';')[0].strip())
+                     for lib in platform_filtered_libs}
+        missing_imports = self.batch_check_libs(list(import_of.values()))
+        if missing_imports is not None:
+            miss = set(missing_imports)
+            return [lib for lib in platform_filtered_libs if import_of[lib] in miss]
+
+        # 回退：逐库检测，但**真正并行**（旧实现名为 parallel 实为串行）
+        try:
+            with ThreadPoolExecutor(max_workers=min(8, len(platform_filtered_libs))) as executor:
+                flags = list(executor.map(self.check_lib_installed_fast, platform_filtered_libs))
+            return [lib for lib, ok in zip(platform_filtered_libs, flags) if not ok]
+        except Exception:
+            return [lib for lib in platform_filtered_libs
+                    if not self.check_lib_installed_fast(lib)]
     
     @timer("test_mirror_speed")
     def test_mirror_speed(self) -> str:
-        """测试镜像源速度"""
+        """返回主镜像（列表首项）。多镜像回退在 install_single_lib 里做。"""
         if hasattr(self, '_best_mirror_cache') and self._best_mirror_cache:
             return self._best_mirror_cache
         
@@ -822,17 +901,86 @@ class UltraFastEnvironmentChecker:
         self._best_mirror_cache = best_mirror
         
         return best_mirror
-    
+
+    def _mirror_chain(self) -> List[str]:
+        """安装用的镜像顺序：主镜像 → 其余镜像（去重，最多 3 个）。"""
+        mirrors = list(REQUIRED_DEPENDENCIES.get("pip_mirrors") or [])
+        primary = self.test_mirror_speed()
+        chain = [primary] + [m for m in mirrors if m != primary]
+        seen, out = set(), []
+        for m in chain:
+            if m and m not in seen:
+                seen.add(m)
+                out.append(m)
+        return out[:3]
+
+    def _install_hint(self, output: str) -> str:
+        """按 pip 输出给一条可执行的修复建议（跨平台）。"""
+        low = (output or "").lower()
+        if "externally-managed-environment" in low:
+            return "系统 Python 受 PEP 668 保护：已自动加 --break-system-packages；建议改用虚拟环境"
+        if any(k in low for k in ("failed building wheel", "command 'gcc' failed",
+                                  "clang: not found", "gcc: not found", "error: command")):
+            if self.system_type == "Termux":
+                return "缺少编译工具链 → 执行: pkg install -y clang python"
+            if self.system_type in ("Linux/macOS", "SpecialLinux"):
+                return "缺少编译工具链 → 执行: sudo apt install -y build-essential python3-dev"
+            return "缺少 C 编译工具链"
+        if "no matching distribution" in low:
+            return "该平台没有预编译包（Android 无 manylinux wheel），需本地编译"
+        if any(k in low for k in ("timed out", "connection", "network", "temporary failure")):
+            return "网络不可达 → 检查网络或更换镜像源"
+        return ""
+
     @timer("install_single_lib")
-    def install_single_lib(self, lib_name: str, mirror: str) -> bool:
-        """安装单个库"""
+    def install_single_lib(self, lib_name: str, mirror: str = "") -> Tuple[bool, str]:
+        """安装单个库（镜像回退 / PEP 668 自适应 / 返回失败输出）。
+
+        返回 (是否成功, 最后一次输出)。旧实现把 stdout/stderr 全丢 DEVNULL，
+        失败时用户看不到任何原因（缺编译器 / 网络不通 / PEP 668），且从不重试。
+        """
+        mirrors = self._mirror_chain()
+        if mirror:
+            mirrors = [mirror] + [m for m in mirrors if m != mirror]
+
+        last_out = ""
+        attempts = []
+        for idx, m in enumerate(mirrors):
+            attempts.append((m, False))        # 先用缓存（重复安装快很多）
+            if idx == 0:
+                attempts.append((m, True))     # 缓存疑似损坏时再禁缓存重试一次
+        for m, no_cache in attempts:
+            ok, out = self._pip_install_once(lib_name, m, no_cache=no_cache)
+            last_out = out
+            if ok:
+                return True, last_out
+            if "externally-managed-environment" in (out or "").lower():
+                # PEP 668（Debian/Ubuntu/Kali）：必须显式放行
+                ok, out = self._pip_install_once(lib_name, m, no_cache=no_cache,
+                                                 extra_args=("--break-system-packages",))
+                last_out = out
+                if ok:
+                    return True, last_out
+        return False, last_out
+
+    def _pip_install_once(self, lib_name: str, mirror: str, no_cache: bool = False,
+                          extra_args: Tuple[str, ...] = ()) -> Tuple[bool, str]:
+        """跑一次 pip install，返回 (是否成功, 合并输出)。"""
+        pip_cmd = [self.python_exe, "-m", "pip", "install", "--prefer-binary"]
+        if no_cache:
+            pip_cmd.append("--no-cache-dir")
+        pip_cmd += ["-i", mirror]
+        pip_cmd += list(extra_args)
+        pip_cmd.append(lib_name)
         try:
-            pip_cmd = [self.python_exe, "-m", "pip", "install", "--no-cache-dir", "-i", mirror, lib_name]
-            result = subprocess.run(pip_cmd, check=False, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, timeout=30)
-            return result.returncode == 0
-        except:
-            return False
+            result = subprocess.run(pip_cmd, check=False, capture_output=True,
+                                    text=True, timeout=300)
+            out = (result.stdout or "") + (result.stderr or "")
+            return result.returncode == 0, out
+        except subprocess.TimeoutExpired:
+            return False, "pip install 超时（300s）"
+        except Exception as e:
+            return False, f"pip install 异常: {e}"
     
     @timer("parallel_install_libs")
     def parallel_install_libs(self, libs: List[str], show_detail: bool = True) -> Tuple[List[str], List[str]]:
@@ -853,18 +1001,22 @@ class UltraFastEnvironmentChecker:
             if show_detail:
                 print(f"    [{i}/{total}] 正在安装 {lib}...")
             try:
-                pip_cmd = [self.python_exe, "-m", "pip", "install",
-                          "--no-cache-dir", "-i", best_mirror, lib]
-                result = subprocess.run(pip_cmd, check=False,
-                                       stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL, timeout=120)
-                if result.returncode == 0:
+                ok, out = self.install_single_lib(lib, best_mirror)
+                if ok:
                     if show_detail:
                         print(f"      ✓ {lib} 安装成功")
                     succeeded.append(lib)
                 else:
                     if show_detail:
                         print(f"      ✗ {lib} 安装失败")
+                        _tail = [ln for ln in (out or "").splitlines() if ln.strip()][-6:]
+                        if _tail:
+                            print("        ── pip 输出（尾部）──")
+                            for ln in _tail:
+                                print(f"        {ln}")
+                        _hint = self._install_hint(out)
+                        if _hint:
+                            print(f"        💡 {_hint}")
                     failed.append(lib)
             except Exception as e:
                 if show_detail:
@@ -908,8 +1060,19 @@ class UltraFastEnvironmentChecker:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
             return True
-        except:
+        except Exception as e:
+            log_print(f"配置文件读取失败: {e}", is_error=True)
             return False
+
+    def get_program_version(self) -> str:
+        """从 etc/config.json 读取当前程序版本号（读取失败时返回 'unknown'）"""
+        try:
+            config_path = os.path.join(ROOT_DIR, "onyx", "etc", "config.json")
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            return str(config.get("program_info", {}).get("version", "unknown"))
+        except Exception:
+            return "unknown"
     
     @timer("_check_sandbox_enabled")
     def _check_sandbox_enabled(self) -> bool:
@@ -964,7 +1127,8 @@ class UltraFastEnvironmentChecker:
         
         # 获取用户名
         try:
-            username = os.getlogin()
+            import getpass as _getpass
+            username = _getpass.getuser()
         except:
             username = os.environ.get("USER", os.environ.get("USERNAME", "default"))
         
@@ -1591,19 +1755,6 @@ class UltraFastEnvironmentChecker:
         val = input(f"  {prompt}").strip()
         return val if val else default
 
-    def _secret_input(self, iq, message: str) -> str:
-        """Password-style masked input. Uses InquirerPy secret or getpass."""
-        if iq:
-            try:
-                return iq.secret(message=message).execute()
-            except Exception:
-                pass
-        import getpass
-        try:
-            return getpass.getpass(f"  {message}: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            return ""
-
     def _save_language_setting(self, lang: str):
         """Persist language choice to ~/.config/onyx/language."""
         try:
@@ -1615,8 +1766,21 @@ class UltraFastEnvironmentChecker:
         except Exception as e:
             log_print(f"[FirstRun] Failed to save language: {e}", is_error=True)
 
+    def _save_sandbox_setting(self, enabled: bool) -> None:
+        """Persist the sandbox choice to ROOT_DIR/etc/onyx/sandbox (true/false)."""
+        sandbox_path = os.path.join(ROOT_DIR, "etc", "onyx", "sandbox")
+        try:
+            os.makedirs(os.path.dirname(sandbox_path), exist_ok=True)
+            with open(sandbox_path, "w", encoding="utf-8") as f:
+                f.write("true" if enabled else "false")
+            if os.name == "posix":
+                os.chmod(sandbox_path, 0o644)
+            log_print(f"[FirstRun] Sandbox set: {enabled} ({sandbox_path})")
+        except Exception as e:
+            log_print(f"[FirstRun] Failed to save sandbox setting: {e}", is_error=True)
+
     def _first_time_setup_wizard(self):
-        """First-time interactive setup: language selection only.
+        """First-time interactive setup: language + sandbox.
         AI 配置已移出启动流程，用户可在 Onyx 中用 ai 命令随时设置。
         """
         iq = self._try_import_inquirerpy()
@@ -1624,12 +1788,12 @@ class UltraFastEnvironmentChecker:
         # ── Header ────────────────────────────────────────────────────
         welcome = ("\n" + "=" * 64 + "\n"
                    "  🔧 欢迎！检测到首次启动 / Welcome! First launch detected\n"
-                   "  请选择语言 / Please select language\n"
+                   "  请完成初始配置 / Please complete the initial setup\n"
                    + "=" * 64)
         print(welcome)
         log_print("[FirstRun] Setup wizard started")
 
-        # ── Language ──────────────────────────────────────────────────
+        # ── Step 1: Language ──────────────────────────────────────────
         print(f"\n  📌 {self.t('setup_step_lang')}")
         lang_title = "🌐 请选择语言 / Please select language"
         lang_options = ["中文 (Chinese)", "English"]
@@ -1640,6 +1804,29 @@ class UltraFastEnvironmentChecker:
         self.lang.text = LANGUAGE_TEXT[lang]
         self._save_language_setting(lang)
         print(f"  ✅ {lang_choice}")
+
+        # ── Step 2: Sandbox ───────────────────────────────────────────
+        print(f"\n  📌 {self.t('setup_step_sandbox')}")
+        opt_on = self.t('setup_sandbox_option_on')
+        opt_off = self.t('setup_sandbox_option_off')
+        sandbox_choice = self._select_one(
+            iq, self.t('setup_sandbox_title'), [opt_on, opt_off], default=opt_on
+        )
+        sandbox_enabled = (sandbox_choice == opt_on)
+        self._save_sandbox_setting(sandbox_enabled)
+        if not sandbox_enabled:
+            # 沙箱禁用：还原本次启动已切换的虚拟 HOME / cwd，保持会话一致
+            if _ORIGINAL_HOME:
+                os.environ['HOME'] = _ORIGINAL_HOME
+                if sys.platform.startswith("win32"):
+                    os.environ['USERPROFILE'] = _ORIGINAL_HOME
+            if _ORIGINAL_CWD:
+                try:
+                    os.chdir(_ORIGINAL_CWD)
+                except OSError:
+                    pass
+        print(f"  ✅ {self.t('setup_sandbox_saved').format(sandbox_choice)}")
+        log_print(f"[FirstRun] Sandbox {'enabled' if sandbox_enabled else 'disabled'}")
 
     # ── First-run forced check helpers ─────────────────────────────────────────
     # These are used only by first_run_forced_check() to print bilingual
@@ -1709,8 +1896,10 @@ class UltraFastEnvironmentChecker:
         print(f"\n{'=' * 64}")
         print(f"  {title}")
         print(f"  {subtitle}")
+        _ver = self.get_program_version()
+        print(f"  {self.t('current_version')}: {_ver}")
         print(f"{'=' * 64}")
-        log_print(f"[FirstRun] {title}")
+        log_print(f"[FirstRun] {title} (version={_ver})")
 
         all_pass = True
         results: Dict[str, Any] = {}
@@ -1796,29 +1985,8 @@ class UltraFastEnvironmentChecker:
             self._print_stage_result(4, total, steps[3], False, str(e))
             all_pass = False
 
-        # ── Stage 5: PYC File Validation ──────────────────────────────────
+        # ── Stage 5: Core PY Files Check ──────────────────────────────────
         self._print_stage_header(5, total, steps[4])
-        try:
-            pyc_missing = False
-            for pyc_rel in REQUIRED_DEPENDENCIES.get("optional_pyc_files", []):
-                pyc_path = os.path.join(ROOT_DIR, "onyx", pyc_rel)
-                exists = os.path.exists(pyc_path)
-                mark = "✓" if exists else "✗"
-                print(f"  {mark}  {pyc_rel}")
-                if not exists:
-                    pyc_missing = True
-            if pyc_missing:
-                print(f"  {self.t('first_run_warn')}: "
-                      f"some .pyc files missing — .py fallback will be used")
-                self._print_stage_result(5, total, steps[4], True, skipped=True)
-            else:
-                self._print_stage_result(5, total, steps[4], True)
-        except Exception as e:
-            self._print_stage_result(5, total, steps[4], False, str(e))
-            all_pass = False
-
-        # ── Stage 6: Core PY Files Check ──────────────────────────────────
-        self._print_stage_header(6, total, steps[5])
         try:
             missing_files = self.quick_file_check(
                 [os.path.join(ROOT_DIR, "onyx", f)
@@ -1827,93 +1995,50 @@ class UltraFastEnvironmentChecker:
             if missing_files:
                 print(f"  {self.t('missing_py_files')}: "
                       f"{', '.join(os.path.basename(m) for m in missing_files)}")
-                self._print_stage_result(6, total, steps[5], False)
+                self._print_stage_result(5, total, steps[4], False)
                 all_pass = False
             else:
                 print(f"  {self.t('py_files_ready')}")
-                self._print_stage_result(6, total, steps[5], True)
+                self._print_stage_result(5, total, steps[4], True)
         except Exception as e:
-            self._print_stage_result(6, total, steps[5], False, str(e))
+            self._print_stage_result(5, total, steps[4], False, str(e))
             all_pass = False
 
-        # ── Stage 7: config.json Verification ─────────────────────────────
-        self._print_stage_header(7, total, steps[6])
+        # ── Stage 6: config.json Verification ─────────────────────────────
+        self._print_stage_header(6, total, steps[5])
         try:
             config_ok = self.load_config()
             results['config_valid'] = config_ok
             if config_ok:
                 print(f"  {self.t('config_valid')}")
-                self._print_stage_result(7, total, steps[6], True)
+                self._print_stage_result(6, total, steps[5], True)
             else:
                 print(f"  {self.t('config_invalid')}")
-                self._print_stage_result(7, total, steps[6], False)
+                self._print_stage_result(6, total, steps[5], False)
                 all_pass = False
         except Exception as e:
-            self._print_stage_result(7, total, steps[6], False, str(e))
+            self._print_stage_result(6, total, steps[5], False, str(e))
             all_pass = False
 
-        # ── Stage 8: Main Startup File Confirmation ───────────────────────
-        self._print_stage_header(8, total, steps[7])
+        # ── Stage 7: Main Startup File Confirmation ───────────────────────
+        self._print_stage_header(7, total, steps[6])
         try:
             onyx_py = os.path.join(ROOT_DIR, "onyx", "Onyx.py")
-            onyx_pyc = os.path.join(ROOT_DIR, "onyx", "Onyx.pyc")
-            if os.path.exists(onyx_pyc):
-                print(f"  {self.t('determine_start_file')}: Onyx.pyc  "
-                      f"{self.t('using_pyc')}")
-                results['start_file'] = 'Onyx.pyc'
-            elif os.path.exists(onyx_py):
-                print(f"  {self.t('determine_start_file')}: Onyx.py  "
-                      f"{self.t('using_py')}")
+            if os.path.exists(onyx_py):
+                print(f"  {self.t('determine_start_file')}: Onyx.py")
                 results['start_file'] = 'Onyx.py'
             else:
-                print(f"  ✗  Onyx.py / Onyx.pyc NOT FOUND!")
-                self._print_stage_result(8, total, steps[7], False)
+                print(f"  ✗  Onyx.py NOT FOUND!")
+                self._print_stage_result(7, total, steps[6], False)
                 all_pass = False
                 print(f"\n  ❌ CRITICAL: Onyx.py is missing — cannot start.\n")
                 sys.exit(1)
-            self._print_stage_result(8, total, steps[7], True)
+            self._print_stage_result(7, total, steps[6], True)
         except SystemExit:
             raise
         except Exception as e:
-            self._print_stage_result(8, total, steps[7], False, str(e))
+            self._print_stage_result(7, total, steps[6], False, str(e))
             all_pass = False
-
-        # ── Stage 9: MCP filesystem Server Installation ───────────────────
-        self._print_stage_header(9, total, steps[8])
-        try:
-            # 检查 npx 是否可用
-            import subprocess as _sp
-            _npx_ok = _sp.run(["npx", "--version"], capture_output=True, text=True, timeout=10).returncode == 0
-            if not _npx_ok:
-                print(f"  {self.t('first_run_skip')}  (npx not found, Node.js required)")
-                self._print_stage_result(9, total, steps[8], True, skipped=True)
-            else:
-                print(f"  ✓ npx 可用 (Node.js 已安装)")
-                # 安装 MCP filesystem server
-                from bin.ai_cmd import install_mcp_server_cmd
-                print(f"  📦 正在安装 MCP filesystem server...（首次安装需要下载 npm 包，约 10-30 秒）")
-                sys.stdout.flush()
-                _start = time.time()
-                result = install_mcp_server_cmd("filesystem", "@modelcontextprotocol/server-filesystem")
-                _elapsed = time.time() - _start
-                print(f"  ⏱ 耗时: {_elapsed:.0f}s")
-                if "❌" in result and "already installed" not in result.lower():
-                    print(f"  ⚠ MCP 安装输出: {result[:100]}")
-                    self._print_stage_result(9, total, steps[8], False)
-                else:
-                    print(f"  ✓ filesystem server 已就绪")
-                    # 标记 MCP 预加载已完成（不必后台再装一次）
-                    try:
-                        _flag_dir = os.path.join(os.path.expanduser("~"), ".cache", "onyx")
-                        os.makedirs(_flag_dir, exist_ok=True)
-                        with open(os.path.join(_flag_dir, "mcp_preloaded.flag"), "w") as _f:
-                            _f.write(str(time.time()))
-                    except Exception:
-                        pass
-                    self._print_stage_result(9, total, steps[8], True)
-        except Exception as e:
-            print(f"  ⚠ MCP 安装异常: {e} — 可稍后通过 ai -mcp install filesystem 手动安装")
-            self._print_stage_result(9, total, steps[8], False, str(e))
 
         # ── Persist cache + flag ──────────────────────────────────────────
         results['status'] = 'success'
@@ -1974,7 +2099,9 @@ class UltraFastEnvironmentChecker:
         start_time = time.time()
         
         try:
-            log_print(f"{self.t('start_check')}")
+            _ver = self.get_program_version()
+            print(f"  {self.t('current_version')}: {_ver}")
+            log_print(f"{self.t('start_check')} (version={_ver})")
             
             with TimeIt("并行检查-系统/文件"):
                 with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1996,6 +2123,28 @@ class UltraFastEnvironmentChecker:
             with TimeIt("加载配置文件"):
                 config_valid = self.load_config()
             
+            # --force-check：真正校验 Python 依赖库。
+            # 旧实现（含 --force-check）从不检查 python_libs，依赖被删/装坏后只能在
+            # import 阶段崩，报错是难懂的 ImportError。这里显式检查并顺手补齐。
+            libs_missing: List[str] = []
+            if force_check:
+                with TimeIt("校验Python依赖库"):
+                    try:
+                        libs_missing = self.parallel_check_libs_fast(
+                            REQUIRED_DEPENDENCIES["python_libs"])
+                        if libs_missing:
+                            print(f"  ⚠ 缺失依赖: {', '.join(libs_missing)}")
+                            _ok_libs, _failed_libs = self.parallel_install_libs(libs_missing)
+                            libs_missing = list(_failed_libs)
+                            if _failed_libs:
+                                print(f"  ✗ 仍有缺失: {', '.join(_failed_libs)}")
+                            else:
+                                print(f"  ✓ 依赖已补齐（{len(_ok_libs)} 个）")
+                        else:
+                            print("  ✓ Python 依赖齐全")
+                    except Exception as e:
+                        log_print(f"依赖校验异常: {e}", is_error=True)
+            
             check_results = {
                 'status': 'success',
                 'start_file': 'Onyx.py',
@@ -2003,6 +2152,7 @@ class UltraFastEnvironmentChecker:
                 'python_exe': self.python_exe,
                 'pip_exe': self.pip_exe,
                 'config_valid': config_valid,
+                'libs_missing': libs_missing,
                 'timestamp': time.time()
             }
             
@@ -2149,7 +2299,7 @@ def main() -> None:
             # ── First-run gate ────────────────────────────────────────────
             #    If the flag file is missing this is a first launch (or the
             #    user cleared the cache).  Run the interactive setup wizard
-            #    (language + AI config) followed by a thorough 8-stage
+            #    (language + AI config) followed by a thorough 7-stage
             #    environment check.  Both jump directly to the main program
             #    when finished; execution never reaches the routing below.
             if not os.path.exists(checker._first_run_flag_path()):

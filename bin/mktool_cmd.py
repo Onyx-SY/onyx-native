@@ -179,8 +179,13 @@ def handle_mktool_core(
         config_file_real = os.path.join(tool_dir_real, config_file_name)
         intro_cn = f"自动推导根目录+双语切换工具（{lang_info['label']}）"
         intro_en = f"Auto-derived root path + bilingual tool（{lang_info['label']}）"
+        try:
+            import getpass as _getpass
+            _author = _getpass.getuser()
+        except Exception:
+            _author = os.getenv("USER") or os.getenv("LOGNAME") or "default_user"
         with open(config_file_real, "w", encoding="utf-8") as f:
-            f.write(f"author={os.getlogin() if hasattr(os, 'getlogin') else 'default_user'}\n")
+            f.write(f"author={_author}\n")
             f.write(f"name={tool_name}\n")
             f.write(f"version=1.0.0\n")
             f.write(f"cli=1\n")

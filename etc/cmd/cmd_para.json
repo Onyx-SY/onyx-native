@@ -13,6 +13,12 @@
       "type": "string"
     },
     {
+      "cmd": ["config-onyx-repl"],
+      "opts": ["ui", "list", "get", "set", "reset", "--all", "-h", "--help", "keys", "keys set", "keys reset", "keys list"],
+      "params": ["history_up", "history_down", "prefix_history_up", "prefix_history_down", "completion_next", "completion_prev", "completion_page_up", "completion_page_down", "completion_menu_up", "completion_menu_down", "completion_trigger", "completion_alt_next", "completion_alt_prev", "completion_lock", "clear_screen", "multiline_editor", "language", "debug-times", "debug-parsecmd", "clean-log-time", "adv_danger_cmd_prompt", "mcp", "spring-mode", "builtin-adv-syntax", "sandbox", "prompt-style", "history-len", "true", "false"],
+      "type": "string"
+    },
+    {
       "cmd": ["autocmd"],
       "opts": [],
       "params": ["add", "remove", "list"],

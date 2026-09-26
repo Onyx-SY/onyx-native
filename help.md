@@ -55,6 +55,8 @@ Onyx never replaces your shell: it owns the input layer and lets a real `bash`/`
 | `manage <subcommand>` | Manage configuration (get / set config items) |
 | `switch-prompt <style>` | Switch the prompt style (`kali` / `ubuntu` / `zsh` / `onyx` / `termux` / `def` / `skali`) |
 | `ai <prompt>` | AI assistant (requires platform API key) |
+| `ai -key <API Key>` | Set the API key for the current platform (stored in `~/.config/onyx/ai/key.json`) |
+| `ai -repl` / `ai -tui` | Force the interactive mode (REPL / full-screen TUI); bare `ai` uses the default |
 | `set-adv-pwd` | Set the advanced-mode password |
 | `help` | Show this help |
 | `mktool -n <name> -l <lang>` | Create a new toolkit plugin and generate its config / permission files. Languages: python / c / cpp / bash. Tool path: `tools/plugin/<name>`. Example: `mktool -n port_scanner -l python` |
@@ -177,6 +179,27 @@ The `ai` command talks to the backend over an SSE API. The returned commands are
 through the full parse → security-check → execute pipeline. Because the PTY session is persistent,
 the AI's `cd /tmp` takes effect for the next command.
 
+### API Key
+
+The first time you run `ai`, an interactive wizard asks for the platform and API key. You can also
+set or change the key later:
+
+- `ai -key <API Key>` — set the key for the configured platform (non-interactive)
+- Inside AI chat: `/key` to view / change the key, `/config` for the full menu (platform / model / key / params / URL)
+
+Keys are stored obfuscated with `0600` permissions in `~/.config/onyx/ai/key.json`; stray
+whitespace and newlines are stripped on input and on read.
+
+### Interactive Modes (REPL / TUI)
+
+Bare `ai` enters the default interactive mode; override it explicitly:
+
+- `ai` — default mode (one variable: `bin/ai_lib/mode.py` → `DEFAULT_AI_MODE`)
+- `ai -repl` — line-based REPL
+- `ai -tui` — full-screen TUI: a fixed input box at the bottom (still usable while the AI runs —
+  typed messages queue as live guidance), a chat pane, and — on wide terminals — side panels
+  (TODO + files). Dangerous-command confirmations and captchas appear as modal dialogs.
+
 ## Ghost Completion
 
 Based on command frequency: as you type, the most likely completion appears in grey directly after
@@ -253,6 +276,8 @@ Onyx 不替换你的 shell：它接管输入层，把真正的执行交给 `bash
 | `manage <subcommand>` | 管理配置（读取 / 设置配置项） |
 | `switch-prompt <style>` | 切换提示符风格（`kali` / `ubuntu` / `zsh` / `onyx` / `termux` / `def` / `skali`） |
 | `ai <prompt>` | AI 助手（需平台 API Key） |
+| `ai -key <API Key>` | 为当前平台设置 API Key（存入 `~/.config/onyx/ai/key.json`） |
+| `ai -repl` / `ai -tui` | 强制交互模式（REPL / 全屏 TUI）；裸 `ai` 走默认模式 |
 | `set-adv-pwd` | 设置高级模式密码 |
 | `help` | 显示本帮助 |
 | `mktool -n <工具名> -l <语言>` | 创建新的工具箱插件工具，自动生成配置 / 权限文件。支持语言：python / c / cpp / bash；工具路径：`tools/plugin/<工具名>`；示例：`mktool -n port_scanner -l python` |
@@ -371,6 +396,24 @@ Onyx 会自动判断使用哪种模式：当 `ROOT_DIR` 等于系统根目录（
 
 `ai` 命令通过 SSE API 与后端通信，返回的命令列表会逐条走完整个「解析 → 安全检查 → 执行」管线。
 由于 PTY 会话是持久的，AI 执行的 `cd /tmp` 会对下一条命令生效。
+
+### API Key 配置
+
+首次运行 `ai` 会进入交互式配置向导，也可稍后设置 / 更换密钥：
+
+- `ai -key <API Key>` —— 非交互式为已配置平台设置密钥
+- AI 对话内：`/key` 查看 / 更换密钥，`/config` 打开完整菜单（平台 / 模型 / 密钥 / 参数 / URL）
+
+密钥以混淆形式存于 `~/.config/onyx/ai/key.json`（权限 0600）；输入与读取时都会自动去除首尾空白与换行。
+
+### 交互模式（REPL / TUI）
+
+裸 `ai` 进入默认交互模式，可显式覆盖：
+
+- `ai` —— 默认模式（单一变量：`bin/ai_lib/mode.py` 的 `DEFAULT_AI_MODE`）
+- `ai -repl` —— 行式 REPL
+- `ai -tui` —— 全屏 TUI：底部固定输入框（AI 运行时仍可输入，消息排队作为实时引导）、
+  对话面板，宽终端下显示侧栏（TODO + 文件）。危险命令确认与验证码以模态框弹出。
 
 ## 幽灵补全
 

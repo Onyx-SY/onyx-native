@@ -68,6 +68,8 @@ def build_builtin_registry(ctx: "AppContext") -> Dict[str, Callable]:
     registry["source"] = _lazy("source")
     registry["history"] = _lazy("history")
     registry["refresh"] = _make_refresh(ctx)
+    # 主 REPL 配置入口：无参打开 TUI 配置界面，也支持参数式读写
+    registry["config-onyx-repl"] = _lazy("config-onyx-repl")
 
     ctx.BUILTIN_COMMANDS = registry
     return registry
@@ -88,6 +90,9 @@ def _lazy(name: str) -> Callable:
         elif name == "history":
             from bin.history_cmd import handle_history
             handle_history(cmd_parts, request_id)
+        elif name == "config-onyx-repl":
+            from bin.repl_config import handle_config_repl
+            handle_config_repl(cmd_parts, request_id)
     return wrapper
 
 

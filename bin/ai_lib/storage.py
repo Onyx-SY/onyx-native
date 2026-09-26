@@ -574,6 +574,33 @@ def _cap_text(text: str, limit: int) -> str:
     return text[:limit] + f"\n... (truncated, {len(text)} chars total)"
 
 
+def _tool_status_marker(result: str) -> str:
+    """判定工具调用的 ✅/❌ 标记（library 记录用）。
+
+    注意：不能对整段 result 做 "error"/"失败" 子串匹配 —— edit_file/write_file 的
+    返回里带 original_file（文件原文），原文若含这些词就会被误判为失败（历史日志中
+    有 300+ 条「❌ edit_file」其实编辑成功）。这里优先解析结构化结果，只看 result 字段。
+    """
+    s = (result or "").strip()
+    if not s:
+        return "✅"
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            inner = obj.get("result")
+            if isinstance(inner, str) and inner.strip():
+                s = inner.strip()
+    except Exception:
+        pass
+    head = s[:200]
+    if head.lstrip()[:1] == "❌":
+        return "❌"
+    low = head.lower()
+    if "❌" in head[:4] or "error" in low or "failed" in low or "失败" in head:
+        return "❌"
+    return "✅"
+
+
 # ── 文件操作结果格式化 ──
 
 def _format_tool_results(tool_results: List[Dict]) -> str:
@@ -631,8 +658,7 @@ def _format_tool_results(tool_results: List[Dict]) -> str:
                 extra = f" (search={params.get('old_string')[:60]!r})"
             elif name in ("delete_file", "delete_directory") and params.get("recursive") is not None:
                 extra = f" (recursive={params.get('recursive')})"
-            _ok = "❌" if ("error" in (result or "").lower()
-                           or "失败" in (result or "")) else "✅"
+            _ok = _tool_status_marker(result)
             lines.append(f"#### {_ok} {name} — `{path}`{extra}")
             if result:
                 lines.append(_cap_text(result, _LIB_INFO_MAX_CHARS))

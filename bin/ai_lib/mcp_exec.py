@@ -94,6 +94,68 @@ def _unescape_json_fragment(s: str) -> str:
     return "".join(out)
 
 
+# ── 工具参数别名归一 ──
+# 历史遗留：同类工具的参数名不统一 —— edit_file 用 path/old_string/new_string，
+# 而 validate_edit/preview_edit 曾用 file_path/search/replace；grep_search 与
+# MemorySearch 曾用 "-i"；DirectoryTree 曾用 maxDepth；MemorySearch 曾用 uuid。
+# 模型极易按习惯传错名字 → 取到空值后静默失败（历史日志里已反复出现
+# "❌ File not found: " 与 "❌ SEARCH text is empty"）。
+# 这里统一做别名归一：新旧命名都能工作，歧义不再造成故障。
+_PATH_ALIASES = ("path", "file_path", "target", "filename")
+_OLD_ALIASES = ("old_string", "search", "old_text", "find")
+_NEW_ALIASES = ("new_string", "replace", "new_text", "replacement")
+
+
+def _arg(p: Dict, *names, default=None):
+    """返回第一个「存在且非空」的参数值（用于别名归一）。"""
+    for n in names:
+        if n in (p or {}):
+            v = p.get(n)
+            if v not in (None, ""):
+                return v
+    return default
+
+
+def _strip_wrapping_quotes(s):
+    """剥掉路径两端成对的引号（模型有时把路径写成 "a/b.py"）。"""
+    if not isinstance(s, str) or len(s) < 2:
+        return s
+    if s[0] == s[-1] and s[0] in ("'", '"'):
+        inner = s[1:-1]
+        if inner.strip():
+            return inner
+    return s
+
+
+def _path_arg(p: Dict, default=""):
+    """取路径参数（兼容 path/file_path/target/filename，并剥掉包裹引号）。"""
+    v = _arg(p, *_PATH_ALIASES, default=default)
+    return _strip_wrapping_quotes(v) if isinstance(v, str) else v
+
+
+def _bool_arg(p: Dict, *names, default=False) -> bool:
+    """取布尔参数（兼容字符串 'true'/'1'/'yes' 等写法）。"""
+    v = _arg(p, *names, default=default)
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(v)
+
+
+def _normalize_path_params(params: Dict) -> None:
+    """就地把文件类工具里的路径参数剥掉包裹引号（沙盒解析前调用）。"""
+    if not isinstance(params, dict):
+        return
+    for k in ("path", "file_path", "target", "filename",
+              "source", "destination", "paths"):
+        if k not in params:
+            continue
+        v = params.get(k)
+        if isinstance(v, str):
+            params[k] = _strip_wrapping_quotes(v)
+        elif isinstance(v, list):
+            params[k] = [_strip_wrapping_quotes(x) if isinstance(x, str) else x for x in v]
+
+
 def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
                      user_mode: str = "low", user_home_dir: str = None,
                      path_validator: Callable = None) -> Tuple[bool, str]:
@@ -132,6 +194,7 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
     # 将 AI 视角的虚拟根 / 映射为用户 cwd；../ 逃逸等越界路径直接拒绝。
     if raw_tool in AI_FILE_TOOLS and sandbox.is_active():
         try:
+            _normalize_path_params(params or {})  # 先剥掉包裹引号，再解析虚拟路径
             sandbox.resolve_many(params or {})
         except _SandboxBlockError as _sbe:
             return False, _sbe.message
@@ -139,17 +202,18 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
     # ── 内置分析工具（不经过 MCP，直接 Python 执行）──
     # 用剥离后的 raw_tool 匹配
     _BUILTIN_HANDLERS = {
-        # ── 文件操作 ──
-        "validate_edit": lambda p: _exec_validate_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
-        "preview_edit": lambda p: _exec_preview_edit(p.get("file_path", ""), p.get("search", ""), p.get("replace", "")),
-        "get_file_info": lambda p: _exec_get_file_info(p.get("path", "")),
-        "read_file":    lambda p: _exec_read_file(p.get("path", ""), p.get("range", None), p.get("head", None), p.get("tail", None)),
-        "write_file":   lambda p: _exec_write_file(p.get("path", ""), p.get("content", "")),
-        "edit_file":    lambda p: _exec_edit_file(p.get("path", ""), p.get("old_string", ""), p.get("new_string", "")),
-        "glob_search":  lambda p: _exec_glob_search(p.get("pattern", ""), p.get("path", None)),
-        "grep_search":  lambda p: _exec_grep_search(p.get("pattern", ""), p.get("path", None), p.get("glob", None),
-                                                     p.get("context", 0), p.get("-i", False), p.get("head_limit", None)),
-        "search_file":  lambda p: _exec_search_file(p.get("pattern", ""), p.get("path", None)),
+        # ── 文件操作 ──（参数别名归一：path|file_path、old_string|search、new_string|replace）
+        "validate_edit": lambda p: _exec_validate_edit(_path_arg(p), _arg(p, *_OLD_ALIASES, default=""), _arg(p, *_NEW_ALIASES, default="")),
+        "preview_edit": lambda p: _exec_preview_edit(_path_arg(p), _arg(p, *_OLD_ALIASES, default=""), _arg(p, *_NEW_ALIASES, default="")),
+        "get_file_info": lambda p: _exec_get_file_info(_path_arg(p)),
+        "read_file":    lambda p: _exec_read_file(_path_arg(p), p.get("range", None), p.get("head", None), p.get("tail", None)),
+        "write_file":   lambda p: _exec_write_file(_path_arg(p), _arg(p, "content", "text", default="")),
+        "edit_file":    lambda p: _exec_edit_file(_path_arg(p), _arg(p, *_OLD_ALIASES, default=""), _arg(p, *_NEW_ALIASES, default=""),
+                                                  _bool_arg(p, "replace_all")),
+        "glob_search":  lambda p: _exec_glob_search(p.get("pattern", ""), _path_arg(p, None)),
+        "grep_search":  lambda p: _exec_grep_search(p.get("pattern", ""), _path_arg(p, None), p.get("glob", None),
+                                                     p.get("context", 0), _bool_arg(p, "ignore_case", "-i"), p.get("head_limit", None)),
+        "search_file":  lambda p: _exec_search_file(p.get("pattern", ""), _path_arg(p, None)),
         # ── 搜索与发现 ──
         "ToolSearch":   lambda p: _exec_tool_search(p.get("query", "")),
         "EnvProbe":     lambda p: _exec_env_probe(p.get("type", ""), p.get("which", "")),
@@ -234,13 +298,13 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         # ── 记忆查询 ──
         "MemoryRead":     lambda p: _exec_memory_read(p.get("path", ""), p.get("range")),
         "MemorySearch":   lambda p: _exec_memory_search(
-            p.get("pattern", ""), p.get("uuid", "all"), int(p.get("context", 3)),
-            p.get("-i", True), p.get("scope", "all")),
+            p.get("pattern", ""), _arg(p, "session_id", "uuid", default="all"), int(p.get("context", 3)),
+            _bool_arg(p, "ignore_case", "-i", default=True), p.get("scope", "all")),
         "UndoLastEdit":   lambda p: _exec_undo_last_edit(),
 
         # ── 目录浏览工具 ──
         "ListDirectory": lambda p: _exec_list_directory(p.get("path", "")),
-        "DirectoryTree":  lambda p: _exec_directory_tree(p.get("path", ""), int(p.get("maxDepth", 2))),
+        "DirectoryTree":  lambda p: _exec_directory_tree(_path_arg(p), int(_arg(p, "max_depth", "maxDepth", default=2))),
 
         # ── Git 工具 ──
         "GitStatus":  lambda p: _exec_git_status(p.get("path", "")),

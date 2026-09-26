@@ -1,7 +1,7 @@
 {
   "program_info": {
     "name": "Onyx-Native",
-    "version": "2.9.5",
+    "version": "2.10.1.b1",
     "author": "脉动大羊",
     "tool_main_dir_name": "tools"
   },
@@ -21,7 +21,7 @@
       "pure": "{BLUE}{relative_path}{RESET} {YELLOW}{venv_git}{RESET} {exit_mark}\n{permission} "
     },
     "language": {
-      "default": "English",
+      "default": "Chinese",
       "support": [
         "Chinese",
         "English"

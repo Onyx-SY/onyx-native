@@ -1,0 +1,27 @@
+.........F...✅ MCP server 'filesystem' 已连接
+...F.
+======================================================================
+FAIL: test_no_server (__main__.TestLspExecutors.test_no_server)
+无对应语言服务器时给出双语提示
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/storage/emulated/0/abPython/PythonProject/工具/Hacker--V1.00.1/src/Hacker/onyx-test/home/u0_a305/onyx/onyx/test/virtual/test_lsp_auxiliary.py", line 167, in test_no_server
+    self.assertIn("language server", out)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'language server' not found in '⚠️ 未找到 /x.rs 对应的语言服务器'
+
+======================================================================
+FAIL: test_memory_search_uses_uuid_param (__main__.TestLspToolSurface.test_memory_search_uses_uuid_param)
+MemorySearch 参数是 uuid（真实 UUID 或 all），不再是 path
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/storage/emulated/0/abPython/PythonProject/工具/Hacker--V1.00.1/src/Hacker/onyx-test/home/u0_a305/onyx/onyx/test/virtual/test_lsp_auxiliary.py", line 92, in test_memory_search_uses_uuid_param
+    self.assertIn("uuid", props)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+AssertionError: 'uuid' not found in {'pattern': {'type': 'string', 'description': '搜索关键字或正则'}, 'session_id': {'type': 'string', 'description': "目标会话 UUID，或 'all' 表示全范围查找（默认 all；旧名 uuid 仍兼容）"}, 'context': {'type': 'integer', 'description': '可选上下文行数，默认 3'}, 'ignore_case': {'type': 'boolean', 'description': '可选忽略大小写，默认 true（旧名 -i 仍兼容）'}, 'scope': {'type': 'string', 'description': '可选搜索范围：all(默认, library+chat+onyx_ai) / library / chat'}}
+
+----------------------------------------------------------------------
+Ran 18 tests in 2.016s
+
+FAILED (failures=2)
+Aborted

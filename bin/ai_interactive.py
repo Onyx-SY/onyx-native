@@ -24,13 +24,27 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.key_binding.defaults import load_key_bindings
 from prompt_toolkit.styles import Style as PromptStyle
-from prompt_toolkit.filters import is_searching
+from prompt_toolkit.filters import Condition, is_searching
+from prompt_toolkit.application.current import get_app
 
 from rich.console import Console
 from rich.panel import Panel
 
 
 console = Console()
+
+
+@Condition
+def _buffer_empty() -> bool:
+    """当前输入缓冲区是否为空。
+
+    注：prompt_toolkit 的 basic 绑定里有个同名语义的 has_text_before_cursor，
+    但它只是 basic.py 内部的局部函数、并非公开导出，无法 import —— 故此处自建。
+    """
+    try:
+        return not bool(get_app().current_buffer.text)
+    except Exception:
+        return False
 
 
 def _markdown(text, **kw):
@@ -137,6 +151,7 @@ _HELP_TEXT_CN = """\
 - 按 `Esc` 直接停止（退出 AI 对话）
 - 按 `Ctrl+C` 打断当前工具/命令执行（AI 会继续处理）
 - 按 `Enter` 发送；按 `Alt+Enter` 进入多行模式（多行模式下 `Enter` 换行暂存、不会发送，再次按 `Alt+Enter` 统一发送）
+- 输入 `/` 立即弹出命令列表（无需手动 Tab）；`→` 直接接受灰色虚影补全
 - 支持常规命令行编辑：方向键 / `Ctrl+A` `Ctrl+E` / `Ctrl+U` `Ctrl+K` / `Tab` 补全 / `Ctrl+R` 搜索历史
 - 输入 `/exit` 返回正常 shell
 """
@@ -153,6 +168,7 @@ Type your question directly to chat with AI. Context is maintained within the se
 - Press `Esc` to stop immediately (exit AI chat)
 - Press `Ctrl+C` to interrupt the current tool/command (AI continues)
 - Press `Enter` to send; press `Alt+Enter` to enter multiline mode (then `Enter` inserts a newline without sending; press `Alt+Enter` again to send all lines at once)
+- Typing `/` immediately opens the command list (no Tab needed); `→` accepts the grey ghost completion
 - Full command-line editing: arrows / `Ctrl+A` `Ctrl+E` / `Ctrl+U` `Ctrl+K` / `Tab` completion / `Ctrl+R` history search
 - Type `/exit` to return to shell
 """
@@ -211,8 +227,12 @@ def _current_word(text: str) -> str:
     return text[i:]
 
 
-def _iter_path_completions(word: str):
-    """文件系统路径补全：目录追加 '/'，隐藏项仅在前缀为 '.' 时给出；空词 → 列出当前目录。"""
+# 参数位置需要路径补全的斜杠命令
+_PATH_ARG_CMDS = ("/cd", "/resume", "/save", "/export")
+
+
+def _path_candidates(word: str):
+    """路径候选：[(插入文本, 描述, 需替换掉末尾的字符数)]。目录追加 '/'。"""
     expanded = os.path.expanduser(word) if word.startswith("~") else word
     if expanded.endswith(os.sep) or expanded.endswith("/"):
         search_dir, base = expanded, ""
@@ -223,34 +243,88 @@ def _iter_path_completions(word: str):
     try:
         entries = os.listdir(search_dir)
     except OSError:
-        return
-    # 回写前缀：把展开后的目录部分映射回用户原始输入形式（保留 ~ 写法）
-    if word.endswith("/"):
-        pass
+        return []
     show_hidden = base.startswith(".")
+    out = []
     for name in sorted(entries):
         if not show_hidden and name.startswith("."):
             continue
         if not name.startswith(base):
             continue
-        full = os.path.join(search_dir, name)
-        is_dir = os.path.isdir(full)
-        yield Completion(
-            name + ("/" if is_dir else ""),
-            start_position=-len(base),
-            display=name + ("/" if is_dir else ""),
-            display_meta="dir" if is_dir else "",
-        )
+        is_dir = os.path.isdir(os.path.join(search_dir, name))
+        out.append((name + ("/" if is_dir else ""), "dir" if is_dir else "", len(base)))
+    return out
+
+
+def _iter_path_completions(word: str):
+    """文件系统路径补全（prompt_toolkit 用）。"""
+    for value, meta, replace_len in _path_candidates(word):
+        yield Completion(value, start_position=-replace_len, display=value, display_meta=meta)
+
+
+def completion_candidates(text: str, lang: str = "chinese", slash_cmds=None):
+    """补全候选（AI REPL 补全器与 TUI 下拉菜单共用，单一来源避免两边漂移）。
+
+    Args:
+        text: 光标前的整段输入
+        lang: chinese | english（决定斜杠命令描述用哪份表）
+        slash_cmds: 可选的命令表覆盖（默认按 lang 取 _SLASH_COMMANDS_*）
+
+    Returns:
+        [(插入文本, 描述, 需替换掉末尾的字符数)]；TUI 侧按
+        `text[:-replace_len] + 插入文本` 得到补全后的整行。
+    """
+    cmds = slash_cmds
+    if cmds is None:
+        cmds = _SLASH_COMMANDS_EN if lang == "english" else _SLASH_COMMANDS_CN
+    stripped = text.lstrip()
+    word = _current_word(text)
+
+    # 1) 斜杠命令头补全（尚未输入空格时，大小写不敏感）
+    if stripped.startswith("/") and " " not in stripped:
+        low = stripped.lower()
+        # 完全匹配时不再给候选（补全菜单该收起；虚影同理）
+        return [(cmd, desc, len(word)) for cmd, desc in cmds.items()
+                if cmd.lower().startswith(low) and cmd.lower() != low]
+
+    # 2) 斜杠命令的参数位置（/cd <path>、/lang cn|en …）
+    if stripped.startswith("/") and " " in stripped:
+        parts = stripped.split()
+        head = parts[0].lower()
+        ends_space = stripped[-1].isspace()
+        arg_idx = len(parts) if ends_space else len(parts) - 1
+        low = word.lower()
+
+        # 2a) 固定枚举参数
+        if head in _SLASH_ARG_ENUMS:
+            if arg_idx == 1:
+                cands = _SLASH_ARG_ENUMS[head]
+            elif arg_idx == 2:
+                cands = _SLASH_ARG2_ENUMS.get((head, parts[1].lower()), [])
+            else:
+                cands = []
+            return [(v, "", len(word)) for v in cands if v.lower().startswith(low)]
+
+        # 2b) /help <命令> → 补全命令名
+        if head == "/help":
+            return [(cmd, "", len(word)) for cmd in cmds if cmd.lower().startswith(low)]
+
+        # 2c) 路径参数
+        if head in _PATH_ARG_CMDS:
+            return _path_candidates(word)
+        return []
+
+    # 3) 普通输入：词看起来像路径才补
+    if word and (word.startswith(("~", ".", "/")) or "/" in word):
+        return _path_candidates(word)
+    return []
 
 
 class _AICompleter(Completer):
     """AI REPL 复合补全器：`/` 开头补斜杠命令，否则补文件系统路径。
 
-    对齐 lib/terminal 的 SmartCompleter 效果（命令 + 路径统一补全、带 meta 描述）。
+    候选逻辑在 completion_candidates()（与 TUI 下拉菜单共用）。
     """
-
-    # 参数位置需要路径补全的斜杠命令
-    _PATH_ARG_CMDS = ("/cd", "/resume", "/save", "/export")
 
     def __init__(self, slash_cmds: Dict[str, str], lang: str = "chinese"):
         self._slash = slash_cmds
@@ -258,54 +332,8 @@ class _AICompleter(Completer):
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
-        stripped = text.lstrip()
-        word = _current_word(text)
-
-        # 1) 斜杠命令头补全（尚未输入空格时，大小写不敏感）
-        if stripped.startswith("/") and " " not in stripped:
-            low = stripped.lower()
-            for cmd, desc in self._slash.items():
-                if cmd.lower().startswith(low):
-                    yield Completion(cmd, start_position=-len(word),
-                                     display=cmd, display_meta=desc)
-            return
-
-        # 2) 斜杠命令的参数位置（如 /cd <path>、/lang cn|en）→ 路径 / 枚举补全
-        if stripped.startswith("/") and " " in stripped:
-            parts = stripped.split()
-            head = parts[0].lower()
-            ends_space = stripped[-1].isspace()
-            arg_idx = len(parts) if ends_space else len(parts) - 1
-            low = word.lower()
-
-            # 2a) 固定枚举参数（/lang cn|en、/mode normal|plan、/param <名称> <值> …）
-            if head in _SLASH_ARG_ENUMS:
-                if arg_idx == 1:
-                    cands = _SLASH_ARG_ENUMS[head]
-                elif arg_idx == 2:
-                    cands = _SLASH_ARG2_ENUMS.get((head, parts[1].lower()), [])
-                else:
-                    cands = []
-                for val in cands:
-                    if val.lower().startswith(low):
-                        yield Completion(val, start_position=-len(word), display=val)
-                return
-
-            # 2b) /help <命令> → 补全斜杠命令名
-            if head == "/help":
-                for cmd in self._slash:
-                    if cmd.lower().startswith(low):
-                        yield Completion(cmd, start_position=-len(word), display=cmd)
-                return
-
-            # 2c) 路径参数（/cd <路径>）
-            if head in self._PATH_ARG_CMDS:
-                yield from _iter_path_completions(word)
-            return
-
-        # 3) 普通输入：词看起来像路径才补（对齐 shell 的路径补全）
-        if word and (word.startswith(("~", ".", "/")) or "/" in word):
-            yield from _iter_path_completions(word)
+        for value, meta, replace_len in completion_candidates(text, self._lang, self._slash):
+            yield Completion(value, start_position=-replace_len, display=value, display_meta=meta)
 
 
 def _make_ai_prompt() -> str:
@@ -330,15 +358,12 @@ def _save_conf(conf: dict, ctx: Dict[str, Any]) -> None:
     # 改变会话传入 home，导致写/读分裂、改动不生效）
     from bin.ai_lib import config as _cfg
     key_conf_path = _cfg.KEY_CONF_PATH
-    os.makedirs(os.path.dirname(key_conf_path), exist_ok=True)
-    # 混淆 api_key 后再写入
+    # 混淆 api_key 后再写入（先 strip，再混淆；原子写 + 0600 权限）
     write_conf = dict(conf)
     if "api_key" in write_conf and isinstance(write_conf["api_key"], str):
         from bin.ai_cmd import _obfuscate as _obs
-        write_conf["api_key"] = _obs(write_conf["api_key"])
-    with open(key_conf_path, "w", encoding="utf-8") as f:
-        _json.dump(write_conf, f, ensure_ascii=False, indent=2)
-    os.chmod(key_conf_path, 0o600)
+        write_conf["api_key"] = _obs(write_conf["api_key"].strip())
+    _cfg._atomic_write_json(key_conf_path, write_conf, mode=0o600)
 
 
 # ─────────────────────────────── 记忆模式（global / project） ───────────────────────────────
@@ -584,7 +609,8 @@ def _show_cost(ctx: Dict[str, Any]) -> None:
                 f"  记录条数:   {len(data)}\n"
                 f"{_price_line}"
             )
-            console.print(Panel(body, title="💰 成本统计", border_style="green"))
+            from bin.ai_lib.ui import tui_plain as _tui_plain
+            console.print(_tui_plain(body, title="💰 成本统计", border_style="green"))
         else:
             body = (
                 f"  Today:      ${today_cost:.4f}\n"
@@ -593,7 +619,7 @@ def _show_cost(ctx: Dict[str, Any]) -> None:
                 f"  Records:    {len(data)}\n"
                 f"{_price_line}"
             )
-            console.print(Panel(body, title="💰 Cost Stats", border_style="green"))
+            console.print(_tui_plain(body, title="💰 Cost Stats", border_style="green"))
     except Exception as e:
         console.print(f"[red]cost error: {e}[/]" if ctx.get("lang", "chinese") == "english" else f"[red]费用统计错误: {e}[/]")
 
@@ -618,55 +644,62 @@ def _run_doctor(ctx: Dict[str, Any]) -> None:
         conf = load_key_conf()
         if conf and conf.get("api_key"):
             plat = conf.get("platform", "?")
-            model = conf.get("model", "未设置")
+            model = conf.get("model") or _t("unset", lang)
             proto = _resolve_protocol(plat, model)
-            _item(True, "AI 密钥", f"平台={plat} 模型={model} 协议={proto}")
+            _item(True, _t("doctor_item_key", lang),
+                  _t("doctor_key_info", lang, plat=plat, model=model, proto=proto))
         else:
-            _item(False, "AI 密钥", "未配置（运行 ai 命令引导配置）")
+            _item(False, _t("doctor_item_key", lang), _t("doctor_key_unconfigured", lang))
     except Exception as e:
-        _item(False, "AI 密钥", f"读取失败: {e}")
+        _item(False, _t("doctor_item_key", lang), _t("doctor_key_read_fail", lang, err=e))
 
     try:
         from bin.ai_cmd import _SUPPORTED_PLATFORMS
-        _item(True, "平台模型", f"已加载 {len(_SUPPORTED_PLATFORMS)} 个平台")
+        _item(True, _t("doctor_item_platform", lang),
+              _t("doctor_platforms_loaded", lang, n=len(_SUPPORTED_PLATFORMS)))
     except Exception:
-        _item(False, "平台模型", "models.json 加载失败")
+        _item(False, _t("doctor_item_platform", lang), _t("doctor_models_load_fail", lang))
 
     try:
         from bin.ai_cmd import list_mcp_servers
         mcp_text = str(list_mcp_servers())
-        _item("error" not in mcp_text.lower(), "MCP 服务器", mcp_text[:60])
+        _item("error" not in mcp_text.lower(), _t("doctor_item_mcp", lang), mcp_text[:60])
     except Exception:
-        _item(False, "MCP 服务器", "模块异常")
+        _item(False, _t("doctor_item_mcp", lang), _t("doctor_module_error", lang))
 
     try:
         mem_root = _memory_base_dir(home, ctx.get("memory_mode", "global"), ctx.get("cwd"))
         lib_dir = os.path.join(mem_root, ".ai_s", "library")
         if os.path.isdir(lib_dir):
             count = len([f for f in os.listdir(lib_dir) if f.endswith(".txt")])
-            _item(True, "记忆目录", f"{mem_root}（{count} 条记录）")
+            _item(True, _t("doctor_item_memory", lang),
+                  _t("doctor_memory_records", lang, path=mem_root, n=count))
         else:
-            _item(True, "记忆目录", f"{mem_root}（尚未创建记录）")
+            _item(True, _t("doctor_item_memory", lang),
+                  _t("doctor_memory_empty", lang, path=mem_root))
     except Exception as e:
-        _item(False, "记忆目录", str(e))
+        _item(False, _t("doctor_item_memory", lang), str(e))
 
     try:
         from bin.ai_cmd import ROOT_DIR
         tools_dir = os.path.join(ROOT_DIR, "tools")
         if os.path.isdir(tools_dir):
             n = len([d for d in os.listdir(tools_dir) if os.path.isdir(os.path.join(tools_dir, d))])
-            _item(True, "工具目录", f"{n} 个工具")
+            _item(True, _t("doctor_item_tools", lang), _t("doctor_tools_count", lang, n=n))
         else:
-            _item(True, "工具目录", "tools/ 不存在（TBS 模式）")
+            _item(True, _t("doctor_item_tools", lang), _t("doctor_tools_missing", lang))
     except Exception:
-        _item(False, "工具目录", "无法读取")
+        _item(False, _t("doctor_item_tools", lang), _t("doctor_unreadable", lang))
 
-    _item(True, "运行环境", f"cwd={ctx.get('cwd', os.getcwd())}")
-    _item(True, "记忆模式", "project（当前目录专属）" if ctx.get("memory_mode") == "project" else "global（全局 library）")
-    _item(True, "语言", lang)
+    _item(True, _t("doctor_item_runtime", lang), f"cwd={ctx.get('cwd', os.getcwd())}")
+    _item(True, _t("doctor_item_memmode", lang),
+          _t("doctor_memmode_project", lang) if ctx.get("memory_mode") == "project"
+          else _t("doctor_memmode_global", lang))
+    _item(True, _t("doctor_item_lang", lang), lang)
 
     title = "🔧 Onyx 健康检查" if lang == "chinese" else "🔧 Onyx Doctor"
-    console.print(Panel("\n".join(lines), title=title, border_style="cyan"))
+    from bin.ai_lib.ui import tui_plain as _tui_plain
+    console.print(_tui_plain("\n".join(lines), title=title, border_style="cyan"))
 
 
 # ─────────────────────────────── 参数编辑辅助 ───────────────────────────────
@@ -702,6 +735,83 @@ def _edit_params_interactive(conf: dict, lang: str) -> dict:
 
 
 # ─────────────────────────────── Slash 指令分发 ───────────────────────────────
+
+def _keymap_menu(lang: str, ctx: dict) -> None:
+    """⌨️ AI 按键设置：列出全部 AI 动作的当前键，可逐个改键 / 恢复默认。
+
+    TUI 下由 ui.capture_key 弹「按键捕获」框（按哪个键就是哪个键）；
+    对话模式（非 TUI）下改为文本输入（如 alt+enter），由 keymap 校验。
+    """
+    from bin.ai_lib import keymap as km
+    from bin.ai_lib.ui import select_option, capture_key
+
+    km.init(ctx.get("user_home_dir") or "")
+
+    while True:
+        opts, ids = [], []
+        for gid in km.GROUP_ORDER:
+            glabel = km.GROUP_LABELS[gid][1 if lang == "english" else 0]
+            for aid, g, _cn, _en, _d in km.ACTIONS:
+                if g != gid:
+                    continue
+                mark = " *" if km.is_customized(aid) else ""
+                opts.append(f"[{glabel}] {km.label(aid, lang)}  →  {km.pretty(aid)}{mark}")
+                ids.append(aid)
+        opts.append("♻️ 恢复全部默认" if lang == "chinese" else "♻️ Reset all")
+        ids.append("__reset_all__")
+        opts.append("❌ 关闭" if lang == "chinese" else "❌ Close")
+        ids.append("__close__")
+
+        choice = select_option(
+            "选择要修改的动作（* = 已自定义）:" if lang == "chinese"
+            else "Pick an action to rebind (* = customized):",
+            opts, default=opts[0], lang=lang)
+        if not choice or choice not in opts:
+            return
+        aid = ids[opts.index(choice)]
+        if aid == "__close__":
+            return
+        if aid == "__reset_all__":
+            km.reset_all()
+            console.print("[green]" + ("✅ 已恢复全部默认按键" if lang == "chinese"
+                                       else "✅ All bindings reset to default") + "[/]")
+            continue
+
+        cur = km.pretty(aid)
+        act_opts = ([f"⌨️ 改键（当前：{cur}）", "♻️ 恢复该动作默认", "↩️ 返回"]
+                    if lang == "chinese"
+                    else [f"⌨️ Rebind (now: {cur})", "♻️ Reset this action", "↩️ Back"])
+        act = select_option(km.label(aid, lang), act_opts, default=act_opts[0], lang=lang)
+        if not act or act == act_opts[2]:
+            continue
+        if act == act_opts[1]:
+            km.reset(aid)
+            console.print("[green]" + ("✅ 已恢复默认" if lang == "chinese"
+                                       else "✅ Reset to default") + "[/]")
+            continue
+
+        newkey = capture_key(
+            "按下要绑定的按键（TUI 直接按键；对话模式请输入如 alt+enter）:"
+            if lang == "chinese" else
+            "Press the key to bind (TUI: press it; chat mode: type e.g. alt+enter):",
+            lang=lang)
+        if not newkey:
+            console.print("[dim]" + ("已取消" if lang == "chinese" else "cancelled") + "[/]")
+            continue
+        ok, _err = km.set_binding(aid, [newkey])
+        if ok:
+            console.print("[green]" + (
+                f"✅ 已绑定 {km.label(aid, lang)} → {newkey}" if lang == "chinese"
+                else f"✅ Bound {km.label(aid, lang)} → {newkey}") + "[/]")
+            console.print("[dim]" + (
+                "（TUI 主界面键位重启 AI 后生效；多行框/补全键下次进入即生效）"
+                if lang == "chinese" else
+                "(TUI main-screen keys apply after restarting AI)") + "[/]")
+        else:
+            console.print("[red]" + (
+                f"❌ 无效按键：{newkey}" if lang == "chinese"
+                else f"❌ Invalid key: {newkey}") + "[/]")
+
 
 def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
     """
@@ -800,10 +910,12 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
         if conf:
             plat = conf.get("platform", "?")
             key = conf.get("api_key", "")
-            masked = key[:4] + "*" * 24 + key[-4:] if len(key) > 28 else "***"
+            from bin.ai_lib.config import mask_api_key as _mask_key
+            masked = _mask_key(key)
             console.print((f"  平台: {plat}  Key: {masked}" if lang == "chinese" else f"  Platform: {plat}  Key: {masked}"), style="dim")
-        choice = input(_t("change_key", lang)).strip().lower()
-        if choice == "y":
+        # 经 ui 适配器取输入：TUI 下弹模态框（裸 input() 在 worker 线程会抢 stdin 卡死）
+        from bin.ai_lib.ui import confirm as _ui_confirm
+        if _ui_confirm(_t("change_key", lang), default=False, lang=lang):
             _setup_key_conf_interactive(lang)
         return True
 
@@ -849,7 +961,8 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
 
         # ── 选择新模型 ──
         try:
-            choice = input(_t("model_select_prompt", lang)).strip()
+            from bin.ai_lib.ui import text_input as _ui_text_input
+            choice = _ui_text_input(_t("model_select_prompt", lang), "", lang=lang).strip()
             if not choice:
                 console.print(f"[dim]{_t('model_cancelled', lang)}[/]")
                 return True
@@ -862,7 +975,8 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
 
                 # ── 询问是否编辑参数 ──
                 try:
-                    if input(_t("edit_params_prompt", lang)).strip().lower() == "y":
+                    from bin.ai_lib.ui import confirm as _ui_confirm
+                    if _ui_confirm(_t("edit_params_prompt", lang), default=False, lang=lang):
                         conf["params"] = _edit_params_interactive(conf, lang)
                         _save_conf(conf, ctx)
                         console.print(_t("config_ok_params", lang))
@@ -921,7 +1035,8 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             params = conf.get("params", {})
             api_url = conf.get("api_url", "")
 
-            masked_key = api_key[:4] + "*" * 24 + api_key[-4:] if len(api_key) > 28 else "***"
+            from bin.ai_lib.config import mask_api_key as _mask_key
+            masked_key = _mask_key(api_key)
             unset_label = _t("unset", lang)
             default_label = _t("default", lang)
             param_items = ", ".join(f"{k}={v}" for k, v in sorted(params.items())) or default_label
@@ -940,10 +1055,10 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             # ── 菜单 ──
             if lang == "chinese":
                 opts = ["🔄 切换平台", "🤖 切换模型", "🔑 更换密钥",
-                        "⚙️ 编辑参数", "🌐 自定义 URL", "❌ 关闭"]
+                        "⚙️ 编辑参数", "🌐 自定义 URL", "⌨️ 按键设置", "❌ 关闭"]
             else:
                 opts = ["🔄 Change platform", "🤖 Change model", "🔑 Change key",
-                        "⚙️ Edit params", "🌐 Custom URL", "❌ Close"]
+                        "⚙️ Edit params", "🌐 Custom URL", "⌨️ Key bindings", "❌ Close"]
             choice = select_option(
                 "选择操作:" if lang == "chinese" else "Action:",
                 opts, default=opts[0], lang=lang
@@ -1022,11 +1137,19 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
 
             # ── 更换密钥 ──
             elif idx == 2:
-                new_key = text_input(
+                from bin.ai_lib.config import _valid_api_key as _vkey
+                from bin.ai_lib.ui import secret_input as _secret_in
+                new_key = _secret_in(
                     "请输入新的 API Key:" if lang == "chinese" else "Enter new API Key:",
                     "", lang=lang
-                )
-                if new_key:
+                ).strip()
+                if new_key and not _vkey(new_key):
+                    console.print(
+                        "❌ 密钥格式无效：不能为空、长度需 ≥ 8、且不含空格或换行。" if lang == "chinese"
+                        else "❌ Invalid key: must be non-empty, ≥ 8 chars, no spaces/newlines.",
+                        style="bold red",
+                    )
+                elif new_key:
                     conf["api_key"] = new_key
                     _save_conf(conf, ctx)
                     _ok = "✅ Key updated" if lang == "english" else "✅ 密钥已更新"
@@ -1049,6 +1172,10 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
                     _save_conf(conf, ctx)
                     _ok = "✅ API URL updated" if lang == "english" else "✅ API 地址已更新"
                     console.print(f"[green]{_ok}[/]")
+
+            # ── ⌨️ 按键设置 ──
+            elif idx == 5:
+                _keymap_menu(lang, ctx)
 
         return True
 
@@ -1219,7 +1346,7 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
                 with open(src, "r", encoding="utf-8") as f:
                     content = f.read()
                 with open(dst, "w", encoding="utf-8") as f:
-                    f.write(f"# AI 对话导出\n\n{content}")
+                    f.write(f"# {'AI 对话导出' if lang == 'chinese' else 'AI Conversation Export'}\n\n{content}")
                 console.print(f"[green]{_t('export_ok', lang).format(dst)}[/]")
             except Exception as e:
                 console.print(f"[red]{_t('export_fail', lang).format(e)}[/]")
@@ -1534,6 +1661,26 @@ def ai_interactive_session(
     # merge 默认绑定（保留全部 readline 编辑功能：方向键/Ctrl+A/E/U/K/Tab/Ctrl+R）
     _kb = KeyBindings()
 
+    # ── 键位来自 keymap 注册表（用户可在 /config → ⌨️ 按键设置 里改）──
+    try:
+        from bin.ai_lib import keymap as _km
+        _km.init(user_home_dir)
+    except Exception:
+        _km = None
+
+    def _add_binding(action_id, handler, **kw):
+        """把 handler 绑到注册表里该动作的全部键上（支持一键多义与多键序列）。"""
+        if _km is None:
+            return
+        for _combo in _km.combos(action_id):
+            _keys = _km.to_ptk(_combo)
+            if not _keys:
+                continue
+            try:
+                _kb.add(*_keys, **kw)(handler)
+            except Exception:
+                continue
+
     # ── 多行模式状态 ──
     # 普通模式：Enter 提交发送；Alt+Enter 进入多行模式（提示符前缀变为 [多行]）。
     # 多行模式：Enter 只插入换行（暂存、不发送）；再次 Alt+Enter 统一发送并退出多行模式。
@@ -1546,8 +1693,6 @@ def ai_interactive_session(
     # filter=~is_searching：Ctrl+R 搜索时 Enter 应接受搜索（默认 accept_search 绑定），
     # 让位给默认绑定。补全菜单状态由 _submit 自己处理（先应用选中项再提交），否则
     # prompt_toolkit 默认（无 Enter 接受补全的绑定）会让 Enter 落回 multiline 换行。
-    @_kb.add('enter', eager=True, filter=~is_searching)
-    @_kb.add('c-j', eager=True, filter=~is_searching)
     def _submit(event):
         """Enter：普通模式提交发送；多行模式插入换行（暂存，不发送给 AI）"""
         b = event.current_buffer
@@ -1559,8 +1704,8 @@ def ai_interactive_session(
             b.apply_completion(b.complete_state.current_completion)
         event.current_buffer.validate_and_handle()
 
-    @_kb.add('escape', 'enter', eager=True, filter=~is_searching)
-    @_kb.add('escape', 'c-j', eager=True, filter=~is_searching)
+    _add_binding("repl.submit", _submit, eager=True, filter=~is_searching)
+
     def _newline(event):
         """Alt+Enter：普通模式 → 进入多行模式；多行模式 → 统一发送并退出多行模式。
 
@@ -1579,13 +1724,14 @@ def ai_interactive_session(
             _ml_state["active"] = True
             b.insert_text('\n')
 
+    _add_binding("repl.newline", _newline, eager=True, filter=~is_searching)
+
     # ── Tab 补全：对齐 lib/terminal/kb.py（completion_next / completion_prev）──
     # prompt_toolkit 默认 Tab 绑定会 insert_common_part：多个候选共享前缀时只补出
     # "ex" 这类残缺结果（如输入 /e → 补成 /ex，而不是完整的 /exit）。这里改为与
     # shell REPL 一致：菜单未开则打开菜单且不插入公共前缀；菜单已开则选中/循环下一项，
     # 一次 Tab 即补全到完整命令。同时清除幽灵建议（AutoSuggestFromHistory 虚影），
     # 避免虚影与补全叠加导致文本损坏。
-    @_kb.add('c-i', eager=True, filter=~is_searching)
     def _complete_next(event):
         b = event.current_buffer
         b.suggestion = None
@@ -1594,7 +1740,8 @@ def ai_interactive_session(
         else:
             b.start_completion(select_first=False)
 
-    @_kb.add('s-tab', eager=True, filter=~is_searching)
+    _add_binding("repl.complete", _complete_next, eager=True, filter=~is_searching)
+
     def _complete_prev(event):
         b = event.current_buffer
         b.suggestion = None
@@ -1603,13 +1750,43 @@ def ai_interactive_session(
         else:
             b.start_completion(select_first=False)
 
-    @_kb.add('c-c', eager=True, filter=~is_searching)
+    _add_binding("repl.complete_prev", _complete_prev, eager=True, filter=~is_searching)
+
+    # ── →（右方向键）：有虚影直接接受（对齐 lib/terminal/kb.py）──
+    # 注：prompt_toolkit 自带的 load_auto_suggest_bindings() 也把 right 绑成「接受建议」，
+    # 但它排在 load_key_bindings()（emacs 的 cursor-right）之前，而 key_processor 命中的是
+    # 匹配列表的最后一个 → 实际生效的一直是光标右移，虚影永远吃不到。_kb 排在 merge 最后，
+    # 这里显式绑定即可覆盖。
+    @_kb.add('right', filter=~is_searching)
+    def _accept_ghost(event):
+        """→：光标在末尾且有虚影 → 直接接受；否则右移一格。"""
+        b = event.current_buffer
+        sug = b.suggestion
+        if sug is not None and sug.text and b.document.is_cursor_at_the_end:
+            b.suggestion = None
+            b.insert_text(sug.text)
+        else:
+            b.cursor_position = min(len(b.text), b.cursor_position + 1)
+
+    # ── 输入 `/` 立刻弹出斜杠命令列表（不必手动按 Tab）──
+    @_kb.add('/', eager=True, filter=~is_searching)
+    def _slash_menu(event):
+        """输入 `/`：插入字符并立即打开补全菜单（后续字符实时过滤）。"""
+        b = event.current_buffer
+        b.insert_text('/')
+        b.suggestion = None
+        b.start_completion(select_first=False)
+
     def _cancel(event):
         """Ctrl+C：清空当前输入行并退出多行模式（不退出 REPL；AI 运行中的 Ctrl+C
         由信号层处理，用于打断工具执行而不是停止 AI 闭环）"""
         _ml_state["active"] = False
         event.current_buffer.reset()
 
+    _add_binding("repl.cancel", _cancel, eager=True, filter=~is_searching)
+
+    # 注：ESC（单独按）退出对话、`/` 弹命令菜单、`right` 接受虚影属于结构性按键，
+    #     不进注册表（改了会破坏 readline/菜单语义）。
     @_kb.add('escape', filter=~is_searching)
     def _esc_exit(event):
         """ESC：直接停止（退出 AI 对话）。
@@ -1620,6 +1797,16 @@ def ai_interactive_session(
         """
         event.app.exit(exception=EOFError)
 
+    # Ctrl+D：缓冲区为空时退出（EOF）。必须显式补：merge 进 _key_bindings 的
+    # load_key_bindings()（basic）把 c-d 绑成了空操作，且排在 PromptSession 自带的
+    # c-d=EOF 绑定之后 → 空行 Ctrl+D 被空操作吞掉、永不触发 EOFError。此处 _kb 排在
+    # merge 最后，带"无前置文本"过滤即可覆盖；有内容时仍走 basic 的 delete-char。
+    def _eof(event):
+        """Ctrl+D（空行）：退出 AI 对话（与 ESC 等价）"""
+        event.app.exit(exception=EOFError)
+
+    _add_binding("repl.quit", _eof, filter=~is_searching & _buffer_empty)
+
     # 顺序注意：defaults 在前、_kb 在后——非 eager 绑定时 key_processor 命中
     # 匹配列表的最后一个；若 _kb 在前，默认的 escape=忽略 会抢先命中，ESC 退出失效。
     _key_bindings = merge_key_bindings([load_key_bindings(), _kb])
@@ -1628,13 +1815,14 @@ def ai_interactive_session(
     def _ai_prompt() -> str:
         base = _make_ai_prompt()
         if _ml_state["active"]:
-            return f"[多行] {base}"
+            return _t("repl_multiline_prefix", ctx.get("lang", "chinese")) + base
         return base
 
     def _bottom_toolbar() -> List[Tuple[str, str]]:
+        _lang = ctx.get("lang", "chinese")
         if _ml_state["active"]:
-            return [("class:toolbar", " 📝 多行模式：Enter=换行暂存 · Alt+Enter=统一发送 · Ctrl+C=清空退出 ")]
-        return [("class:toolbar", " Enter=发送 · Alt+Enter=多行模式 · Esc=退出 · /help=帮助 ")]
+            return [("class:toolbar", _t("repl_toolbar_multiline", _lang))]
+        return [("class:toolbar", _t("repl_toolbar_normal", _lang))]
 
     # ── 对话循环 ──
     # ESC = 直接停止（退出 REPL）；Ctrl+C = 打断工具执行（AI 闭环继续，见 handle_ai）
@@ -1754,7 +1942,8 @@ def _call_ai_engine(
                     console.print("[bold green]🧠 Plus 思考完成，规划已注入干活阶段[/]" if ctx.get("lang", "chinese") == "chinese" else "[bold green]🧠 Plus thinking done, plan injected[/]")
                     # 展示最终规划（透明可审，替代纯静默注入）
                     try:
-                        console.print(Panel(
+                        from bin.ai_lib.ui import tui_plain as _tui_plain
+                        console.print(_tui_plain(
                             _markdown(_plus_think),
                             title=("🧠 Plus 执行规划" if ctx.get("lang", "chinese") == "chinese" else "🧠 Plus Plan"),
                             border_style="cyan",

@@ -374,19 +374,9 @@ def handle_sado_core(
             print(Fore.LIGHTBLACK + skip_hint + Style.RESET_ALL)
         else:
             import secrets as _sado_secrets
-            captcha = _sado_secrets.token_hex(2).upper()
-            print(Fore.RED + msg["need_confirm"].format(original_cmd[:50]) + Style.RESET_ALL)
-            if current_lang == "chinese":
-                captcha_prompt = f"验证码: [ {captcha} ]  — 请输入上方验证码以确认执行"
-            else:
-                captcha_prompt = f"Captcha: [ {captcha} ]  — please enter the captcha above to confirm"
-            print(Fore.YELLOW + captcha_prompt + Style.RESET_ALL)
-            try:
-                user_in = input("> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return
-            if user_in.upper() != captcha:
+            _captcha = _sado_secrets.token_hex(2).upper()
+            from bin.ai_lib.ui import captcha as _ui_captcha
+            if not _ui_captcha("🛡️ 模式切换确认", msg["need_confirm"].format(original_cmd[:50]), _captcha, current_lang):
                 wrong_msg = "验证码错误，已取消" if current_lang == "chinese" else "Wrong captcha, cancelled"
                 print(Fore.RED + wrong_msg + Style.RESET_ALL)
                 return

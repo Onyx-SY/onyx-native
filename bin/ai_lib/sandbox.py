@@ -94,7 +94,14 @@ def _restore_cwd(saved: Optional[str]) -> None:
         except Exception:
             pass
         try:
-            print(f"\033[2m  (AI 会话结束，已恢复工作目录: {saved}) | (AI session ended, restored working directory: {saved})\033[0m")
+            try:
+                from .config import get_current_lang as _get_lang
+                _cn = _get_lang() != "english"
+            except Exception:
+                _cn = True
+            _msg = (f"  (AI 会话结束，已恢复工作目录: {saved})" if _cn
+                    else f"  (AI session ended, restored working directory: {saved})")
+            print(f"\033[2m{_msg}\033[0m")
         except Exception:
             pass
     except Exception:

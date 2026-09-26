@@ -21,8 +21,12 @@ _RE_ANSI = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\][0-9;]*[^\x07]*\x07|\x1b\(B'
 
 
 class RealTimeOutputCatcher:
-    def __init__(self, stream_type):
+    def __init__(self, stream_type, live_stream=None):
+        # live_stream：捕获开始时的「当前」stdout/stderr。
+        # TUI 下它是队列流（内容会进 RichLog）；REPL 下就是真实终端。
+        # 不能固定写 sys.__stdout__ —— 那会绕过 TUI 的界面直接糊在 Textual 画面上。
         self.stream_type = stream_type
+        self._live_stream = live_stream
         self.buffer = []
         self._closed = False
         self._line_count = 0        # 累计行数
@@ -40,19 +44,29 @@ class RealTimeOutputCatcher:
             self._line_count += message.count('\n')
             if self._ai_triggered and self._line_count > 10:
                 return  # AI 模式超过10行，停止实时显示
-            sys.__stdout__.write(message)
-            sys.__stdout__.flush()
-        else:
-            sys.__stderr__.write(message)
-            sys.__stderr__.flush()
+        self._write_live(message)
+
+    def _write_live(self, message):
+        """把实时输出写回「捕获开始时的当前流」（TUI=队列流 / REPL=真实终端）。"""
+        target = self._live_stream
+        if target is None:
+            target = sys.__stdout__ if self.stream_type == "stdout" else sys.__stderr__
+        try:
+            target.write(message)
+            target.flush()
+        except Exception:
+            pass
 
     def flush(self):
         if self._closed:
             return
-        if self.stream_type == "stdout":
-            sys.__stdout__.flush()
-        else:
-            sys.__stderr__.flush()
+        target = self._live_stream
+        if target is None:
+            target = sys.__stdout__ if self.stream_type == "stdout" else sys.__stderr__
+        try:
+            target.flush()
+        except Exception:
+            pass
 
     def isatty(self):
         return False
@@ -69,8 +83,8 @@ def capture_command_output(log_error=None, request_id=""):
     """临时替换 sys.stdout/stderr 为捕获器；异常时记录日志并重抛。"""
     original_stdout = sys.stdout
     original_stderr = sys.stderr
-    stdout_catcher = RealTimeOutputCatcher("stdout")
-    stderr_catcher = RealTimeOutputCatcher("stderr")
+    stdout_catcher = RealTimeOutputCatcher("stdout", live_stream=original_stdout)
+    stderr_catcher = RealTimeOutputCatcher("stderr", live_stream=original_stderr)
 
     try:
         sys.stdout = stdout_catcher

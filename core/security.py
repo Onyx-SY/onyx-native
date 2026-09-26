@@ -202,17 +202,12 @@ def _handle_blocked_match(ctx, cmd, blocked, request_id, block_key, block_type, 
         if is_session_captcha_verified():
             security_log(f"本会话已验证过，跳过验证码确认执行高危命令：{cmd}", confirm_type, request_id)
             return False, True
-        print(ctx.Fore.RED + t(section, cmd=cmd, rule=blocked) + ctx.Style.RESET_ALL)
+        _warning = t(section, cmd=cmd, rule=blocked)
         log_warning(f"ADV模式高危命令需确认：{cmd}", request_id)
         import secrets as _s
-        captcha = _s.token_hex(2).upper()
-        print(ctx.Fore.YELLOW + t("security.check_blocked_cmd.captcha_prompt", code=captcha) + ctx.Style.RESET_ALL)
-        try:
-            confirm = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print(ctx.Fore.RED + t("security.check_blocked_cmd.adv_cancelled") + ctx.Style.RESET_ALL)
-            return True, False
-        if confirm.upper() == captcha:
+        _code = _s.token_hex(2).upper()
+        from bin.ai_lib.ui import captcha as _ui_captcha
+        if _ui_captcha("🛡️ 高危命令确认", _warning, _code):
             mark_session_captcha_verified()
             security_log(f"ADV模式确认执行高危命令：{cmd}", confirm_type, request_id)
             return False, True

@@ -1,0 +1,2 @@
+mounted app.size=Size(width=110, height=40) log.size=Size(width=68, height=17) log.content=Size(width=68, height=17)
+after-submit app.size=Size(width=110, height=40) log.size=Size(width=68, height=17) log.content=Size(width=68, height=17)

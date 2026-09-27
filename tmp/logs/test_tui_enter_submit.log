@@ -1,0 +1,21 @@
+PASS 字节层：换行归一化 / Alt+Enter / 粘贴保真 / 非法字节丢弃 / 鼠标剔除
+Traceback (most recent call last):
+  File "/storage/emulated/0/abPython/PythonProject/工具/Hacker--V1.00.1/src/Hacker/onyx-test/home/u0_a305/onyx/onyx/test/virtual/test_tui_enter_submit.py", line 166, in <module>
+    main()
+    ~~~~^^
+  File "/storage/emulated/0/abPython/PythonProject/工具/Hacker--V1.00.1/src/Hacker/onyx-test/home/u0_a305/onyx/onyx/test/virtual/test_tui_enter_submit.py", line 161, in main
+    asyncio.run(_run())
+    ~~~~~~~~~~~^^^^^^^^
+  File "/data/data/com.termux/files/usr/lib/python3.14/asyncio/runners.py", line 205, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/data/data/com.termux/files/usr/lib/python3.14/asyncio/runners.py", line 128, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/data/data/com.termux/files/usr/lib/python3.14/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/storage/emulated/0/abPython/PythonProject/工具/Hacker--V1.00.1/src/Hacker/onyx-test/home/u0_a305/onyx/onyx/test/virtual/test_tui_enter_submit.py", line 50, in _run
+    assert app._in_q.qsize() == 1, "❌ Enter 未提交（按键被吞）"
+           ^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ❌ Enter 未提交（按键被吞）

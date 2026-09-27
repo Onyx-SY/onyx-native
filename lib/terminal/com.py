@@ -26,6 +26,21 @@
 - 路径补全 start_position 正确计算
 - 空格保留补全：正确识别命令后的空格，匹配历史完整命令
 - 为多行代码输入提供上下文感知补全（委托给 MultiLineCompleter）
+修复（AST/词法分析专项）：
+- _tokenize_quoted_string 显式返回 (tokens, consumed)，不再依赖隐式长度求和
+- _classify_word 新增 is_first_word 参数，仅首词识别为 command 样式
+- _overlay_highlight 前置长度校验，token 拼接与 full_text 不一致时跳过叠加
+- tokenize 判断「本行第一个有意义 token」的辅助逻辑提取为 _has_meaningful_token
+新增（命令树专项）：
+- CommandNode / CommandTree / _normalize_command_spec：
+  把任意 JSON 规格归一化为统一的命令树节点，兼容旧格式
+- 支持 arguments: ["值1", "值2"]、arguments: {"type": "file"}、
+  arguments: {"type": "dir", "values": [...]} 等多种写法
+- 顶层 type: "file" / "dir" 简写
+- 补全按树逐级推进：manage → set → language → zh/en/Chinese/English
+- python → 只补文件；cd → 只补目录
+新增（配置专项）：
+- DEFAULT_PTK_CONFIG.completion.use_dropdown_menu：是否使用下拉菜单
 """
 
 import os
@@ -65,7 +80,6 @@ DEFAULT_PTK_CONFIG = {
         "clear_screen": "c-l",
         "completion_page_up": "pageup",
         "completion_page_down": "pagedown",
-        # ↓ 原先硬编码在 kb.py 里的键，现在全部可配置（见 kb.REPL_KEY_ACTIONS）
         "completion_menu_up": "c-up",
         "completion_menu_down": "c-down",
         "completion_trigger": "c-space",
@@ -89,7 +103,8 @@ DEFAULT_PTK_CONFIG = {
         "reserve_space_for_menu": 6,
         "complete_while_typing": True,
         "complete_in_thread": True,
-        "max_completions": 100
+        "max_completions": 100,
+        "use_dropdown_menu": True
     },
     "history": {
         "memory_limit": 1000,
@@ -103,42 +118,70 @@ DEFAULT_PTK_CONFIG = {
     "meta_texts": {}
 }
 
-def load_ptk_config() -> Dict[str, Any]:
-    """加载 ptk.json 配置，若不存在则生成默认配置"""
+# 配置缓存（按 mtime 失效）
+_PTK_CONFIG_CACHE: Optional[Dict[str, Any]] = None
+_PTK_CONFIG_MTIME: float = 0.0
+_PTK_CONFIG_LOCK = threading.RLock()
+
+
+def load_ptk_config(force_reload: bool = False) -> Dict[str, Any]:
+    """加载 ptk.json 配置，若不存在则生成默认配置。
+
+    修复：新增缓存（按 mtime 失效）。此前每次 universal_input 都重新读文件 +
+    深拷贝 + 深合并，成本 ~0.1-0.5ms，纯浪费。
+    """
+    global _PTK_CONFIG_CACHE, _PTK_CONFIG_MTIME
+
     config_path = os.path.expanduser(PTK_CONFIG_PATH)
     config_dir = os.path.dirname(config_path)
-    if not os.path.exists(config_dir):
+
+    with _PTK_CONFIG_LOCK:
+        # 计算 mtime
         try:
-            os.makedirs(config_dir, mode=0o755, exist_ok=True)
+            mtime = os.path.getmtime(config_path) if os.path.exists(config_path) else -1.0
         except Exception:
-            pass
+            mtime = -1.0
 
-    if not os.path.exists(config_path):
-        # 生成默认配置
+        if (not force_reload
+                and _PTK_CONFIG_CACHE is not None
+                and mtime == _PTK_CONFIG_MTIME):
+            return _PTK_CONFIG_CACHE
+
+        if not os.path.exists(config_dir):
+            try:
+                os.makedirs(config_dir, mode=0o755, exist_ok=True)
+            except Exception:
+                pass
+
+        if not os.path.exists(config_path):
+            try:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(DEFAULT_PTK_CONFIG, f, indent=2, ensure_ascii=False)
+                result = DEFAULT_PTK_CONFIG.copy()
+            except Exception:
+                result = DEFAULT_PTK_CONFIG.copy()
+            _PTK_CONFIG_CACHE = result
+            _PTK_CONFIG_MTIME = mtime
+            return result
+
         try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(DEFAULT_PTK_CONFIG, f, indent=2, ensure_ascii=False)
-            return DEFAULT_PTK_CONFIG.copy()
+            with open(config_path, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+
+            import copy as _copy
+            merged = _copy.deepcopy(DEFAULT_PTK_CONFIG)
+            for key, value in user_config.items():
+                if isinstance(value, dict) and key in merged and isinstance(merged[key], dict):
+                    merged[key].update(value)
+                else:
+                    merged[key] = value
+            _PTK_CONFIG_CACHE = merged
+            _PTK_CONFIG_MTIME = mtime
+            return merged
         except Exception:
-            return DEFAULT_PTK_CONFIG.copy()
-
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            user_config = json.load(f)
-        # 深度合并默认配置，确保所有键存在
-
-
-
-        import copy as _copy
-        merged = _copy.deepcopy(DEFAULT_PTK_CONFIG)
-        for key, value in user_config.items():
-            if isinstance(value, dict) and key in merged and isinstance(merged[key], dict):
-                merged[key].update(value)
-            else:
-                merged[key] = value
-        return merged
-    except Exception:
-        return DEFAULT_PTK_CONFIG.copy()
+            _PTK_CONFIG_CACHE = DEFAULT_PTK_CONFIG.copy()
+            _PTK_CONFIG_MTIME = mtime
+            return _PTK_CONFIG_CACHE
 
 
 # ===================== 终端类型适配 =====================
@@ -187,10 +230,9 @@ def get_other_terminal_cmds() -> Dict[str, List[str]]:
     global _OTHER_TERMINAL_CMDS_CACHE, _OTHER_TERMINAL_CMDS_CONFIG_PATH
     if _OTHER_TERMINAL_CMDS_CACHE is not None:
         return _OTHER_TERMINAL_CMDS_CACHE
-    
+
     config_path = _OTHER_TERMINAL_CMDS_CONFIG_PATH
     if not config_path:
-        # 默认路径
         possible_paths = [
             "/onyx/etc/other_terminal_cmd.json",
             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "etc", "other_terminal_cmd.json"),
@@ -199,18 +241,18 @@ def get_other_terminal_cmds() -> Dict[str, List[str]]:
             if os.path.exists(p):
                 config_path = p
                 break
-    
+
     if not config_path or not os.path.exists(config_path):
         _OTHER_TERMINAL_CMDS_CACHE = {}
         return _OTHER_TERMINAL_CMDS_CACHE
-    
+
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         _OTHER_TERMINAL_CMDS_CACHE = data if isinstance(data, dict) else {}
     except Exception:
         _OTHER_TERMINAL_CMDS_CACHE = {}
-    
+
     return _OTHER_TERMINAL_CMDS_CACHE
 
 
@@ -235,10 +277,9 @@ def get_com_cmd_config() -> Dict[str, Any]:
     global _COM_CMD_CONFIG_CACHE, _COM_CMD_CONFIG_PATH
     if _COM_CMD_CONFIG_CACHE is not None:
         return _COM_CMD_CONFIG_CACHE
-    
+
     config_path = _COM_CMD_CONFIG_PATH
     if not config_path:
-        # 默认路径
         possible_paths = [
             "/onyx/etc/com_cmd.json",
             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "etc", "com_cmd.json"),
@@ -247,18 +288,18 @@ def get_com_cmd_config() -> Dict[str, Any]:
             if os.path.exists(p):
                 config_path = p
                 break
-    
+
     if not config_path or not os.path.exists(config_path):
         _COM_CMD_CONFIG_CACHE = {}
         return _COM_CMD_CONFIG_CACHE
-    
+
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         _COM_CMD_CONFIG_CACHE = data if isinstance(data, dict) else {}
     except Exception:
         _COM_CMD_CONFIG_CACHE = {}
-    
+
     return _COM_CMD_CONFIG_CACHE
 
 
@@ -284,7 +325,7 @@ COLORS = {
     "string": "ansigreen",
     "variable": "ansicyan bold",
     "separator": "ansimagenta",
-    "history_match": "bg:#ffffff #000000 bold",  # white box on matched token
+    "history_match": "bg:#ffffff #000000 bold",
 }
 
 # ── 历史导航高亮 token（由 input_lib 设置，CommandLexer 消费）──
@@ -318,11 +359,17 @@ def _overlay_highlight(
     """
     在已有 token 列表上叠加高亮：找到 full_text 中所有 hl_token 出现位置，
     将覆盖到的 token 拆分并赋予 hl_style。
+
+    修复：先校验 tokens 拼接长度是否等于 full_text，不一致时降级为「不叠加高亮」，
+    避免高亮标错位置导致渲染错乱。
     """
     if not hl_token or hl_token not in full_text:
         return tokens
 
-    # 找到所有 hl_token 的起止位置
+    total_len = sum(len(t[1]) for t in tokens)
+    if total_len != len(full_text):
+        return tokens
+
     spans = []
     start = 0
     while True:
@@ -335,29 +382,24 @@ def _overlay_highlight(
     if not spans:
         return tokens
 
-    # 将 spans 转为快速查找集合（字符位置 → 是否在高亮区内）
     hl_set = set()
     for s, e in spans:
         for pos in range(s, e):
             hl_set.add(pos)
 
-    # 遍历 tokens，拆分被高亮区覆盖的部分
     result = []
     char_pos = 0
     for style, text in tokens:
         seg_start = char_pos
         seg_end = char_pos + len(text)
-        # 检查 overlap
         overlap = [p for p in range(seg_start, seg_end) if p in hl_set]
         if not overlap:
             result.append((style, text))
         else:
-            # 拆分 token：高亮部分和新样式，非高亮保持原样式
             i = 0
             while i < len(text):
                 abs_pos = seg_start + i
                 if abs_pos in hl_set:
-                    # 连续高亮块
                     j = i
                     while j < len(text) and (seg_start + j) in hl_set:
                         j += 1
@@ -622,8 +664,8 @@ def get_path_cache() -> PathCache:
         _PATH_CACHE = PathCache()
     return _PATH_CACHE
 
-# ===================== 路径解析器 =====================
 
+# ===================== 路径解析器 =====================
 class PathResolver:
     @staticmethod
     def expand_path(path: str, virtual_root: str = "") -> str:
@@ -652,17 +694,14 @@ class PathResolver:
                 else:
                     path = str(Path.home()) + path[1:]
 
-        # 环境变量展开按终端类型分流（避免 bash 下误展开 %VAR%、cmd 下误展开 $VAR）
         term_type = get_detected_terminal_type()
         if term_type == 'cmd':
-            # CMD 风格 %VAR%
             if '%' in path:
                 def cmd_var_replacer(match):
                     var_name = match.group(1)
                     return os.environ.get(var_name, match.group(0))
                 path = re.sub(r'%([^%]+)%', cmd_var_replacer, path)
         else:
-            # bash/zsh/sh/fish/powershell 风格 $VAR / ${VAR}
             if '$' in path:
                 def replacer(match):
                     var_name = match.group(1) or match.group(2)
@@ -690,35 +729,27 @@ class PathResolver:
 
     @staticmethod
     def split_for_completion(path: str, virtual_root: str = "") -> Tuple[str, str, bool]:
-        """
-        分割路径用于补全。
-        返回: (目录路径, 文件前缀, 是否为绝对模式)
-        """
+        """分割路径用于补全。返回: (目录路径, 文件前缀, 是否为绝对模式)"""
         if not path:
             return os.getcwd(), "", False
 
-        # 标准化路径分隔符（只用于逻辑判断，不影响实际路径）
         normalized_path = path
         if os.sep == '\\':
             normalized_path = path.replace('/', '\\')
         else:
             normalized_path = path.replace('\\', '/')
-        
-        # 处理虚拟根目录下的绝对路径（以 / 开头）
+
         if virtual_root and path.startswith('/'):
             is_absolute_mode = True
-            # 处理末尾带分隔符的情况
             if path.endswith('/'):
                 if path == '/':
                     return virtual_root, "", True
-                # 去掉末尾的 /，返回完整目录
                 clean_path = path.rstrip('/')
                 dir_path = PathResolver.expand_path(clean_path, virtual_root)
                 return dir_path, "", True
-            
-            # 分割目录和文件名
+
             last_slash = path.rfind('/')
-            if last_slash <= 0:  # 只有 / 或者根目录
+            if last_slash <= 0:
                 dir_part = virtual_root
                 file_prefix = path[1:] if len(path) > 1 else ""
             else:
@@ -728,24 +759,21 @@ class PathResolver:
                     dir_part = virtual_root
                 else:
                     dir_part = PathResolver.expand_path(dir_path, virtual_root)
-            
+
             return dir_part, file_prefix, is_absolute_mode
 
-        # 处理 Windows 绝对路径（如 C:\ 或 D:）
         if os.name == 'nt' and re.match(r'^[A-Za-z]:', path):
             is_absolute_mode = True
-            
-            # 处理末尾带分隔符的情况
+
             if path.endswith('\\') or path.endswith('/'):
                 if re.match(r'^[A-Za-z]:\\$', path) or re.match(r'^[A-Za-z]:/$', path):
                     return path, "", True
                 clean_path = path.rstrip('\\/')
                 dir_path = PathResolver.expand_path(clean_path, virtual_root)
                 return dir_path, "", True
-            
-            # 分割目录和文件名
+
             last_sep = max(path.rfind('\\'), path.rfind('/'))
-            if last_sep <= 2:  # 盘符后没有分隔符，如 "C:abc"
+            if last_sep <= 2:
                 if ':' in path:
                     colon_idx = path.find(':')
                     if colon_idx >= 0:
@@ -761,20 +789,19 @@ class PathResolver:
                 dir_part = path[:last_sep]
                 file_prefix = path[last_sep + 1:]
                 dir_part = PathResolver.expand_path(dir_part, virtual_root)
-            
+
             return dir_part, file_prefix, is_absolute_mode
 
-        # 处理 Unix 绝对路径（以 / 开头，但没有虚拟根目录）
         if os.path.isabs(path):
             is_absolute_mode = True
-            
+
             if path.endswith(os.sep):
                 if path == os.sep:
                     return path, "", True
                 clean_path = path.rstrip(os.sep)
                 dir_path = PathResolver.expand_path(clean_path, virtual_root)
                 return dir_path, "", True
-            
+
             last_sep = path.rfind(os.sep)
             if last_sep <= 0:
                 dir_part = os.sep
@@ -783,10 +810,9 @@ class PathResolver:
                 dir_part = path[:last_sep]
                 file_prefix = path[last_sep + 1:]
                 dir_part = PathResolver.expand_path(dir_part, virtual_root)
-            
+
             return dir_part, file_prefix, is_absolute_mode
 
-        # 相对路径
         expanded = PathResolver.expand_path(path, virtual_root)
 
         if path.endswith(os.sep):
@@ -805,9 +831,6 @@ class PathResolver:
 
     @staticmethod
     def is_executable(path: str) -> bool:
-        """
-        判断文件是否可执行。
-        """
         if not os.path.exists(path):
             return False
         if os.name == 'nt':
@@ -848,7 +871,7 @@ class PathCompleterEngine:
 
     def _list_directory_with_prefix(self, dir_path: str, prefix: str, start_pos: int) -> List[Tuple[str, str, str, int]]:
         completions = []
-        
+
         if dir_path == "/":
             dir_path = "/"
         elif dir_path.endswith(':'):
@@ -867,13 +890,12 @@ class PathCompleterEngine:
         except (OSError, PermissionError):
             return []
 
-        # 添加父目录和当前目录（仅在根目录下不添加）
         should_add_parent = True
         if dir_path == "/":
             should_add_parent = False
         elif os.name == 'nt' and re.match(r'^[A-Za-z]:\\?$', dir_path):
             should_add_parent = False
-        
+
         if should_add_parent:
             if not prefix or '..'.startswith(prefix.lower()):
                 completions.append(('..' + os.sep, META_TEXTS_EN['parent'], COLORS['parent'], start_pos))
@@ -994,6 +1016,8 @@ class CommandConfigLoader:
         config = cls.load_config(config_path)
         cmd_config = config.get(cmd, {})
         subcmds = cmd_config.get("subcommands", [])
+        if isinstance(subcmds, dict):
+            return list(subcmds.keys())
         if isinstance(subcmds, list):
             return [sc.get("name", sc) if isinstance(sc, dict) else sc for sc in subcmds]
         return []
@@ -1004,9 +1028,15 @@ class CommandConfigLoader:
         cmd_config = config.get(cmd, {})
 
         if subcmd:
-            for sc in cmd_config.get("subcommands", []):
-                if isinstance(sc, dict) and sc.get("name") == subcmd:
-                    return sc.get("options", [])
+            subcmds = cmd_config.get("subcommands", {})
+            if isinstance(subcmds, dict):
+                sub_node = subcmds.get(subcmd, {})
+                if isinstance(sub_node, dict):
+                    return sub_node.get("options", [])
+            elif isinstance(subcmds, list):
+                for sc in subcmds:
+                    if isinstance(sc, dict) and sc.get("name") == subcmd:
+                        return sc.get("options", [])
 
         return cmd_config.get("options", [])
 
@@ -1016,13 +1046,186 @@ class CommandConfigLoader:
         cmd_config = config.get(cmd, {})
 
         if subcmd:
-            for sc in cmd_config.get("subcommands", []):
-                if isinstance(sc, dict) and sc.get("name") == subcmd:
-                    return sc.get("arguments", [])
+            subcmds = cmd_config.get("subcommands", {})
+            if isinstance(subcmds, dict):
+                sub_node = subcmds.get(subcmd, {})
+                if isinstance(sub_node, dict):
+                    args = sub_node.get("arguments", [])
+                    if isinstance(args, list):
+                        return args
+            elif isinstance(subcmds, list):
+                for sc in subcmds:
+                    if isinstance(sc, dict) and sc.get("name") == subcmd:
+                        args = sc.get("arguments", [])
+                        if isinstance(args, list):
+                            return args
 
-        return cmd_config.get("arguments", [])
+        args = cmd_config.get("arguments", [])
+        return args if isinstance(args, list) else []
 
-# ===================== 命令频率记录（异步加载/保存，支持从历史预加载） =====================
+
+# ===================== 命令树（AST 式逐级补全）====================
+
+class CommandNode:
+    """规范化的命令规格节点，支持嵌套子命令 + 类型化参数。
+
+    字段：
+        options:       该层级可用的选项列表
+        subcommands:   下一级子命令（name → CommandNode）
+        arguments:     该层级的固定候选值（如 ["zh","en","Chinese","English"]）
+        argument_type: 类型化参数（"file" / "dir" / "any" / "value" / ""）
+        multiple_args: 该参数是否可重复出现
+    """
+    __slots__ = ("options", "subcommands", "arguments", "argument_type", "multiple_args")
+
+    def __init__(self):
+        self.options: List[str] = []
+        self.subcommands: Dict[str, "CommandNode"] = {}
+        self.arguments: List[str] = []
+        self.argument_type: str = ""
+        self.multiple_args: bool = False
+
+    def merge(self, other: "CommandNode") -> None:
+        for o in other.options:
+            if o not in self.options:
+                self.options.append(o)
+        for a in other.arguments:
+            if a not in self.arguments:
+                self.arguments.append(a)
+        if not self.argument_type and other.argument_type:
+            self.argument_type = other.argument_type
+        if other.multiple_args:
+            self.multiple_args = True
+        for name, child in other.subcommands.items():
+            if name in self.subcommands:
+                self.subcommands[name].merge(child)
+            else:
+                self.subcommands[name] = child
+
+    def is_empty(self) -> bool:
+        return not (self.options or self.subcommands
+                    or self.arguments or self.argument_type)
+
+
+def _normalize_command_spec(spec: Any) -> CommandNode:
+    """把任意原始 JSON 规格归一化为 CommandNode（向后兼容旧格式）。
+
+    支持的写法：
+        - 数组：["adv", "mid", "low"]                      → 子命令名列表
+        - 对象：
+            {
+              "options": ["-m", "-t"],
+              "subcommands": [...数组 或 对象...],
+              "arguments": ["zh","en"] 或 {"type":"file","values":[...]} 或 "file",
+              "type": "file",
+              "multiple": true
+            }
+    """
+    node = CommandNode()
+
+    # 裸数组：子命令名列表
+    if isinstance(spec, list):
+        for item in spec:
+            if isinstance(item, str):
+                node.subcommands.setdefault(item, CommandNode())
+            elif isinstance(item, dict):
+                name = item.get("name") or item.get("command") or ""
+                if isinstance(name, str) and name:
+                    node.subcommands[name] = _normalize_command_spec(item)
+        return node
+
+    if not isinstance(spec, dict):
+        return node
+
+    # options
+    opts = spec.get("options")
+    if isinstance(opts, list):
+        for o in opts:
+            if isinstance(o, str):
+                node.options.append(o)
+
+    # arguments：数组 / 对象 / 字符串 三种形态
+    args_raw = spec.get("arguments")
+    if isinstance(args_raw, list):
+        for a in args_raw:
+            if isinstance(a, str):
+                node.arguments.append(a)
+    elif isinstance(args_raw, dict):
+        typ = args_raw.get("type")
+        if isinstance(typ, str):
+            node.argument_type = typ.lower()
+        for v in (args_raw.get("values") or []):
+            if isinstance(v, str):
+                node.arguments.append(v)
+    elif isinstance(args_raw, str):
+        node.argument_type = args_raw.lower()
+
+    # 顶层 type 简写
+    if not node.argument_type:
+        typ = spec.get("type")
+        if isinstance(typ, str):
+            node.argument_type = typ.lower()
+
+    if spec.get("multiple"):
+        node.multiple_args = True
+
+    # subcommands：数组（旧）或对象（新）
+    sub_raw = spec.get("subcommands")
+    if isinstance(sub_raw, list):
+        for sc in sub_raw:
+            if isinstance(sc, str):
+                node.subcommands.setdefault(sc, CommandNode())
+            elif isinstance(sc, dict):
+                name = sc.get("name") or sc.get("command") or ""
+                if isinstance(name, str) and name:
+                    node.subcommands[name] = _normalize_command_spec(sc)
+    elif isinstance(sub_raw, dict):
+        for name, sub_spec in sub_raw.items():
+            if isinstance(name, str):
+                node.subcommands[name] = _normalize_command_spec(sub_spec)
+
+    return node
+
+
+class CommandTree:
+    """命令树，一次构建、多次查询。"""
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.root: Dict[str, CommandNode] = {}
+        if config:
+            self.load(config)
+
+    def load(self, config: Dict[str, Any]) -> None:
+        for name, spec in config.items():
+            if not isinstance(name, str):
+                continue
+            node = _normalize_command_spec(spec)
+            if name in self.root:
+                self.root[name].merge(node)
+            else:
+                self.root[name] = node
+
+    def get(self, cmd: str) -> Optional[CommandNode]:
+        return self.root.get(cmd)
+
+    def lookup(self, path: List[str]) -> Optional[CommandNode]:
+        if not path:
+            return None
+        node = self.root.get(path[0])
+        if node is None:
+            return None
+        for name in path[1:]:
+            child = node.subcommands.get(name)
+            if child is None:
+                return None
+            node = child
+        return node
+
+    def names(self) -> List[str]:
+        return list(self.root.keys())
+
+
+# ===================== 命令频率记录 =====================
 class CommandFrequency:
     def __init__(self, user_home_dir: Optional[str] = None, history_file_path: Optional[str] = None):
         self.user_home_dir = user_home_dir
@@ -1030,13 +1233,13 @@ class CommandFrequency:
             self.file_path = os.path.join(user_home_dir, ".com_used.json")
         else:
             self.file_path = os.path.join(str(Path.home()), ".com_used.json")
-        
+
         self.history_file_path = history_file_path
         self.freq: Dict[str, int] = {}
         self._lock = threading.RLock()
         self._dirty = False
         self._save_timer: Optional[threading.Timer] = None
-        
+
         self._load()
         if self.history_file_path and os.path.exists(self.history_file_path):
             self._async_load_from_history()
@@ -1149,6 +1352,7 @@ def get_command_freq(user_home_dir: str = "", history_file_path: str = "") -> Co
             _COMMAND_FREQ.set_user_home_dir(user_home_dir, history_file_path)
     return _COMMAND_FREQ
 
+
 # ===================== 命令缓存 =====================
 class CommandCache:
     def __init__(self, user_home_dir: str, cmd_config_path: str, com_cmd_config_path: str = ""):
@@ -1175,7 +1379,7 @@ class CommandCache:
                 if self.com_cmd_config_path and os.path.exists(self.com_cmd_config_path):
                     com_cmd_mtime = os.path.getmtime(self.com_cmd_config_path)
                 max_src_mtime = max(src_mtime, com_cmd_mtime)
-                
+
                 if cache_mtime >= max_src_mtime:
                     with open(self.cache_file, 'rb') as f:
                         if HAS_MSGPACK:
@@ -1198,57 +1402,14 @@ class CommandCache:
         arguments_map = {}
 
         for cmd, cfg in config.items():
-            subcmds = cfg.get("subcommands", [])
-            if isinstance(subcmds, list):
-                subcmd_names = [sc.get("name", sc) if isinstance(sc, dict) else sc for sc in subcmds]
-                subcommands_map[cmd] = subcmd_names
-                for sc in subcmds:
-                    if isinstance(sc, dict):
-                        sc_name = sc.get("name", "")
-                        sc_options = sc.get("options", [])
-                        sc_arguments = sc.get("arguments", [])
-                        if sc_name:
-                            options_map[f"{cmd}:{sc_name}"] = sc_options
-                            arguments_map[f"{cmd}:{sc_name}"] = sc_arguments
-            options = cfg.get("options", [])
-            arguments = cfg.get("arguments", [])
-            if options:
-                options_map[cmd] = options
-            if arguments:
-                arguments_map[cmd] = arguments
+            self._flatten_cmd(cmd, cfg, subcommands_map, options_map, arguments_map)
 
         if self.com_cmd_config_path and os.path.exists(self.com_cmd_config_path):
             com_cmd_config = CommandConfigLoader.load_config(self.com_cmd_config_path)
             for cmd, cfg in com_cmd_config.items():
                 if cmd not in commands:
                     commands.append(cmd)
-                
-                subcmds = cfg.get("subcommands", [])
-                if isinstance(subcmds, list):
-                    subcmd_names = [sc.get("name", sc) if isinstance(sc, dict) else sc for sc in subcmds]
-                    existing_subcmds = subcommands_map.get(cmd, [])
-                    subcommands_map[cmd] = list(set(existing_subcmds + subcmd_names))
-                    for sc in subcmds:
-                        if isinstance(sc, dict):
-                            sc_name = sc.get("name", "")
-                            sc_options = sc.get("options", [])
-                            sc_arguments = sc.get("arguments", [])
-                            if sc_name:
-                                key = f"{cmd}:{sc_name}"
-                                existing_opts = options_map.get(key, [])
-                                options_map[key] = list(set(existing_opts + sc_options))
-                                existing_args = arguments_map.get(key, [])
-                                arguments_map[key] = list(set(existing_args + sc_arguments))
-                
-                options = cfg.get("options", [])
-                if options:
-                    existing_opts = options_map.get(cmd, [])
-                    options_map[cmd] = list(set(existing_opts + options))
-                
-                arguments = cfg.get("arguments", [])
-                if arguments:
-                    existing_args = arguments_map.get(cmd, [])
-                    arguments_map[cmd] = list(set(existing_args + arguments))
+                self._flatten_cmd(cmd, cfg, subcommands_map, options_map, arguments_map, merge=True)
 
         with self._lock:
             self._data = {
@@ -1259,6 +1420,62 @@ class CommandCache:
                 "timestamp": time.time()
             }
         self._schedule_save()
+
+    @staticmethod
+    def _flatten_cmd(cmd: str, cfg: Any,
+                     subcommands_map: Dict[str, List[str]],
+                     options_map: Dict[str, List[str]],
+                     arguments_map: Dict[str, List[str]],
+                     merge: bool = False) -> None:
+        """把单个命令的规格展平成三张表（保持旧行为，供外部调用方使用）。
+
+        兼容：
+            subcommands 是数组（旧）或对象（新）
+            arguments 是数组 / 对象 / 字符串
+        """
+        node = _normalize_command_spec(cfg)
+
+        # 一级子命令
+        subcmd_names = list(node.subcommands.keys())
+        if merge:
+            existing = subcommands_map.get(cmd, [])
+            subcommands_map[cmd] = list(dict.fromkeys(existing + subcmd_names))
+        else:
+            subcommands_map[cmd] = subcmd_names
+
+        # 一级 options / arguments
+        if node.options:
+            if merge:
+                existing = options_map.get(cmd, [])
+                options_map[cmd] = list(dict.fromkeys(existing + node.options))
+            else:
+                options_map[cmd] = list(node.options)
+        if node.arguments:
+            if merge:
+                existing = arguments_map.get(cmd, [])
+                arguments_map[cmd] = list(dict.fromkeys(existing + node.arguments))
+            else:
+                arguments_map[cmd] = list(node.arguments)
+
+        # 递归展开二级以上（"cmd:sub" / "cmd:sub:sub2" ...）
+        def _walk(prefix: str, n: CommandNode) -> None:
+            for sc_name, sc_node in n.subcommands.items():
+                key = f"{prefix}:{sc_name}"
+                if sc_node.options:
+                    if merge:
+                        existing = options_map.get(key, [])
+                        options_map[key] = list(dict.fromkeys(existing + sc_node.options))
+                    else:
+                        options_map[key] = list(sc_node.options)
+                if sc_node.arguments:
+                    if merge:
+                        existing = arguments_map.get(key, [])
+                        arguments_map[key] = list(dict.fromkeys(existing + sc_node.arguments))
+                    else:
+                        arguments_map[key] = list(sc_node.arguments)
+                _walk(key, sc_node)
+
+        _walk(cmd, node)
 
     def _schedule_save(self) -> None:
         with self._lock:
@@ -1292,7 +1509,6 @@ class CommandCache:
                 com_mtime = os.path.getmtime(self.com_cmd_config_path)
                 last_mtime = max(last_mtime, com_mtime)
 
-            # 使用 Event.wait 替代 sleep，可被外部唤醒提前退出
             _watchdog_stop = threading.Event()
             while not _watchdog_stop.is_set():
                 _watchdog_stop.wait(60)
@@ -1303,7 +1519,7 @@ class CommandCache:
                     if self.com_cmd_config_path and os.path.exists(self.com_cmd_config_path):
                         com_mtime = os.path.getmtime(self.com_cmd_config_path)
                         current_mtime = max(current_mtime, com_mtime)
-                    
+
                     if current_mtime > last_mtime:
                         self._rebuild()
                         last_mtime = current_mtime
@@ -1337,35 +1553,22 @@ def get_command_cache(user_home_dir: str = "", cmd_config_path: str = "", com_cm
         _CMD_CACHE = CommandCache(user_home_dir, cmd_config_path, com_cmd_config_path)
     return _CMD_CACHE
 
+
 # ===================== AST 语法分词器 =====================
 class ShellAstTokenizer:
     """
     基于状态机的 Shell 命令 AST 分词器
     单遍扫描，将 shell 命令字符串拆分为 (style, text) 语义令牌序列
-    
-    支持:
-    - 命令头识别（valid_commands 校验）→ command / command_invalid
-    - 短选项 -x / 长选项 --xxx → option
-    - 路径检测（含 ~ 展开、虚拟根路径）→ path / path_invalid
-    - 变量 $VAR / ${VAR} / $((算术)) → variable
-    - 命令替换 $(...) / `...` → subshell (内部递归分词)
-    - 重定向 > < >> << 2> 2>&1 &> → separator
-    - 管道 | / 逻辑符 && || / 分隔符 ; → separator
-    - 引号字符串（单/双引号、转义、嵌套双引号变量）→ string
-    - 注释 #... → comment
-    - KEY=value 赋值 → assignment
-    - 文件描述符数字（2> 中的 2）→ number
     """
-    
+
     __slots__ = ('valid_commands', 'virtual_root', 'sys_type')
-    
+
     def __init__(self, valid_commands: set = None, virtual_root: str = "", sys_type: str = 'bash'):
         self.valid_commands = valid_commands or set()
         self.virtual_root = virtual_root
         self.sys_type = sys_type or 'bash'
 
     def _escape_char(self, in_quotes: bool = False) -> str:
-        """各 shell 的转义符：bash/zsh/sh/fish → \\；cmd → ^（引号内无转义）；powershell → `"""
         if self.sys_type == 'cmd':
             return '' if in_quotes else '^'
         if self.sys_type == 'powershell':
@@ -1377,7 +1580,7 @@ class ShellAstTokenizer:
         tokens = []
         i = 0
         n = len(text)
-        
+
         while i < n:
             # 跳过空白
             if text[i].isspace():
@@ -1387,7 +1590,7 @@ class ShellAstTokenizer:
                 tokens.append(('', text[i:j]))
                 i = j
                 continue
-            
+
             # 注释
             if text[i] == '#':
                 j = i
@@ -1396,32 +1599,28 @@ class ShellAstTokenizer:
                 tokens.append(('ansiwhite italic', text[i:j]))
                 i = j
                 continue
-            
+
             # 重定向操作符
             redir_len = self._match_redirect(text, i, n)
             if redir_len:
                 tokens.append((COLORS['separator'], text[i:i+redir_len]))
                 i += redir_len
                 continue
-            
+
             # 管道 / 逻辑操作符 / 分隔符
             sep_len = self._match_separator(text, i, n)
             if sep_len:
                 tokens.append((COLORS['separator'], text[i:i+sep_len]))
                 i += sep_len
                 continue
-            
+
             # 子shell / 大括号组
             if text[i] in '()':
-                # 找到匹配的括号，递归分词其内部
                 end = self._find_matching_paren(text, i, n)
                 if end > i:
-                    # 左括号
                     tokens.append((COLORS['separator'], '('))
-                    # 递归分词内部（如果是 $(...) 则 $ 已被前面的变量规则吃掉）
                     inner = self.tokenize(text[i+1:end])
                     tokens.extend(inner)
-                    # 右括号
                     tokens.append((COLORS['separator'], ')'))
                     i = end + 1
                     continue
@@ -1429,7 +1628,7 @@ class ShellAstTokenizer:
                     tokens.append((COLORS['separator'], text[i]))
                     i += 1
                     continue
-            
+
             # 花括号展开/组 {a,b} 或代码块
             if text[i] == '{':
                 j = i + 1
@@ -1443,22 +1642,20 @@ class ShellAstTokenizer:
                 tokens.append((COLORS['separator'], text[i:j]))
                 i = j
                 continue
-            
+
             if text[i] == '}':
                 tokens.append((COLORS['separator'], text[i]))
                 i += 1
                 continue
-            
+
             # 引号字符串
             if text[i] in ('"', "'"):
-                q_tokens = self._tokenize_quoted_string(text, i, n)
+                q_tokens, consumed = self._tokenize_quoted_string(text, i, n)
                 tokens.extend(q_tokens)
-                # 计算移动了多少字符
-                consumed = sum(len(t[1]) for t in q_tokens)
                 i += consumed
                 continue
-            
-            # 反引号命令替换（powershell 中 ` 是转义符，不作为命令替换）
+
+            # 反引号命令替换
             if self.sys_type != 'powershell' and text[i] == '`':
                 end = text.find('`', i + 1)
                 if end == -1:
@@ -1471,105 +1668,102 @@ class ShellAstTokenizer:
                 tokens.append((COLORS['variable'], '`'))
                 i = end + 1
                 continue
-            
-            # 普通词法单元：读取一个完整的 word
+
+            # 普通词法单元
             word_start = i
             word_end = self._read_word(text, i, n)
-            
+
             if word_end <= word_start:
                 i += 1
                 continue
-            
+
             word = text[word_start:word_end]
-            
-            # 判断 word 类型
-            word_tokens = self._classify_word(word, text, word_start, word_end, n)
+            is_first_word = not self._has_meaningful_token(tokens)
+
+            word_tokens = self._classify_word(
+                word, text, word_start, word_end, n, is_first_word=is_first_word
+            )
             tokens.extend(word_tokens)
             i = word_end
-        
+
         return tokens
-    
+
+    def _has_meaningful_token(self, tokens: List[Tuple[str, str]]) -> bool:
+        """判断 tokens 中是否已经存在「有意义」的 token（非空白、非分隔符）。"""
+        for style, text in tokens:
+            if text.strip() and style != COLORS['separator']:
+                return True
+        return False
+
     # ── 匹配辅助 ──
-    
+
     def _match_redirect(self, text: str, i: int, n: int) -> int:
-        """检查是否是重定向操作符，返回匹配长度"""
-        # 文件描述符数字 + 重定向（2>, 1>, 2>>, 2>&1 等）
         if i + 1 < n and text[i].isdigit():
-            # 检查后面是否跟着重定向符
             if text[i+1] == '>':
                 if i + 2 < n and text[i+2] == '>':
-                    return 3  # 2>>
+                    return 3
                 elif i + 2 < n and text[i+2] == '&':
                     if i + 3 < n and text[i+3] == '1':
-                        return 4  # 2>&1 (或 2>&-)
-                    return 3  # 2>&
-                return 2  # 2>
+                        return 4
+                    return 3
+                return 2
             return 0
-        
-        # &>  (bash 专用，等价于 2>&1 的简化)
+
         if i + 1 < n and text[i] == '&' and text[i+1] == '>':
             return 2
-        
-        # >| (强制覆盖，bash)
+
         if i + 1 < n and text[i] == '>' and text[i+1] == '|':
             return 2
-        
-        # >>
+
         if i + 1 < n and text[i:i+2] == '>>':
             return 2
-        
-        # >
+
         if text[i] == '>':
             return 1
-        
-        # <<- (heredoc with tab stripping)
+
         if i + 2 < n and text[i:i+3] == '<<-':
             return 3
-        
-        # <<
+
         if i + 1 < n and text[i:i+2] == '<<':
             return 2
-        
-        # <
+
         if text[i] == '<':
             return 1
-        
+
         return 0
-    
+
     def _match_separator(self, text: str, i: int, n: int) -> int:
-        """检查是否是管道/逻辑符/分隔符，返回匹配长度"""
         if i + 1 < n:
             pair = text[i:i+2]
             if pair in ('&&', '||', ';;', ';&'):
                 return 2
-        
+
         if text[i] in ('|', ';', '&'):
             return 1
-        
+
         return 0
-    
+
     def _find_matching_paren(self, text: str, i: int, n: int) -> int:
-        """找到匹配的右括号位置（处理嵌套）"""
         if i >= n or text[i] not in '([':
             return -1
-        
+
         open_char = text[i]
         close_char = ')' if open_char == '(' else ']'
-        
+
         depth = 1
         j = i + 1
         in_single = False
         in_double = False
-        
+
         while j < n and depth > 0:
             c = text[j]
-            
+
             if in_single:
                 if c == "'":
                     in_single = False
                 j += 1
                 continue
-            
+
             if in_double:
                 if c == '\\':
                     j += 2
@@ -1578,58 +1772,53 @@ class ShellAstTokenizer:
                     in_double = False
                 j += 1
                 continue
-            
+
             if c == "'":
                 in_single = True
             elif c == '"':
                 in_double = True
             elif c == '\\':
-                j += 1  # skip escaped char
+                j += 1
             elif c in '([':
                 depth += 1
             elif c in ')]':
                 depth -= 1
                 if depth == 0 and c != close_char:
-                    return -1  # mismatched
+                    return -1
             elif c == '$' and j + 1 < n and text[j+1] == '(':
                 depth += 1
-                j += 1  # skip (
-            
+                j += 1
+
             j += 1
-        
+
         if depth == 0:
             return j - 1
         return -1
-    
+
     def _read_word(self, text: str, i: int, n: int) -> int:
-        """
-        读取一个完整的 shell word（考虑引号、转义、变量展开）
-        返回 word 的结束位置（不含尾随空白）
-        """
         j = i
         in_single = False
         in_double = False
-        
+
         esc_inner = self._escape_char(in_quotes=True)
         esc_outer = self._escape_char(in_quotes=False)
-        
+
         while j < n:
             c = text[j]
-            
+
             if in_single:
                 if c == "'":
                     in_single = False
                 j += 1
                 continue
-            
+
             if in_double:
                 if esc_inner and c == esc_inner and j + 1 < n:
-                    j += 2  # skip escaped char in double quotes
+                    j += 2
                     continue
                 if c == '"':
                     in_double = False
                 elif c == '$' and j + 1 < n and text[j+1] == '(':
-                    # $() inside double quotes — skip to matching )
                     paren_depth = 1
                     k = j + 2
                     while k < n and paren_depth > 0:
@@ -1647,48 +1836,46 @@ class ShellAstTokenizer:
                         continue
                 j += 1
                 continue
-            
-            # Not in quotes
+
             if c.isspace() or c in '|;&<>()[]{}#' or (c == '`' and self.sys_type != 'powershell'):
                 break
             if esc_outer and c == esc_outer and j + 1 < n:
-                j += 2  # skip escaped char
+                j += 2
                 continue
             if c in ('"', "'"):
-                # Enter quote
                 if c == "'":
                     in_single = True
                 else:
                     in_double = True
                 j += 1
                 continue
-            
+
             j += 1
-        
+
         return j
-    
-    def _tokenize_quoted_string(self, text: str, i: int, n: int) -> List[Tuple[str, str]]:
-        """分词引号字符串（含内部变量展开）"""
-        tokens = []
-        quote = text[i]  # ' or "
+
+    def _tokenize_quoted_string(
+        self, text: str, i: int, n: int
+    ) -> Tuple[List[Tuple[str, str]], int]:
+        """分词引号字符串（含内部变量展开）。"""
+        tokens: List[Tuple[str, str]] = []
+        quote = text[i]
+        start = i
         j = i + 1
-        
+
         if quote == "'":
-            # 单引号：完全字面量
             end = text.find("'", j)
             if end == -1:
-                # 未闭合
                 tokens.append(('ansired bold', text[i:]))
-                return tokens
-            # 包含引号标记
+                return tokens, n - start
             tokens.append((COLORS['string'], text[i:end+1]))
-            return tokens
-        
-        # 双引号：可能含变量 $VAR / $(...) / `...`（powershell 中 ` 是转义符）
+            return tokens, end + 1 - start
+
+        # 双引号
         tokens.append((COLORS['string'], '"'))
         k = j
         esc = self._escape_char(in_quotes=True)
-        
+
         while k < n:
             c = text[k]
             if c == '"':
@@ -1696,14 +1883,13 @@ class ShellAstTokenizer:
                 k += 1
                 break
             elif esc and c == esc and k + 1 < n:
-                # 转义序列（按 shell 类型：bash → \\，powershell → `，cmd 引号内无转义）
                 tokens.append((COLORS['string'], text[k:k+2]))
                 k += 2
             elif c == '$':
-                # 变量或命令替换
                 var_tokens = self._tokenize_variable(text, k, n)
                 tokens.extend(var_tokens)
-                k += sum(len(t[1]) for t in var_tokens)
+                consumed_var = sum(len(t[1]) for t in var_tokens)
+                k += consumed_var
             elif self.sys_type != 'powershell' and c == '`':
                 end = text.find('`', k + 1)
                 if end == -1:
@@ -1716,24 +1902,22 @@ class ShellAstTokenizer:
                     tokens.append((COLORS['variable'], '`'))
                     k = end + 1
             else:
-                # 普通字符
                 tokens.append((COLORS['string'], c))
                 k += 1
-        
-        return tokens
-    
+
+        return tokens, k - start
+
     def _tokenize_variable(self, text: str, i: int, n: int) -> List[Tuple[str, str]]:
-        """分词变量展开 $VAR / ${VAR} / $(...) / $((...))"""
         if i >= n or text[i] != '$':
             return [(COLORS['string'], '$')]
-        
+
         # $((算术))
         if i + 2 < n and text[i:i+3] == '((':
             end = text.find('))', i + 3)
             if end != -1:
                 return [(COLORS['variable'], text[i:end+2])]
             return [(COLORS['variable'], text[i:])]
-        
+
         # $(命令替换)
         if i + 1 < n and text[i+1] == '(':
             depth = 1
@@ -1753,7 +1937,6 @@ class ShellAstTokenizer:
                     continue
                 j += 1
             if depth == 0:
-                # $ 和 ( 用 variable 颜色，内部递归分词
                 inner_start = i + 2
                 inner_end = j - 1
                 inner = self.tokenize(text[inner_start:inner_end]) if inner_end > inner_start else []
@@ -1762,63 +1945,62 @@ class ShellAstTokenizer:
                 result.append((COLORS['separator'], ')'))
                 return result
             return [(COLORS['variable'], text[i:])]
-        
+
         # ${变量}
         if i + 1 < n and text[i+1] == '{':
             end = text.find('}', i + 2)
             if end != -1:
-                # ${VAR:-default} 等扩展
                 return [(COLORS['variable'], text[i:end+1])]
             return [(COLORS['variable'], text[i:])]
-        
+
         # $变量名
         j = i + 1
         if j < n and text[j].isalpha():
             while j < n and (text[j].isalnum() or text[j] == '_'):
                 j += 1
             return [(COLORS['variable'], text[i:j])]
-        
-        # $? $! $# $$ $* $@ $0-$9 等特殊变量
+
         if j < n and text[j] in '?!$#*-@0123456789':
             return [(COLORS['variable'], text[i:j+1])]
-        
+
         return [(COLORS['variable'], '$')]
-    
-    def _classify_word(self, word: str, text: str, start: int, end: int, n: int) -> List[Tuple[str, str]]:
-        """
-        对完整的 word 进行分类
-        支持: command, option, path, assignment, string, variable
-        """
-        # 检测是否为 KEY=value 赋值（首词或非首词均可）
+
+    def _classify_word(
+        self,
+        word: str,
+        text: str,
+        start: int,
+        end: int,
+        n: int,
+        is_first_word: bool = False,
+    ) -> List[Tuple[str, str]]:
+        """对完整的 word 进行分类。"""
+        # KEY=value 赋值
         eq_pos = word.find('=')
         if eq_pos > 0:
             key = word[:eq_pos]
-            # 必须是有效标识符
             if key.isidentifier():
                 return [('ansiyellow', word)]
-        
-        # 检测变量引用 $VAR
+
+        # 变量引用 $VAR
         if word.startswith('$') and len(word) > 1:
             return [(COLORS['variable'], word)]
-        
-        # 检测选项 -x / --xxx
+
+        # 选项 -x / --xxx
         if word.startswith('-'):
             return [(COLORS['option'], word)]
-        
-        # 检测路径
+
+        # 路径
         if self._looks_like_path(word):
             return self._tokenize_path(word)
-        
-        # 检查是否是已知命令（根据位置，调用者处理首词逻辑）
-        # 这里无法确定是否首词，所以返回通用分类
-        if word in self.valid_commands:
+
+        # 命令：仅首词
+        if is_first_word and word in self.valid_commands:
             return [(COLORS['command'], word)]
-        
-        # 回退：string
+
         return [(COLORS['string'], word)]
-    
+
     def _tokenize_path(self, word: str) -> List[Tuple[str, str]]:
-        """路径分词（含存在性检测）"""
         try:
             expanded = PathResolver.expand_path(word, self.virtual_root)
             if self.virtual_root and word.startswith('/'):
@@ -1829,29 +2011,23 @@ class ShellAstTokenizer:
                 return [(COLORS['path_invalid'], word)]
         except Exception:
             return [(COLORS['path_invalid'], word)]
-    
+
     def _looks_like_path(self, text: str) -> bool:
-        """路径检测"""
         if text in ('.', '..'):
             return True
         if text.startswith('~') and (len(text) == 1 or text[1] == '/'):
             return True
         if '/' in text:
             return True
-        # Windows C:\ 风格
         if len(text) > 1 and text[1] == ':' and text[0].isalpha():
             return True
-        # Windows UNC \\server\share
         if text.startswith('\\\\'):
             return True
-        # 反斜杠路径（仅当不含转义序列特征时）
         if '\\' in text:
-            # 排除纯转义序列：\$ \` \" \' \\ \n \t 等
             if text.startswith('\\') and len(text) >= 2:
                 c = text[1]
                 if c in '$`"\'\\' or c in 'nrt0a':
                     return False
-            # Windows 路径如 dir\file 或 C:\ 以外的 \path
             if not os.name == 'nt':
                 return False
             return True
@@ -1860,21 +2036,8 @@ class ShellAstTokenizer:
 
 # ===================== AST 增强型语法高亮器 =====================
 class CommandLexer(Lexer):
-    """
-    AST 驱动的命令行语法高亮器
-    
-    使用 ShellAstTokenizer 进行单遍扫描语义分词，
-    比原 shlex.split + 回退 _lex_manual 方案更准确、更高效。
-    
-    特性:
-    - 状态机分词：正确处理引号嵌套、转义、变量展开
-    - 命令头识别：首词匹配 valid_commands → command / command_invalid
-    - 重定向/管道/逻辑符高亮
-    - 变量 $VAR / $(...) / `${}` / 反引号 统一高亮
-    - 路径存在性检测着色
-    - 历史导航高亮叠加（保留原有功能）
-    """
-    
+    """AST 驱动的命令行语法高亮器"""
+
     def __init__(self, valid_commands: Optional[set] = None, virtual_root: str = "", sys_type: str = None):
         self.valid_commands = valid_commands if valid_commands is not None else set()
         self.virtual_root = virtual_root
@@ -1883,8 +2046,6 @@ class CommandLexer(Lexer):
 
     def lex_document(self, document: Document) -> Callable[[int], List[Tuple[str, str]]]:
         text = document.text
-        # 按行分词：缓冲区可能含多行命令（历史导航回填的原始多行），
-        # 逐行渲染避免整块 token 中的 \n 被 ptk 渲染为 ^J。
         text_lines = text.split("\n")
 
         def get_line_tokens(lineno: int) -> List[Tuple[str, str]]:
@@ -1893,22 +2054,16 @@ class CommandLexer(Lexer):
 
             line_text = text_lines[lineno]
 
-            # 使用 AST 分词器扫描当前行
             tokens = self._tokenizer.tokenize(line_text)
-
-            # ── 首词更正：将第一个非空白、非分隔符的 token 标记为命令 ──
             tokens = self._apply_first_word_as_command(tokens)
 
-            # ── 叠加历史导航高亮 token ──
             global _HIGHLIGHT_TOKEN
             if _HIGHLIGHT_TOKEN:
                 if _HIGHLIGHT_TOKEN in text:
-                    # 高亮位置按当前行计算（tokens 是当前行的）
                     if _HIGHLIGHT_TOKEN in line_text:
                         hl_style = COLORS.get("history_match", "bg:#ffffff #000000")
                         tokens = _overlay_highlight(tokens, line_text, _HIGHLIGHT_TOKEN, hl_style)
                 else:
-                    # token 已不在当前文本中（用户清空或编辑了）→ 清除高亮+导航状态
                     _HIGHLIGHT_TOKEN = ""
                     if _nav_reset_callback:
                         _nav_reset_callback()
@@ -1918,23 +2073,17 @@ class CommandLexer(Lexer):
         return get_line_tokens
 
     def _apply_first_word_as_command(self, tokens: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
-        """
-        将第一个有意义 token 强制标注为命令（含路径命令检测）
-        ShellAstTokenizer._classify_word 不知道词法位置，
-        这里对首词进行命令特殊处理。
-        """
+        """将第一个有意义 token 强制标注为命令（含路径命令检测）"""
         result = []
         found_first = False
-        
+
         for style, text in tokens:
             if not found_first:
                 if text.strip() and style != COLORS['separator']:
                     found_first = True
-                    # 跳过空白/分隔符后，第一个有意义 token 就是命令头
                     if text in self.valid_commands:
                         result.append((COLORS['command'], text))
                     elif self._tokenizer._looks_like_path(text):
-                        # 路径命令（如 ./script.sh）
                         try:
                             expanded = PathResolver.expand_path(text, self.virtual_root)
                             if self.virtual_root and text.startswith('/'):
@@ -1948,50 +2097,71 @@ class CommandLexer(Lexer):
                     else:
                         result.append((COLORS['command_invalid'], text))
                     continue
-            
+
             result.append((style, text))
-        
+
         return result
+
 
 # ===================== 智能虚影补全 =====================
 class SmartAutoSuggest(AutoSuggest):
-    """
-    智能虚影补全器
-    根据当前输入和历史时间，实时显示最近使用的完整命令
-    修复：保留末尾空格，匹配包含空格的历史命令
-    """
+    """智能虚影补全器"""
+
     def __init__(self, completer: Optional['SmartCompleter'] = None):
         self.completer = completer
+
+    def _ghost_from_completion(self, comp, text: str) -> Optional[Suggestion]:
+        comp_text = getattr(comp, "text", "") or ""
+        if not comp_text:
+            return None
+        sp = getattr(comp, "start_position", 0) or 0
+        if sp == 0:
+            return Suggestion(comp_text)
+        if sp < 0:
+            n = min(-sp, len(text))
+            current_word = text[len(text) - n:] if n else ""
+            if current_word and comp_text.startswith(current_word):
+                suffix = comp_text[len(current_word):]
+                return Suggestion(suffix) if suffix else None
+        return None
+
+    def _first_completion(self, buffer, document):
+        cs = getattr(buffer, "complete_state", None)
+        comp = getattr(cs, "current_completion", None) if cs is not None else None
+        if comp is None and cs is not None:
+            comps = getattr(cs, "completions", None) or []
+            comp = comps[0] if comps else None
+        if comp is not None:
+            return comp
+        try:
+            from .kb import is_completion_locked
+            if is_completion_locked():
+                return None
+        except Exception:
+            pass
+        try:
+            for comp in self.completer.get_completions(document, None):
+                return comp
+        except Exception:
+            return None
+        return None
 
     def get_suggestion(self, buffer, document):
         if not self.completer:
             return None
-        
+
         text = document.text_before_cursor
         if not text or text.isspace():
             return None
-        
-        # 优先：基于历史频率的虚影
+
         suggestion_text = self.completer.get_smart_suggestion(text)
         if suggestion_text:
             return Suggestion(suggestion_text)
-        
-        # 回退：无历史虚影时，用补全菜单当前高亮项作为虚影
-        # 用户按 Tab/Shift+Tab 导航菜单时，虚影实时跟随当前选中项
-        cs = buffer.complete_state
-        if cs and cs.current_completion:
-            comp = cs.current_completion
-            if comp.start_position == 0:
-                # 追加模式（如路径补全 /etc/ → hostname）
-                return Suggestion(comp.text)
-            else:
-                # 替换模式（如命令补全 manag → e）
-                current_word = text[comp.start_position:] if comp.start_position < 0 else ""
-                if comp.text.startswith(current_word):
-                    return Suggestion(comp.text[len(current_word):])
-                return Suggestion(comp.text)
-        
-        return None
+
+        comp = self._first_completion(buffer, document)
+        if comp is None:
+            return None
+        return self._ghost_from_completion(comp, text)
 
 
 class FirstSuggestionAutoSuggest(AutoSuggest):
@@ -2011,19 +2181,16 @@ class FirstSuggestionAutoSuggest(AutoSuggest):
         return AutoSuggestFromHistory().get_suggestion(buffer, document)
 
 
-# ===================== 匹配工具（smart-case 排序 + 模糊子序列） =====================
+# ===================== 匹配工具 =====================
 def _prefix_match(query: str, candidate: str) -> bool:
-    """前缀匹配（大小写不敏感，保持既有行为）。空查询视为匹配。"""
     if not query:
         return True
     return candidate.lower().startswith(query.lower())
 
 def _prefix_match_exact(query: str, candidate: str) -> bool:
-    """大小写完全一致的前缀匹配（用于 smart-case 排序优先，不用于排除）。"""
     return bool(query) and candidate.startswith(query)
 
 def _subsequence_positions(needle: str, haystack: str) -> Optional[List[int]]:
-    """needle 作为 haystack 子序列时的匹配位置列表；不匹配返回 None。"""
     if not needle:
         return []
     positions: List[int] = []
@@ -2039,8 +2206,25 @@ def _subsequence_positions(needle: str, haystack: str) -> Optional[List[int]]:
 
 # ===================== 智能补全器 =====================
 class SmartCompleter(Completer):
-    def __init__(self, cmd_list: List[str], show_hidden: bool = True, 
-                 cmd_config_path: str = "", com_cmd_config_path: str = "", 
+
+    # 需要路径补全的命令（无显式树定义时的兜底）
+    PATH_COMMANDS = {
+        'cd', 'ls', 'cat', 'cp', 'mv', 'rm', 'mkdir', 'rmdir',
+        'touch', 'chmod', 'chown', 'find', 'grep', 'file', 'stat',
+        'python', 'python3', 'source', 'run', 'bash', 'sh', './',
+        'nano', 'vim', 'vi', 'emacs', 'less', 'more', 'head', 'tail',
+        'dir', 'copy', 'del', 'erase', 'ren', 'rename', 'md', 'rd',
+        'type', 'more', 'xcopy', 'robocopy',
+    }
+
+    CODE_SHELLS = {
+        'python', 'python3', 'python2', 'py', 'ipython',
+        'node', 'ruby', 'perl', 'lua',
+        'bash', 'sh', 'zsh', 'fish',
+    }
+
+    def __init__(self, cmd_list: List[str], show_hidden: bool = True,
+                 cmd_config_path: str = "", com_cmd_config_path: str = "",
                  virtual_root: str = "", user_home_dir: str = "",
                  history_buffer: List[str] = None):
         self.original_cmd_list = cmd_list
@@ -2049,92 +2233,83 @@ class SmartCompleter(Completer):
         self.cmd_config_path = cmd_config_path
         self.com_cmd_config_path = com_cmd_config_path
         self.virtual_root = virtual_root
-        self.history_buffer = history_buffer or []
+        self.history_buffer = history_buffer if history_buffer is not None else []
         history_file = os.path.join(user_home_dir, ".onyx_history.txt") if user_home_dir else None
         self.freq_manager = get_command_freq(user_home_dir, history_file)
 
         self.cmd_cache = get_command_cache(user_home_dir, cmd_config_path, com_cmd_config_path) if user_home_dir and cmd_config_path else None
+        self.command_tree = CommandTree()
+
+        # 旧字段（外部可能访问）保留
+        self.subcommand_map: Dict[str, List[str]] = {}
+        self.option_map: Dict[str, List[str]] = {}
+        self.argument_map: Dict[str, List[str]] = {}
+
         self._load_cmd_config()
         self._update_cmd_list_order()
-        
+
         self.permission_commands = {'sudo', 'sado'}
-        # 为代码语法补全预留引用，运行时注入 MultiLineCompleter 实例
         self._multiline_completer = None
 
     def set_multiline_completer(self, ml_completer: Any):
-        """注入多行补全器，用于代码上下文的补全"""
         self._multiline_completer = ml_completer
 
     def _load_cmd_config(self):
+        """加载补全配置，构建旧版三张表（兼容外部访问）+ 新版命令树。"""
         if self.cmd_cache:
             self.subcommand_map = self.cmd_cache.get_subcommands_map()
             self.option_map = self.cmd_cache.get_options_map()
             self.argument_map = self.cmd_cache.get_arguments_map()
             cached_commands = self.cmd_cache.get_commands()
             self.original_cmd_list = list(set(self.original_cmd_list) | set(cached_commands))
-        else:
-            self.subcommand_map = {}
-            self.option_map = {}
-            self.argument_map = {}
-            if self.cmd_config_path:
-                config = CommandConfigLoader.load_config(self.cmd_config_path)
-                for cmd, cfg in config.items():
-                    subcmds = cfg.get("subcommands", [])
-                    if isinstance(subcmds, list):
-                        subcmd_names = [sc.get("name", sc) if isinstance(sc, dict) else sc for sc in subcmds]
-                        self.subcommand_map[cmd] = subcmd_names
-                        for sc in subcmds:
-                            if isinstance(sc, dict):
-                                sc_name = sc.get("name", "")
-                                sc_options = sc.get("options", [])
-                                sc_arguments = sc.get("arguments", [])
-                                if sc_name:
-                                    self.option_map[f"{cmd}:{sc_name}"] = sc_options
-                                    self.argument_map[f"{cmd}:{sc_name}"] = sc_arguments
-                    options = cfg.get("options", [])
-                    arguments = cfg.get("arguments", [])
-                    if options:
-                        self.option_map[cmd] = options
-                    if arguments:
-                        self.argument_map[cmd] = arguments
-            
-            if self.com_cmd_config_path:
-                com_config = CommandConfigLoader.load_config(self.com_cmd_config_path)
-                for cmd, cfg in com_config.items():
-                    if cmd not in self.original_cmd_list:
-                        self.original_cmd_list.append(cmd)
-                    
-                    subcmds = cfg.get("subcommands", [])
-                    if isinstance(subcmds, list):
-                        subcmd_names = [sc.get("name", sc) if isinstance(sc, dict) else sc for sc in subcmds]
-                        existing_subcmds = self.subcommand_map.get(cmd, [])
-                        self.subcommand_map[cmd] = list(set(existing_subcmds + subcmd_names))
-                        for sc in subcmds:
-                            if isinstance(sc, dict):
-                                sc_name = sc.get("name", "")
-                                sc_options = sc.get("options", [])
-                                sc_arguments = sc.get("arguments", [])
-                                if sc_name:
-                                    key = f"{cmd}:{sc_name}"
-                                    existing_opts = self.option_map.get(key, [])
-                                    self.option_map[key] = list(set(existing_opts + sc_options))
-                                    existing_args = self.argument_map.get(key, [])
-                                    self.argument_map[key] = list(set(existing_args + sc_arguments))
-                    
-                    options = cfg.get("options", [])
-                    if options:
-                        existing_opts = self.option_map.get(cmd, [])
-                        self.option_map[cmd] = list(set(existing_opts + options))
-                    
-                    arguments = cfg.get("arguments", [])
-                    if arguments:
-                        existing_args = self.argument_map.get(cmd, [])
-                        self.argument_map[cmd] = list(set(existing_args + arguments))
+
+        # 不管有没有 cmd_cache，都把原始 JSON 灌进命令树
+        self._build_command_tree()
+
+        # 如果 cmd_cache 没起作用（比如用户没设 user_home_dir），手工展开三张表
+        if not self.cmd_cache:
+            self._manual_flatten()
+
+    def _manual_flatten(self):
+        """在没有 CommandCache 时，从原始 JSON 手工展开 subcommand_map / option_map / argument_map。"""
+        for path in (self.cmd_config_path, self.com_cmd_config_path):
+            if not path or not os.path.exists(path):
+                continue
+            config = CommandConfigLoader.load_config(path)
+            for cmd, cfg in config.items():
+                if cmd not in self.original_cmd_list:
+                    self.original_cmd_list.append(cmd)
+                CommandCache._flatten_cmd(
+                    cmd, cfg,
+                    self.subcommand_map, self.option_map, self.argument_map,
+                    merge=True,
+                )
+
+    def _build_command_tree(self):
+        """把 cmd_config_path / com_cmd_config_path 归一化为命令树。"""
+        merged: Dict[str, CommandNode] = {}
+        for path in (self.cmd_config_path, self.com_cmd_config_path):
+            if not path or not os.path.exists(path):
+                continue
+            cfg = CommandConfigLoader.load_config(path)
+            for cmd, spec in cfg.items():
+                node = _normalize_command_spec(spec)
+                if cmd in merged:
+                    merged[cmd].merge(node)
+                else:
+                    merged[cmd] = node
+
+        self.command_tree = CommandTree()
+        for name, node in merged.items():
+            self.command_tree.root[name] = node
+            if name not in self.original_cmd_list:
+                self.original_cmd_list.append(name)
 
     def _update_cmd_list_order(self):
         if self.original_cmd_list:
             self.cmd_list = self.freq_manager.get_sorted_commands(self.original_cmd_list)
 
+    # ── 分词 / 段提取 ──
     def _split_command(self, text: str) -> List[str]:
         posix = get_posix_mode()
         try:
@@ -2154,285 +2329,163 @@ class SmartCompleter(Completer):
         segment_text = text[segment_start:cursor_pos]
         return segment_text, segment_start
 
-    def _get_context_for_permission_cmd(self, actual_cmd: str, remaining_parts: List[str], 
-                                          current_word: str, start_pos: int) -> Tuple[str, str, int, str]:
-        if current_word.startswith('-'):
-            return "option", current_word, start_pos, actual_cmd
-        
-        if actual_cmd in self.subcommand_map:
-            subcmds = self.subcommand_map.get(actual_cmd, [])
-            if remaining_parts:
-                subcmd = remaining_parts[0] if remaining_parts else ""
-                if not subcmd and current_word:
-                    for sc in subcmds:
-                        if sc.lower().startswith(current_word.lower()):
-                            return "subcommand", current_word, start_pos, actual_cmd
-            
-            if any(sc.lower().startswith(current_word.lower()) for sc in subcmds):
-                return "subcommand", current_word, start_pos, actual_cmd
-        
-        path_indicators = ['./', '/', '~/', '../', '.', '..']
-        if any(current_word.startswith(ind) for ind in path_indicators) or os.sep in current_word:
-            return "path", current_word, start_pos, actual_cmd
-        
-        return "permission_cmd", current_word, start_pos, actual_cmd
+    @staticmethod
+    def _has_path_indicators(word: str) -> bool:
+        if not word:
+            return False
+        return (word.startswith(('./', '/', '~/', '../', '.', '..'))
+                or os.sep in word)
 
-    def _get_context(self, document: Document) -> Tuple[str, str, int, str]:
-        """
-        获取当前输入的上下文类型。
-        如果检测到多行代码上下文，返回 "code" 类型，并将当前词和文档传递给多行补全器。
-        """
-        text_before = document.text_before_cursor
-        cursor_pos = document.cursor_position
-        segment_text, segment_start = self._get_last_command_segment(document)
+    # ── 树驱动上下文 ──
+    def _get_context(self, document: Document) -> Tuple[str, str, int, str, Optional[CommandNode]]:
+        """返回 (ctx_type, current_word, start_pos, cmd, node)。
 
+        ctx_type ∈ {empty, command, permission_cmd, option, tree, path, variable, code, other}
+        node 仅当 ctx_type ∈ {option, tree} 时非 None。
+        """
+        segment_text, _ = self._get_last_command_segment(document)
         if not segment_text:
-            return "empty", "", 0, ""
+            return "empty", "", 0, "", None
 
-        word_start_in_segment = len(segment_text)
+        # 当前词
+        wsi = len(segment_text)
         for i in range(len(segment_text) - 1, -1, -1):
             if segment_text[i].isspace():
                 break
-            word_start_in_segment = i
-
-        if word_start_in_segment == len(segment_text):
-            current_word = ""
-        else:
-            current_word = segment_text[word_start_in_segment:]
-
+            wsi = i
+        current_word = "" if wsi == len(segment_text) else segment_text[wsi:]
         start_pos = -len(current_word)
 
-        # ── 变量补全：$VAR / ${VAR}（cmd 终端 %VAR%）──
-        # 变量后已跟路径（如 $HOME/foo）时交回路径补全引擎处理（其内部会展开已完整变量）
-        try:
-            if current_word.startswith('$'):
-                _sigil = 2 if current_word.startswith('${') else 1
-                _var_prefix = current_word[_sigil:]
-                if _var_prefix and ('/' in _var_prefix or '\\' in _var_prefix or '}' in _var_prefix):
-                    pass  # 非纯变量词 → 走原有路径/其它上下文
-                else:
-                    return "variable", current_word, start_pos, ""
-            elif current_word.startswith('%') and '%' not in current_word[1:]:
-                # cmd 终端 %VAR% 风格
-                _term_type_var = get_detected_terminal_type()
-                if _term_type_var == 'cmd':
-                    return "variable", current_word, start_pos, ""
-        except Exception:
-            pass
+        # 变量补全
+        if current_word.startswith('$'):
+            sigil = 2 if current_word.startswith('${') else 1
+            vp = current_word[sigil:]
+            if not (vp and ('/' in vp or '\\' in vp or '}' in vp)):
+                return "variable", current_word, start_pos, "", None
+        elif current_word.startswith('%') and '%' not in current_word[1:]:
+            if get_detected_terminal_type() == 'cmd':
+                return "variable", current_word, start_pos, "", None
 
-        text_before_word_in_segment = segment_text[:word_start_in_segment].strip()
-        if not text_before_word_in_segment:
-            # 检测路径形式的首个词：./a.sh, /usr/bin/foo, ~/script, ../tool 等
-            if (current_word.startswith(('./', '/', '~/', '../')) or
-                    (os.sep in current_word and not current_word.startswith('-'))):
-                # 路径以分隔符结尾时追加模式（start_pos=0），否则替换最后一个路径组件
-                if current_word.endswith(os.sep) or current_word.endswith('/'):
-                    return "path", current_word, 0, ""
-                cleaned = current_word.rstrip(os.sep)
-                last_part = os.path.basename(cleaned) if cleaned else ""
-                path_start = -len(last_part) if last_part else 0
-                return "path", current_word, path_start, ""
-            return "command", current_word, start_pos, ""
+        before = segment_text[:wsi].strip()
+        if not before:
+            # 命令名位置
+            if self._has_path_indicators(current_word) and not current_word.startswith('-'):
+                return "path", current_word, start_pos, "", None
+            return "command", current_word, start_pos, "", None
 
         parts = self._split_command(segment_text)
         if not parts:
-            return "other", current_word, start_pos, ""
+            return "other", current_word, start_pos, "", None
 
-        cmd = parts[0]
-        
-        # 检测是否为已知的多行语法启动命令（如 python, node, bash 等）
-        CODE_SHELLS = {'python', 'python3', 'python2', 'py', 'ipython', 'node', 'ruby', 'perl', 'lua', 'bash', 'sh', 'zsh', 'fish'}
-        if cmd in CODE_SHELLS:
-            # 在此上下文中，后续内容可能是代码。我们可以尝试委托给多行补全器。
-            if self._multiline_completer:
-                # 传递整个文档和当前词给多行补全器
-                return "code", current_word, start_pos, cmd
-        
-        if cmd in self.permission_commands:
-            if len(parts) >= 2:
-                actual_cmd = parts[1]
-                if len(parts) >= 3:
-                    remaining_parts = parts[2:]
-                    return self._get_context_for_permission_cmd(
-                        actual_cmd, remaining_parts, current_word, start_pos
-                    )
-                else:
-                    return "permission_cmd", current_word, start_pos, actual_cmd
-            else:
-                return "permission_cmd", current_word, start_pos, ""
+        # 跳过权限包装
+        cmd_index = 0
+        while cmd_index < len(parts) and parts[cmd_index] in self.permission_commands:
+            cmd_index += 1
 
+        completed = parts[:-1] if current_word else parts
+
+        if cmd_index >= len(completed):
+            if current_word.startswith('-'):
+                return "other", current_word, start_pos, "", None
+            return "permission_cmd", current_word, start_pos, "", None
+
+        cmd = completed[cmd_index]
+        tree_parts = completed[cmd_index:]
+
+        # 代码解释器 → 多行补全
+        if cmd in self.CODE_SHELLS and self._multiline_completer and not current_word:
+            return "code", current_word, start_pos, cmd, None
+
+        # 树查找
+        node = self.command_tree.lookup(tree_parts)
+
+        if node is None:
+            # 不在树里 → 退回路径/其他
+            if cmd in self.PATH_COMMANDS or self._has_path_indicators(current_word):
+                return "path", current_word, start_pos, cmd, None
+            return "other", current_word, start_pos, cmd, None
+
+        # 选项优先
         if current_word.startswith('-'):
-            return "option", current_word, start_pos, cmd
+            if node.options:
+                return "option", current_word, start_pos, cmd, node
+            return "other", current_word, start_pos, cmd, None
 
-        path_indicators = ['./', '/', '~/', '../', '.', '..']
-        PATH_COMMANDS = {
-            'cd', 'ls', 'cat', 'cp', 'mv', 'rm', 'mkdir', 'rmdir',
-            'touch', 'chmod', 'chown', 'find', 'grep', 'file', 'stat',
-            'python', 'python3', 'source', 'run', 'bash', 'sh', './',
-            'nano', 'vim', 'vi', 'emacs', 'less', 'more', 'head', 'tail',
-            'dir', 'copy', 'del', 'erase', 'ren', 'rename', 'md', 'rd',
-            'type', 'more', 'xcopy', 'robocopy',
-        }
+        # 有任意补全信息 → 用树补全
+        if not node.is_empty():
+            return "tree", current_word, start_pos, cmd, node
 
-        def _has_path_indicators(word: str) -> bool:
-            return any(word.startswith(ind) for ind in path_indicators) or os.sep in word
+        # 空节点 → 退回路径/其他
+        if cmd in self.PATH_COMMANDS or self._has_path_indicators(current_word):
+            return "path", current_word, start_pos, cmd, None
+        return "other", current_word, start_pos, cmd, None
 
-        def _get_path_result(word: str) -> Tuple[str, str, int, str]:
-            if not word:
-                return "path", "", 0, cmd
-            # 用户已输入完整目录路径+分隔符（如 /etc/），补全项应追加而非替换目录名
-            if word.endswith(os.sep) or word.endswith('/'):
-                return "path", word, 0, cmd
-            cleaned = word.rstrip(os.sep)
-            last_part = os.path.basename(cleaned) if cleaned else ""
-            corrected_start_pos = -len(last_part) if last_part else 0
-            return "path", word, corrected_start_pos, cmd
-
-        if not current_word:
-            # 子命令优先级高于路径：先检查子命令，再检查路径
-            if cmd in self.subcommand_map:
-                if cmd in PATH_COMMANDS:
-                    return "mixed", "", 0, cmd
-                return "subcommand", "", 0, cmd
-            if cmd in PATH_COMMANDS:
-                return "path", "", 0, cmd
-            return "other", current_word, start_pos, cmd
-
-        if len(parts) == 2:
-            if cmd in self.subcommand_map:
-                subcmds = self.subcommand_map.get(cmd, [])
-                matching_subcmds = [sc for sc in subcmds if sc.lower().startswith(current_word.lower())]
-                
-                if matching_subcmds:
-                    has_matching_paths = False
-                    if _has_path_indicators(current_word) or cmd in PATH_COMMANDS:
-                        try:
-                            dir_path, file_prefix, is_abs = PathResolver.split_for_completion(
-                                current_word, self.virtual_root
-                            )
-                            if os.path.isdir(dir_path):
-                                for item in os.listdir(dir_path):
-                                    if item.lower().startswith(file_prefix.lower()):
-                                        has_matching_paths = True
-                                        break
-                        except Exception:
-                            pass
-                    
-                    if has_matching_paths:
-                        return "mixed", current_word, start_pos, cmd
-                    else:
-                        return "subcommand", current_word, start_pos, cmd
-                else:
-                    if _has_path_indicators(current_word) or cmd in PATH_COMMANDS:
-                        return _get_path_result(current_word)
-                    return "other", current_word, start_pos, cmd
-            else:
-                if _has_path_indicators(current_word) or cmd in PATH_COMMANDS:
-                    return _get_path_result(current_word)
-                return "other", current_word, start_pos, cmd
-
-        if len(parts) >= 3:
-            subcmd = parts[1] if len(parts) > 1 else ""
-            
-            if cmd in self.subcommand_map and subcmd in self.subcommand_map.get(cmd, []):
-                arg_key = f"{cmd}:{subcmd}"
-                if arg_key in self.argument_map and self.argument_map[arg_key]:
-                    return "argument", current_word, start_pos, cmd
-                else:
-                    if _has_path_indicators(current_word) or cmd in PATH_COMMANDS:
-                        return _get_path_result(current_word)
-                    return "other", current_word, start_pos, cmd
-            
-            if cmd in self.argument_map and self.argument_map[cmd]:
-                return "argument", current_word, start_pos, cmd
-            
-            if _has_path_indicators(current_word) or cmd in PATH_COMMANDS:
-                return _get_path_result(current_word)
-            return "other", current_word, start_pos, cmd
-
-        # 子命令优先级高于路径：先检查子命令，再 fallback 到路径
-        if cmd in self.subcommand_map:
-            subcmds = self.subcommand_map[cmd]
-            if any(sc.lower().startswith(current_word.lower()) for sc in subcmds):
-                if _has_path_indicators(current_word) or cmd in PATH_COMMANDS:
-                    return "mixed", current_word, start_pos, cmd
-                return "subcommand", current_word, start_pos, cmd
-        
-        if _has_path_indicators(current_word) or cmd in PATH_COMMANDS:
-            return _get_path_result(current_word)
-
-        return "other", current_word, start_pos, cmd
-
+    # ── 虚影建议 ──
     def get_smart_suggestion(self, current_input: str) -> Optional[str]:
         if not current_input:
             return None
-        
+
         prefix = current_input
-        
+
         recent_full_command = self._get_most_recent_full_command(prefix)
         if recent_full_command and recent_full_command != prefix:
-            remaining = recent_full_command[len(prefix):]
-            return remaining
-        
+            return recent_full_command[len(prefix):]
+
         if prefix and not prefix.endswith(' '):
             parts = prefix.split()
             if len(parts) == 1:
                 cmd = parts[0]
-                if cmd in self.subcommand_map:
-                    subcmds = self.subcommand_map.get(cmd, [])
+                if cmd in self.command_tree.root:
+                    subcmds = list(self.command_tree.root[cmd].subcommands.keys())
                     if subcmds:
                         recent_subcmd = self._get_most_recent_subcommand(cmd, subcmds)
                         if recent_subcmd:
                             return f" {recent_subcmd}"
-        
+
         if not prefix.endswith(' '):
             recent_cmd = self._get_most_recent_command(prefix)
             if recent_cmd and recent_cmd != prefix:
-                remaining = recent_cmd[len(prefix):]
-                return remaining
-        
+                return recent_cmd[len(prefix):]
+
         return None
 
     def _get_most_recent_full_command(self, prefix: str) -> Optional[str]:
         if not self.history_buffer:
             return None
-        
-        # 多行命令不作为虚影建议：单行缓冲区无法正确展示（^J/压平），按 → 补全会破坏结构
-        matching = [cmd for cmd in self.history_buffer if '\n' not in cmd and cmd.startswith(prefix)]
-        if matching:
-            return matching[0]
+        for cmd in self.history_buffer:
+            if '\n' not in cmd and cmd.startswith(prefix):
+                return cmd
         return None
 
     def _get_most_recent_command(self, prefix: str) -> Optional[str]:
         if not self.history_buffer:
             return None
-        
         for cmd in self.history_buffer:
             if '\n' not in cmd and cmd.startswith(prefix):
-                cmd_name = cmd.split()[0] if cmd.split() else cmd
-                return cmd_name
+                parts = cmd.split()
+                return parts[0] if parts else cmd
         return None
 
     def _get_most_recent_subcommand(self, cmd: str, subcmds: List[str]) -> Optional[str]:
         if not self.history_buffer:
             return subcmds[0] if subcmds else None
-        
         full_cmd_prefix = f"{cmd} "
         for history_cmd in self.history_buffer:
             if '\n' not in history_cmd and history_cmd.startswith(full_cmd_prefix):
                 parts = history_cmd.split()
-                if len(parts) >= 2:
-                    sub = parts[1]
-                    if sub in subcmds:
-                        return sub
+                if len(parts) >= 2 and parts[1] in subcmds:
+                    return parts[1]
         return subcmds[0] if subcmds else None
 
+    # ── 变量补全 ──
     def _complete_variable(self, current_word: str, start_pos: int):
-        """环境变量补全：$VAR / ${VAR}（cmd 终端 %VAR%）"""
         if not current_word:
             return
         try:
-            keys = list(dict.fromkeys(list(os.environ.keys()) + ["PWD", "OLDPWD", "HOME", "PATH", "USER", "SHELL", "TERM"]))
+            keys = list(dict.fromkeys(
+                list(os.environ.keys())
+                + ["PWD", "OLDPWD", "HOME", "PATH", "USER", "SHELL", "TERM"]
+            ))
         except Exception:
             keys = []
         if not keys:
@@ -2440,7 +2493,6 @@ class SmartCompleter(Completer):
         keys.sort(key=str.lower)
         term_type = get_detected_terminal_type()
         if term_type == 'cmd':
-            # cmd 终端 %VAR% 风格（检测阶段已保证无内嵌 %）
             prefix = current_word[1:]
             for name in keys:
                 if name.lower().startswith(prefix.lower()):
@@ -2451,7 +2503,6 @@ class SmartCompleter(Completer):
                         style=META_COLORS.get('variable', 'ansicyan'),
                     )
             return
-        # posix 风格 $VAR / ${VAR}
         brace = current_word.startswith('${')
         sigil_len = 2 if brace else 1
         prefix = current_word[sigil_len:]
@@ -2465,32 +2516,28 @@ class SmartCompleter(Completer):
                     style=META_COLORS.get('variable', 'ansicyan'),
                 )
 
+    # ── 主入口 ──
     def get_completions(self, document: Document, complete_event):
         self._update_cmd_list_order()
-        ctx_type, current_word, start_pos, cmd = self._get_context(document)
+        ctx_type, current_word, start_pos, cmd, node = self._get_context(document)
 
         if ctx_type == "command":
             yield from self._complete_command(current_word, start_pos)
         elif ctx_type == "permission_cmd":
             yield from self._complete_command(current_word, start_pos, meta_type="permission")
-        elif ctx_type == "subcommand":
-            yield from self._complete_subcommand(current_word, start_pos, cmd)
-        elif ctx_type == "mixed":
-            yield from self._complete_subcommand(current_word, start_pos, cmd)
-            yield from self._complete_path(current_word, start_pos)
+        elif ctx_type == "option" and node is not None:
+            yield from self._complete_option(node, current_word, start_pos)
+        elif ctx_type == "tree" and node is not None:
+            yield from self._complete_tree(node, current_word, start_pos, cmd)
         elif ctx_type == "path":
             yield from self._complete_path(current_word, start_pos)
-        elif ctx_type == "option":
-            yield from self._complete_option(current_word, start_pos, cmd, document)
-        elif ctx_type == "argument":
-            yield from self._complete_argument(current_word, start_pos, cmd, document)
         elif ctx_type == "variable":
             yield from self._complete_variable(current_word, start_pos)
         elif ctx_type == "code" and self._multiline_completer:
-            # 使用多行补全器提供代码补全
             yield from self._multiline_completer.get_completions(document, complete_event)
-        # "other" 或 "empty" 不提供补全
+        # empty / other → 不产出
 
+    # ── 命令名补全 ──
     def _complete_command(self, current_word: str, start_pos: int, meta_type: str = "command"):
         if meta_type == "permission":
             display_meta = "perm"
@@ -2498,16 +2545,13 @@ class SmartCompleter(Completer):
         else:
             display_meta = META_TEXTS_EN.get('command', 'cmd')
             style = META_COLORS.get('command', 'ansigreen bold')
-        
-        # 防守：确保 start_position 不会越界替换或意外追加
-        # 当 start_pos == 0 且 current_word 非空时，应替换而非追加
-        # 当 |start_pos| > len(current_word) 时，clamp 到当前词长度
+
         safe_start = start_pos
         if safe_start == 0 and current_word:
             safe_start = -len(current_word)
         elif safe_start < 0 and abs(safe_start) > len(current_word):
             safe_start = -len(current_word)
-        
+
         if not current_word:
             for cmd in self.cmd_list[:100]:
                 yield Completion(
@@ -2518,8 +2562,6 @@ class SmartCompleter(Completer):
                 )
             return
 
-        # 1) 前缀命中：大小写完全一致者优先（smart-case 排序），其余按频率序；
-        #    大小写不敏感匹配，保证既有“输大写也能补全”的行为不被破坏。
         prefix_hits = set()
         exact_hits: List[str] = []
         loose_hits: List[str] = []
@@ -2538,7 +2580,6 @@ class SmartCompleter(Completer):
                 style=style
             )
 
-        # 2) 模糊（子序列）命中：前缀之外补充，查询 ≥2 字符时启用，避免噪声
         if len(current_word) >= 2:
             needle = current_word.lower()
             for cmd in self.cmd_list:
@@ -2552,7 +2593,112 @@ class SmartCompleter(Completer):
                         style=style
                     )
 
+    # ── 树补全 ──
+    def _complete_tree(self, node: CommandNode, current_word: str, start_pos: int, cmd: str):
+        # 选项优先（- 开头时已在 _get_context 判过，这里再兜一次）
+        if current_word.startswith('-') and node.options:
+            for opt in node.options:
+                if _prefix_match(current_word, opt):
+                    yield Completion(
+                        opt,
+                        start_position=start_pos,
+                        display_meta=META_TEXTS_EN.get('option', 'option'),
+                        style=META_COLORS.get('option', 'ansired'),
+                    )
+            return
+
+        # 1) 子命令（下一级）
+        if node.subcommands:
+            for name in sorted(node.subcommands.keys()):
+                if _prefix_match(current_word, name):
+                    yield Completion(
+                        name,
+                        start_position=start_pos,
+                        display_meta=META_TEXTS_EN.get('subcommand', 'subcmd'),
+                        style=META_COLORS.get('subcommand', 'ansiyellow'),
+                    )
+            # 选项也一并给出（不少命令 subcommand/option 混用）
+            for opt in node.options:
+                if _prefix_match(current_word, opt):
+                    yield Completion(
+                        opt,
+                        start_position=start_pos,
+                        display_meta=META_TEXTS_EN.get('option', 'option'),
+                        style=META_COLORS.get('option', 'ansired'),
+                    )
+            return
+
+        # 2) 固定参数值
+        if node.arguments:
+            for val in node.arguments:
+                if _prefix_match(current_word, val):
+                    yield Completion(
+                        val,
+                        start_position=start_pos,
+                        display_meta=META_TEXTS_EN.get('argument', 'arg'),
+                        style=META_COLORS.get('argument', 'ansimagenta'),
+                    )
+            for opt in node.options:
+                if _prefix_match(current_word, opt):
+                    yield Completion(
+                        opt,
+                        start_position=start_pos,
+                        display_meta=META_TEXTS_EN.get('option', 'option'),
+                        style=META_COLORS.get('option', 'ansired'),
+                    )
+            return
+
+        # 3) 类型化参数 → 路径
+        if node.argument_type == "dir":
+            yield from self._complete_path_filtered(current_word, start_pos, "dir")
+            return
+        if node.argument_type == "file":
+            yield from self._complete_path_filtered(current_word, start_pos, "file")
+            return
+        if node.argument_type in ("value",):
+            return  # 自由文本
+
+        # 4) 兜底路径
+        yield from self._complete_path(current_word, start_pos)
+
+    def _complete_option(self, node: CommandNode, current_word: str, start_pos: int):
+        for opt in node.options:
+            if _prefix_match(current_word, opt):
+                yield Completion(
+                    opt,
+                    start_position=start_pos,
+                    display_meta=META_TEXTS_EN.get('option', 'option'),
+                    style=META_COLORS.get('option', 'ansired'),
+                )
+
+    # ── 路径补全 ──
+    def _complete_path(self, current_word: str, start_pos: int):
+        for comp_text, display_meta, color, rel_start in self.engine.get_completions(current_word, start_pos):
+            yield Completion(
+                comp_text,
+                start_position=rel_start,
+                display_meta=display_meta,
+                style=color.split()[0] if color else "",
+            )
+
+    def _complete_path_filtered(self, current_word: str, start_pos: int, kind: str):
+        """kind: 'file' | 'dir'"""
+        for comp_text, display_meta, color, rel_start in self.engine.get_completions(current_word, start_pos):
+            is_dir = comp_text.endswith(os.sep) or comp_text.endswith('/')
+            if kind == "dir" and not is_dir:
+                continue
+            if kind == "file" and is_dir:
+                continue
+            yield Completion(
+                comp_text,
+                start_position=rel_start,
+                display_meta=display_meta,
+                style=color.split()[0] if color else "",
+            )
+
+    # ── 兼容旧接口 ──
     def _complete_subcommand(self, current_word: str, start_pos: int, cmd: str):
+        """（兼容）子命令补全：从旧 subcommand_map 取列表。"""
         subcmds = self.subcommand_map.get(cmd, [])
         for subcmd in subcmds:
             if _prefix_match(current_word, subcmd):
@@ -2560,64 +2706,26 @@ class SmartCompleter(Completer):
                     subcmd,
                     start_position=start_pos,
                     display_meta=META_TEXTS_EN.get('subcommand', 'subcmd'),
-                    style=META_COLORS.get('subcommand', 'ansiyellow')
-                )
-
-    def _complete_path(self, current_word: str, start_pos: int):
-        completions = self.engine.get_completions(current_word, start_pos)
-        for comp_text, display_meta, color, rel_start in completions:
-            yield Completion(
-                comp_text,
-                start_position=rel_start,
-                display_meta=display_meta,
-                style=color.split()[0] if color else ""
-            )
-
-    def _complete_option(self, current_word: str, start_pos: int, cmd: str, document: Document):
-        segment_text, _ = self._get_last_command_segment(document)
-        parts = self._split_command(segment_text)
-        subcmd = parts[1] if len(parts) > 1 else ""
-
-        if subcmd:
-            key = f"{cmd}:{subcmd}"
-            options = self.option_map.get(key, [])
-            for opt in options:
-                if _prefix_match(current_word, opt):
-                    yield Completion(
-                        opt,
-                        start_position=start_pos,
-                        display_meta=META_TEXTS_EN.get('option', 'option'),
-                        style=META_COLORS.get('option', 'ansired')
-                    )
-
-        options = self.option_map.get(cmd, [])
-        for opt in options:
-            if _prefix_match(current_word, opt):
-                yield Completion(
-                    opt,
-                    start_position=start_pos,
-                    display_meta=META_TEXTS_EN.get('option', 'option'),
-                    style=META_COLORS.get('option', 'ansired')
+                    style=META_COLORS.get('subcommand', 'ansiyellow'),
                 )
 
     def _complete_argument(self, current_word: str, start_pos: int, cmd: str, document: Document):
+        """（兼容）参数补全：从旧 argument_map 取列表。"""
         segment_text, _ = self._get_last_command_segment(document)
         parts = self._split_command(segment_text)
         subcmd = parts[1] if len(parts) > 1 else ""
 
         arguments = []
         if subcmd:
-            key = f"{cmd}:{subcmd}"
-            arguments = self.argument_map.get(key, [])
-        
+            arguments = self.argument_map.get(f"{cmd}:{subcmd}", [])
         if not arguments:
             arguments = self.argument_map.get(cmd, [])
-        
+
         for arg in arguments:
             if _prefix_match(current_word, arg):
                 yield Completion(
                     arg,
                     start_position=start_pos,
                     display_meta=META_TEXTS_EN.get('argument', 'arg'),
-                    style=META_COLORS.get('argument', 'ansimagenta')
+                    style=META_COLORS.get('argument', 'ansimagenta'),
                 )

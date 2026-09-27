@@ -1,0 +1,9 @@
+PASS 有界队列 + 退出标志：满队列写入 0.60s 内返回（不死锁）
+PASS 有界队列容量生效
+PASS 源码断言：增量流式 + worker 侧节流 + TUI 跳过 Live 渲染
+PASS Console 收集：首次扫描 1 次，后续复用注册表（gc 调用 1→1）
+PASS 无头：增量追加 / 标签一次 / 类型切换重建 / 截断重建 / 结束复位
+PASS 输出队列有界（maxsize=8192）
+PASS 活动行刷新关闭 layout（不再每 0.12s 重排日志区）
+
+ALL PASS

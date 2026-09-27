@@ -1,0 +1,40 @@
+ ◆                                        Onyx AI — TUI                                    14:55:39
+│  ◆ ONYX  AI 终端 · 终端里的软件工程助手                         │
+│  直接输入问题，Enter 发送 · Alt+Enter 多行 · AI 运行时输入排    │  ▣ TODO
+│                                                                 │   1 ✓读取 utils.py
+│  ─────────────────────────────────────────────────────────      │   2 ▸ 重构 parse
+│  ❯ 帮我把 utils.py 的 parse 重构一下                           │   3 ○ 跑测试
+│                                                                 │
+│  ◆ AI 回复                                                      │  ▤ FILES
+│                                                                 │  ▾ onyx
+│    重构方案                                                     │  ├── ▸ .config
+│                                                                 │  ├── ▸ .onyx
+│    把 parse 拆成三阶段：                                        │  ├── ▸ __pycache__
+│                                                                 │  ├── ▸ bin
+│     1 词法 _scan()                                              │  ├── ▸ core
+│     2 组装 _assemble()                                          │  ├── ▸ etc
+│                                                                 │  ├── ▸ home
+│    ▌ 保持签名 parse(src) -> Node 不变。                         │  ├── ▸ lib
+│                                                                 │  ├── ▸ onyxlog
+│                                                                 │  ├── ▸ test
+│     def parse(src):                                             │  ├── ▸ tmp
+│         return _assemble(_scan(src))                            │  ├── · .gitignore
+│                                                                 │  ├── · ARCHITECTURE.md
+│                                                                 │  ├── · cmd.py
+│                                                                 │  ├── · help.md
+│    🔧 Read path=utils.py                                        │  ├── · jsd_flat.json
+│     → 128 行，3 个函数：parse / _scan / _assemble               │  ├── · key.key
+│                                                                 │  ├── · LICENSE
+│    🔧 Edit path=utils.py                                        │  ├── · Main.py
+│     → +12 −8                                                    │  ├── · man.py
+│                                                                 │  ├── · Onyx.py
+│  ✓Edit utils.py                                                │  ├── · README.md
+│    utils.py: 已重构                                             │  ├── · requirements.txt
+│                                                                 │  ├── · test_ai_prompt_keys.p
+│                                                                 │  ├── · test_interrupt_chain.
+   ⠧ 思考中…   explore · 扫描仓库中…                              │                        ▉
+  ◆ ~/onyx/onyx  │  ctx 17.2k  │  cache 87.3%  │  ¥42.10
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  输入消息后回车…（AI 运行时输入将排队引导）                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+  Enter=发送 · Alt+Enter=多行 · Tab=补全 · Ctrl+C=取消 · Ctrl+Q=退出

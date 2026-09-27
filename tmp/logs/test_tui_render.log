@@ -1,0 +1,8 @@
+PASS tui_plain 双模式（TUI 无面板但保留标题行）
+PASS AI 回复 TUI 下不套面板但保留标签
+PASS TUI AI 回复：标题行 + 淡蓝底色块
+PASS Markdown 不再被圆点前缀破坏
+PASS ai_tui 渲染接线
+PASS ai_cmd 渲染接线
+
+ALL PASS

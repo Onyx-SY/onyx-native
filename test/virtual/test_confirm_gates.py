@@ -66,15 +66,28 @@ def test_auto_allow_requires_explicit_switch():
     print("PASS ONYX_DANGER_AUTO_ALLOW=1 才恢复「全部自动放行」")
 
 
-def test_timeout_is_fail_closed():
-    """软确认超时必须默认**拒绝**（旧值 timeout_default=True 会照执行）。"""
+def test_timeout_default_execute_above_300k():
+    """软确认（>300k）超时必须默认**执行**（用户指示：大上下文易误判，超时拒绝会卡死 AI）；
+    想回到 fail-closed 可设 ONYX_DANGER_TIMEOUT_DENY=1。"""
     os.environ.pop("ONYX_DANGER_AUTO_ALLOW", None)
+    os.environ.pop("ONYX_DANGER_TIMEOUT_DENY", None)
     captured = {}
     _call_confirm(400_000, captured)
-    assert captured.get("timeout_default") is False, \
-        f"软确认超时必须默认拒绝，实际 timeout_default={captured.get('timeout_default')!r}"
+    assert captured.get("timeout_default") is True, \
+        f"软确认超时应默认执行，实际 timeout_default={captured.get('timeout_default')!r}"
     assert captured.get("timeout") is not None, "软确认应带超时"
-    print(f"PASS 软确认超时 → 默认拒绝（timeout={captured.get('timeout')}s）")
+    print(f"PASS 软确认超时 → 默认执行（timeout={captured.get('timeout')}s）")
+
+    # 逃生舱：ONYX_DANGER_TIMEOUT_DENY=1 → 回到 fail-closed
+    os.environ["ONYX_DANGER_TIMEOUT_DENY"] = "1"
+    try:
+        cap2 = {}
+        _call_confirm(400_000, cap2)
+        assert cap2.get("timeout_default") is False, \
+            "ONYX_DANGER_TIMEOUT_DENY=1 应恢复「超时=拒绝」"
+        print("PASS ONYX_DANGER_TIMEOUT_DENY=1 → 超时拒绝（fail-closed）")
+    finally:
+        os.environ.pop("ONYX_DANGER_TIMEOUT_DENY", None)
 
     captured2 = {}
     _call_confirm(700_000, captured2)                  # >600k → 强制回答
@@ -246,7 +259,7 @@ def test_confirm_plan_never_defaults_to_confirm():
 def main():
     test_no_blanket_auto_allow()
     test_auto_allow_requires_explicit_switch()
-    test_timeout_is_fail_closed()
+    test_timeout_default_execute_above_300k()
     test_trust_window_configurable()
     test_missing_lang_keys_no_crash()
     test_plan_gate_blocks_mutations_from_round_one()

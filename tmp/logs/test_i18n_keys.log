@@ -1,0 +1,5 @@
+PASS 中英键集合一致（416 键）
+PASS 无空值
+PASS 所有 _t/_i18n 引用键均存在
+
+ALL PASS

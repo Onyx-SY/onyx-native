@@ -1,1271 +1,658 @@
 {
   "activite": {
-    "subcommands": [
-      "adv",
-      "mid",
-      "low"
-    ],
-    "options": [
-      "-m",
-      "-t"
-    ]
+    "subcommands": {
+      "adv": {},
+      "mid": {},
+      "low": {}
+    },
+    "options": ["-m", "-t"]
   },
+
   "ai": {
-    "subcommands": [
-      "tui",
-      "repl",
-      "mcp",
-      "plan",
-      "normal",
-      "switch",
-      "list",
-      "new",
-      "install",
-      "remove",
-      "model",
-      "plugin-add",
-      "get-key"
-    ],
+    "subcommands": {
+      "tui": {},
+      "repl": {},
+      "plan": {},
+      "normal": {},
+      "switch": { "arguments": { "type": "value" } },
+      "list": {},
+      "new":   { "arguments": { "type": "value" } },
+      "install": {},
+      "remove":  {},
+      "model":   { "arguments": { "type": "value" } },
+      "plugin-add": {
+        "arguments": { "type": "file" },
+        "subcommands": {
+          "key": { "arguments": { "type": "file" } }
+        }
+      },
+      "get-key": {},
+      "mcp": {
+        "subcommands": {
+          "list":    {},
+          "install": { "arguments": { "type": "value" } },
+          "remove":  { "arguments": { "type": "value" } }
+        }
+      }
+    },
     "options": [
-      "-m",
-      "-mode",
-      "-cmd",
-      "-t",
-      "-f",
-      "-c",
-      "-key",
-      "--debug",
-      "-repl",
-      "-tui",
-      "-mcp",
-      "-model",
-      "-effort",
-      "-plugin",
-      "-plugin-add",
-      "-get-key",
-      "-mid",
-      "-machine-id",
-      "--repl",
-      "--tui"
+      "-m", "-mode", "-cmd", "-t", "-f", "-c", "-key",
+      "--debug", "-repl", "-tui", "-mcp", "-model",
+      "-effort", "-plugin", "-plugin-add", "-get-key",
+      "-mid", "-machine-id", "--repl", "--tui"
     ]
   },
+
   "autocmd": {
-    "subcommands": [
-      "add",
-      "remove",
-      "list",
-      "enable",
-      "disable",
-      "clear"
-    ],
+    "subcommands": {
+      "add":     { "arguments": { "type": "value" } },
+      "remove":  { "arguments": { "type": "value" } },
+      "list":    {},
+      "enable":  { "arguments": { "type": "value" } },
+      "disable": { "arguments": { "type": "value" } },
+      "clear":   {}
+    },
     "options": []
   },
+
   "manage": {
-    "subcommands": [
-      "set",
-      "clean",
-      "language",
-      "chinese",
-      "english",
-      "debug-times",
-      "debug-parsecmd",
-      "adv_danger_cmd_prompt",
-      "spring-mode",
-      "false",
-      "true"
-    ],
-    "options": [
-      "-q",
-      "--quiet"
-    ]
+    "options": ["-q", "--quiet"],
+    "subcommands": {
+      "set": {
+        "subcommands": {
+          "debug-times":          { "arguments": ["true", "false"] },
+          "debug-parsecmd":       { "arguments": ["true", "false"] },
+          "language":             { "arguments": ["Chinese", "English", "zh", "cn", "en"] },
+          "clean-log-time":       { "arguments": ["1", "3", "7", "14", "30", "false"] },
+          "adv_danger_cmd_prompt":{ "arguments": ["true", "false"] },
+          "sandbox":              { "arguments": ["true", "false"] },
+          "mcp":                  { "arguments": ["true", "false"] },
+          "mood":                 { "arguments": ["true", "false"] },
+          "spring-mode":          { "arguments": ["true", "false"] },
+          "builtin-adv-syntax":   { "arguments": ["true", "false"] }
+        }
+      },
+      "clean": {
+        "subcommands": {
+          "cache": { "arguments": ["path", "cmdmap", "dircache", "toolindex", "all"] },
+          "log":   { "arguments": ["all", "other"] }
+        }
+      },
+      "language":  { "arguments": ["Chinese", "English", "zh", "cn", "en"] },
+      "chinese":   {},
+      "english":   {},
+      "debug-times":          { "arguments": ["true", "false"] },
+      "debug-parsecmd":       { "arguments": ["true", "false"] },
+      "adv_danger_cmd_prompt":{ "arguments": ["true", "false"] },
+      "spring-mode":          { "arguments": ["true", "false"] },
+      "false": {},
+      "true":  {}
+    }
   },
+
   "config-onyx-repl": {
-    "subcommands": [
-      "ui",
-      "list",
-      "get",
-      "set",
-      "reset",
-      "--all",
-      "language",
-      "debug-times",
-      "debug-parsecmd",
-      "clean-log-time",
-      "adv_danger_cmd_prompt",
-      "mcp",
-      "spring-mode",
-      "builtin-adv-syntax",
-      "sandbox",
-      "prompt-style",
-      "history-len",
-      "true",
-      "false",
-      "keys",
-      "keys set",
-      "keys reset",
-      "keys list"
-    ],
-    "options": [
-      "-h",
-      "--help"
-    ]
+    "options": ["-h", "--help"],
+    "subcommands": {
+      "ui":    {},
+      "web":   { "options": ["--port"], "arguments": { "type": "int" } },
+      "list":  {},
+      "get":   { "arguments": { "type": "value" } },
+      "set": {
+        "arguments": { "type": "value" },
+        "subcommands": {
+          "language":              { "arguments": ["Chinese", "English", "zh", "cn", "en"] },
+          "debug-times":           { "arguments": ["true", "false"] },
+          "debug-parsecmd":        { "arguments": ["true", "false"] },
+          "clean-log-time":        { "arguments": ["1", "3", "7", "14", "30", "false"] },
+          "adv_danger_cmd_prompt": { "arguments": ["true", "false"] },
+          "mcp":                   { "arguments": ["true", "false"] },
+          "spring-mode":           { "arguments": ["true", "false"] },
+          "builtin-adv-syntax":    { "arguments": ["true", "false"] },
+          "sandbox":               { "arguments": ["true", "false"] },
+          "prompt-style":          { "arguments": ["onyx", "kali", "termux"] },
+          "history-len":           { "arguments": { "type": "int" } }
+        }
+      },
+      "reset": {
+        "arguments": ["--all", "language", "debug-times", "debug-parsecmd",
+                      "clean-log-time", "adv_danger_cmd_prompt", "mcp",
+                      "spring-mode", "builtin-adv-syntax", "sandbox",
+                      "prompt-style", "history-len"]
+      },
+      "lang": { "arguments": ["zh", "en"] },
+      "keys": {
+        "subcommands": {
+          "list":  {},
+          "set":   { "arguments": { "type": "value" } },
+          "reset": { "arguments": ["--all"] }
+        }
+      },
+      "repl": {
+        "subcommands": {
+          "list":  {},
+          "get":   { "arguments": { "type": "value" } },
+          "set":   { "arguments": { "type": "value" } },
+          "reset": { "arguments": ["--all"] }
+        }
+      },
+      "colors": {
+        "subcommands": {
+          "list":  {},
+          "set":   { "arguments": { "type": "value" } },
+          "reset": { "arguments": ["--all"] }
+        }
+      }
+    }
   },
+
   "mktool": {
     "subcommands": [],
-    "options": [
-      "-n",
-      "-l",
-      "-t",
-      "-o"
-    ]
+    "options": ["-n", "-l", "-t", "-o"]
   },
+
   "switch-prompt": {
-    "subcommands": [
-      "list",
-      "preview",
-      "switch",
-      "reset"
-    ],
+    "subcommands": {
+      "list":    {},
+      "preview": { "arguments": { "type": "value" } },
+      "switch":  { "arguments": { "type": "value" } },
+      "reset":   {}
+    },
     "options": []
   },
+
   "unalias": {
     "subcommands": [],
-    "options": [
-      "-a"
-    ]
+    "options": ["-a"]
   },
-  "ls": {
-    "subcommands": [],
-    "options": [
-      "-a",
-      "-l",
-      "-h",
-      "-al",
-      "-la",
-      "-lh",
-      "-R",
-      "-S",
-      "-t",
-      "-r"
-    ]
-  },
-  "ll": {
-    "subcommands": [],
-    "options": []
-  },
-  "mkdir": {
-    "subcommands": [],
-    "options": [
-      "-p",
-      "-m",
-      "-v"
-    ]
-  },
-  "rm": {
-    "subcommands": [],
-    "options": [
-      "-r",
-      "-f",
-      "-rf",
-      "-d",
-      "-v",
-      "-i"
-    ]
-  },
-  "cp": {
-    "subcommands": [],
-    "options": [
-      "-r",
-      "-f",
-      "-i",
-      "-a",
-      "-v",
-      "-p"
-    ]
-  },
-  "mv": {
-    "subcommands": [],
-    "options": [
-      "-f",
-      "-i",
-      "-n",
-      "-v",
-      "-b"
-    ]
-  },
-  "touch": {
-    "subcommands": [],
-    "options": []
-  },
-  "cat": {
-    "subcommands": [],
-    "options": [
-      "-n",
-      "-b"
-    ]
-  },
-  "less": {
-    "subcommands": [],
-    "options": []
-  },
-  "more": {
-    "subcommands": [],
-    "options": []
-  },
-  "head": {
-    "subcommands": [],
-    "options": [
-      "-n"
-    ]
-  },
-  "tail": {
-    "subcommands": [],
-    "options": [
-      "-n",
-      "-f"
-    ]
-  },
-  "echo": {
-    "subcommands": [],
-    "options": [
-      "-n",
-      "-e",
-      "-E"
-    ]
-  },
-  "pwd": {
-    "subcommands": [],
-    "options": []
-  },
-  "cd": {
-    "subcommands": [],
-    "options": []
-  },
-  "clear": {
-    "subcommands": [],
-    "options": []
-  },
-  "whereis": {
-    "subcommands": [],
-    "options": []
-  },
-  "whoami": {
-    "subcommands": [],
-    "options": []
-  },
-  "id": {
-    "subcommands": [],
-    "options": []
-  },
-  "history": {
-    "subcommands": [],
-    "options": [
-      "-c",
-      "-a",
-      "-h",
-      "--chat",
-      "--all",
-      "--help"
-    ]
-  },
-  "grep": {
-    "subcommands": [],
-    "options": [
-      "-i",
-      "-v",
-      "-n",
-      "-r",
-      "-w",
-      "-c",
-      "-l",
-      "-E",
-      "-F"
-    ]
-  },
-  "find": {
-    "subcommands": [],
-    "options": [
-      "-name",
-      "-type",
-      "-mtime",
-      "-atime",
-      "-ctime",
-      "-size",
-      "-exec",
-      "-print",
-      "-delete",
-      "-maxdepth"
-    ]
-  },
-  "sed": {
-    "subcommands": [],
-    "options": [
-      "-i",
-      "-n",
-      "-e"
-    ]
-  },
-  "awk": {
-    "subcommands": [],
-    "options": []
-  },
-  "sort": {
-    "subcommands": [],
-    "options": [
-      "-n",
-      "-r",
-      "-k",
-      "-u"
-    ]
-  },
-  "uniq": {
-    "subcommands": [],
-    "options": [
-      "-c",
-      "-d",
-      "-u"
-    ]
-  },
-  "cut": {
-    "subcommands": [],
-    "options": [
-      "-d",
-      "-f"
-    ]
-  },
-  "wc": {
-    "subcommands": [],
-    "options": [
-      "-l",
-      "-w",
-      "-c"
-    ]
-  },
-  "diff": {
-    "subcommands": [],
-    "options": []
-  },
-  "patch": {
-    "subcommands": [],
-    "options": []
-  },
-  "ps": {
-    "subcommands": [],
-    "options": [
-      "aux",
-      "-ef",
-      "-a",
-      "-u",
-      "-x",
-      "-f"
-    ]
-  },
-  "top": {
-    "subcommands": [],
-    "options": []
-  },
-  "htop": {
-    "subcommands": [],
-    "options": []
-  },
-  "kill": {
-    "subcommands": [],
-    "options": [
-      "-9",
-      "-15",
-      "-l"
-    ]
-  },
-  "killall": {
-    "subcommands": [],
-    "options": []
-  },
-  "pkill": {
-    "subcommands": [],
-    "options": []
-  },
-  "pgrep": {
-    "subcommands": [],
-    "options": []
-  },
-  "nice": {
-    "subcommands": [],
-    "options": []
-  },
-  "renice": {
-    "subcommands": [],
-    "options": []
-  },
-  "nohup": {
-    "subcommands": [],
-    "options": []
-  },
-  "time": {
-    "subcommands": [],
-    "options": []
-  },
-  "chmod": {
-    "subcommands": [],
-    "options": [
-      "-R",
-      "+x",
-      "+w",
-      "+r",
-      "-x",
-      "-R"
-    ]
-  },
-  "chown": {
-    "subcommands": [],
-    "options": [
-      "-R",
-      "-v"
-    ]
-  },
-  "chgrp": {
-    "subcommands": [],
-    "options": [
-      "-R"
-    ]
-  },
-  "umask": {
-    "subcommands": [],
-    "options": []
-  },
-  "su": {
-    "subcommands": [],
-    "options": [
-      "-"
-    ]
-  },
-  "sudo": {
-    "subcommands": [],
-    "options": [
-      "-i",
-      "-s",
-      "-u",
-      "-l"
-    ]
-  },
-  "useradd": {
-    "subcommands": [],
-    "options": [
-      "-m",
-      "-s",
-      "-u",
-      "-g"
-    ]
-  },
-  "userdel": {
-    "subcommands": [],
-    "options": [
-      "-r"
-    ]
-  },
-  "usermod": {
-    "subcommands": [],
-    "options": [
-      "-aG",
-      "-s",
-      "-d"
-    ]
-  },
-  "groupadd": {
-    "subcommands": [],
-    "options": []
-  },
-  "groupdel": {
-    "subcommands": [],
-    "options": []
-  },
-  "passwd": {
-    "subcommands": [],
-    "options": []
-  },
-  "df": {
-    "subcommands": [],
-    "options": [
-      "-h",
-      "-T",
-      "-i",
-      "-l"
-    ]
-  },
-  "du": {
-    "subcommands": [],
-    "options": [
-      "-h",
-      "-s",
-      "-a",
-      "-d"
-    ]
-  },
-  "mount": {
-    "subcommands": [],
-    "options": []
-  },
-  "umount": {
-    "subcommands": [],
-    "options": [
-      "-f"
-    ]
-  },
-  "lsblk": {
-    "subcommands": [],
-    "options": []
-  },
-  "blkid": {
-    "subcommands": [],
-    "options": []
-  },
-  "fdisk": {
-    "subcommands": [],
-    "options": [
-      "-l"
-    ]
-  },
-  "parted": {
-    "subcommands": [],
-    "options": []
-  },
-  "mkfs": {
-    "subcommands": [],
-    "options": [
-      "-t"
-    ]
-  },
-  "fsck": {
-    "subcommands": [],
-    "options": [
-      "-y"
-    ]
-  },
-  "sync": {
-    "subcommands": [],
-    "options": []
-  },
-  "tar": {
-    "subcommands": [],
-    "options": [
-      "-zxvf",
-      "-cvf",
-      "-xf",
-      "-czf",
-      "-xzf",
-      "-tvf",
-      "-cjf",
-      "-xjf"
-    ]
-  },
-  "zip": {
-    "subcommands": [],
-    "options": [
-      "-r",
-      "-q",
-      "-o"
-    ]
-  },
-  "unzip": {
-    "subcommands": [],
-    "options": [
-      "-o",
-      "-q",
-      "-d"
-    ]
-  },
-  "gzip": {
-    "subcommands": [],
-    "options": [
-      "-d"
-    ]
-  },
-  "bzip2": {
-    "subcommands": [],
-    "options": [
-      "-d"
-    ]
-  },
-  "xz": {
-    "subcommands": [],
-    "options": [
-      "-d"
-    ]
-  },
-  "ping": {
-    "subcommands": [],
-    "options": [
-      "-c",
-      "-i",
-      "-s",
-      "-W",
-      "-t"
-    ]
-  },
-  "ip": {
-    "subcommands": [
-      "addr",
-      "link",
-      "route",
-      "neigh",
-      "rule",
-      "addrlabel"
-    ],
-    "options": []
-  },
-  "ifconfig": {
-    "subcommands": [],
-    "options": [
-      "-a"
-    ]
-  },
-  "netstat": {
-    "subcommands": [],
-    "options": [
-      "-tuln",
-      "-an",
-      "-t",
-      "-u",
-      "-l",
-      "-p"
-    ]
-  },
-  "ss": {
-    "subcommands": [],
-    "options": [
-      "-tuln",
-      "-an",
-      "-l",
-      "-p",
-      "-s"
-    ]
-  },
-  "route": {
-    "subcommands": [],
-    "options": [
-      "-n"
-    ]
-  },
-  "nslookup": {
-    "subcommands": [],
-    "options": []
-  },
-  "dig": {
-    "subcommands": [],
-    "options": []
-  },
-  "host": {
-    "subcommands": [],
-    "options": []
-  },
-  "curl": {
-    "subcommands": [],
-    "options": [
-      "-O",
-      "-o",
-      "-I",
-      "-v",
-      "-H",
-      "-X",
-      "-d",
-      "-L",
-      "-k"
-    ]
-  },
-  "wget": {
-    "subcommands": [],
-    "options": [
-      "-O",
-      "-q",
-      "-c",
-      "-t",
-      "-b"
-    ]
-  },
-  "scp": {
-    "subcommands": [],
-    "options": [
-      "-r",
-      "-P",
-      "-i"
-    ]
-  },
-  "ssh": {
-    "subcommands": [],
-    "options": [
-      "-p",
-      "-i",
-      "-l"
-    ]
-  },
-  "telnet": {
-    "subcommands": [],
-    "options": []
-  },
-  "nc": {
-    "subcommands": [],
-    "options": [
-      "-lv",
-      "-z"
-    ]
-  },
-  "tcpdump": {
-    "subcommands": [],
-    "options": [
-      "-i",
-      "-nn",
-      "-w",
-      "-c"
-    ]
-  },
-  "nmap": {
-    "subcommands": [],
-    "options": [
-      "-sV",
-      "-sS",
-      "-sT",
-      "-p",
-      "-Pn",
-      "-A",
-      "-O",
-      "-T"
-    ]
-  },
-  "onyx-nmap": {
-    "subcommands": [],
-    "options": [
-      "-sV",
-      "-sS",
-      "-sT",
-      "-p",
-      "-Pn",
-      "-A",
-      "-O",
-      "-T"
-    ]
-  },
-  "date": {
-    "subcommands": [],
-    "options": [
-      "-s"
-    ]
-  },
-  "cal": {
-    "subcommands": [],
-    "options": []
-  },
-  "uptime": {
-    "subcommands": [],
-    "options": []
-  },
-  "uname": {
-    "subcommands": [],
-    "options": [
-      "-a",
-      "-r",
-      "-s"
-    ]
-  },
-  "hostname": {
-    "subcommands": [],
-    "options": [
-      "-I"
-    ]
-  },
-  "dmesg": {
-    "subcommands": [],
-    "options": [
-      "-T",
-      "-w"
-    ]
-  },
-  "lscpu": {
-    "subcommands": [],
-    "options": []
-  },
-  "lsmem": {
-    "subcommands": [],
-    "options": []
-  },
-  "free": {
-    "subcommands": [],
-    "options": [
-      "-h",
-      "-w"
-    ]
-  },
-  "vmstat": {
-    "subcommands": [],
-    "options": []
-  },
-  "iostat": {
-    "subcommands": [],
-    "options": []
-  },
-  "sar": {
-    "subcommands": [],
-    "options": []
-  },
-  "mpstat": {
-    "subcommands": [],
-    "options": []
-  },
-  "env": {
-    "subcommands": [],
-    "options": []
-  },
-  "locale": {
-    "subcommands": [],
-    "options": []
-  },
-  "crontab": {
-    "subcommands": [],
-    "options": [
-      "-l",
-      "-e",
-      "-r"
-    ]
-  },
-  "systemctl": {
-    "subcommands": [
-      "start",
-      "stop",
-      "restart",
-      "enable",
-      "disable",
-      "status",
-      "reload",
-      "daemon-reload",
-      "list-units",
-      "mask",
-      "unmask"
-    ],
-    "options": []
-  },
-  "journalctl": {
-    "subcommands": [],
-    "options": [
-      "-u",
-      "-f",
-      "-n",
-      "-b",
-      "-p",
-      "-k"
-    ]
-  },
-  "apt": {
-    "subcommands": [
-      "install",
-      "remove",
-      "update",
-      "upgrade",
-      "search",
-      "show",
-      "autoremove",
-      "clean",
-      "autoclean"
-    ],
-    "options": [
-      "-y",
-      "-q",
-      "-f"
-    ]
-  },
-  "yum": {
-    "subcommands": [
-      "install",
-      "remove",
-      "update",
-      "search",
-      "info",
-      "clean",
-      "list"
-    ],
-    "options": [
-      "-y",
-      "-q"
-    ]
-  },
-  "dnf": {
-    "subcommands": [
-      "install",
-      "remove",
-      "update",
-      "search",
-      "info",
-      "list"
-    ],
-    "options": [
-      "-y",
-      "-q"
-    ]
-  },
-  "zypper": {
-    "subcommands": [
-      "install",
-      "remove",
-      "update",
-      "search"
-    ],
-    "options": [
-      "-y"
-    ]
-  },
-  "pacman": {
-    "subcommands": [
-      "-S",
-      "-R",
-      "-Syu",
-      "-Qs"
-    ],
-    "options": []
-  },
-  "python": {
-    "subcommands": [],
-    "options": [
-      "-V",
-      "--version",
-      "-c",
-      "-m",
-      "-O"
-    ]
-  },
-  "python3": {
-    "subcommands": [],
-    "options": [
-      "-V",
-      "--version",
-      "-c",
-      "-m",
-      "-O"
-    ]
-  },
-  "pip": {
-    "subcommands": [
-      "install",
-      "uninstall",
-      "list",
-      "show",
-      "freeze",
-      "upgrade",
-      "cache",
-      "config"
-    ],
-    "options": [
-      "-U",
-      "-q",
-      "-v",
-      "--no-cache-dir"
-    ]
-  },
-  "node": {
-    "subcommands": [],
-    "options": [
-      "-v"
-    ]
-  },
-  "npm": {
-    "subcommands": [
-      "install",
-      "uninstall",
-      "start",
-      "run",
-      "test",
-      "init",
-      "cache",
-      "config"
-    ],
-    "options": [
-      "-g",
-      "-S",
-      "-D",
-      "-v"
-    ]
-  },
-  "yarn": {
-    "subcommands": [
-      "add",
-      "remove",
-      "start",
-      "run",
-      "test"
-    ],
-    "options": [
-      "-D",
-      "-g"
-    ]
-  },
-  "pnpm": {
-    "subcommands": [
-      "add",
-      "remove",
-      "install",
-      "run"
-    ],
-    "options": [
-      "-g"
-    ]
-  },
-  "go": {
-    "subcommands": [
-      "run",
-      "build",
-      "mod",
-      "install",
-      "env"
-    ],
-    "options": []
-  },
-  "java": {
-    "subcommands": [],
-    "options": [
-      "-version"
-    ]
-  },
-  "javac": {
-    "subcommands": [],
-    "options": []
-  },
-  "mvn": {
-    "subcommands": [
-      "clean",
-      "install",
-      "package",
-      "compile"
-    ],
-    "options": []
-  },
-  "gradle": {
-    "subcommands": [
-      "clean",
-      "build",
-      "run"
-    ],
-    "options": []
-  },
-  "git": {
-    "subcommands": [
-      "init",
-      "clone",
-      "add",
-      "commit",
-      "push",
-      "pull",
-      "status",
-      "log",
-      "branch",
-      "checkout",
-      "merge",
-      "remote",
-      "reset",
-      "stash",
-      "tag",
-      "fetch",
-      "restore",
-      "rebase",
-      "config"
-    ],
-    "options": [
-      "-m",
-      "-a",
-      "-f",
-      "--force",
-      "--global",
-      "--help",
-      "--version",
-      "-v",
-      "-q"
-    ]
-  },
-  "gitlab": {
-    "subcommands": [],
-    "options": []
-  },
-  "gh": {
-    "subcommands": [
-      "auth",
-      "repo",
-      "clone",
-      "pr",
-      "issue"
-    ],
-    "options": []
-  },
-  "docker": {
-    "subcommands": [
-      "run",
-      "ps",
-      "images",
-      "pull",
-      "push",
-      "exec",
-      "rm",
-      "rmi",
-      "start",
-      "stop",
-      "restart",
-      "logs",
-      "build",
-      "network",
-      "volume",
-      "cp"
-    ],
-    "options": [
-      "-it",
-      "-d",
-      "-p",
-      "-v",
-      "-e",
-      "--name",
-      "--rm"
-    ]
-  },
-  "docker-compose": {
-    "subcommands": [
-      "up",
-      "down",
-      "ps",
-      "logs",
-      "build",
-      "restart",
-      "exec"
-    ],
-    "options": [
-      "-d"
-    ]
-  },
-  "podman": {
-    "subcommands": [
-      "run",
-      "ps",
-      "images",
-      "pull",
-      "exec",
-      "rm"
-    ],
-    "options": []
-  },
-  "kubectl": {
-    "subcommands": [
-      "get",
-      "describe",
-      "create",
-      "delete",
-      "apply",
-      "logs",
-      "exec",
-      "scale",
-      "port-forward",
-      "explain",
-      "edit",
-      "rollout",
-      "label",
-      "annotate"
-    ],
-    "options": [
-      "-n",
-      "-f",
-      "-o",
-      "-A",
-      "-w"
-    ]
-  },
-  "k9s": {
-    "subcommands": [],
-    "options": []
-  },
-  "helm": {
-    "subcommands": [
-      "install",
-      "uninstall",
-      "list",
-      "upgrade",
-      "repo"
-    ],
-    "options": []
-  },
-  "last": {
-    "subcommands": [],
-    "options": []
-  },
-  "lastlog": {
-    "subcommands": [],
-    "options": []
-  },
-  "lsusb": {
-    "subcommands": [],
-    "options": []
-  },
-  "lspci": {
-    "subcommands": [],
-    "options": []
-  },
-  "watch": {
-    "subcommands": [],
-    "options": [
-      "-n"
-    ]
-  },
-  "screen": {
-    "subcommands": [],
-    "options": []
-  },
-  "tmux": {
-    "subcommands": [],
-    "options": []
-  },
-  "tree": {
-    "subcommands": [],
-    "options": [
-      "-L"
-    ]
-  },
-  "md5sum": {
-    "subcommands": [],
-    "options": []
-  },
-  "sha256sum": {
-    "subcommands": [],
-    "options": []
-  },
-  "base64": {
-    "subcommands": [],
-    "options": [
-      "-d"
-    ]
-  },
-  "jq": {
-    "subcommands": [],
-    "options": [
-      "-r"
-    ]
-  },
-  "bc": {
-    "subcommands": [],
-    "options": []
-  },
+
   "tml": {
-    "subcommands": [
-      "install",
-      "remove",
-      "update",
-      "info",
-      "list",
-      "help",
-      "search",
-      "config"
-    ],
-    "options": [
-      "-r",
-      "-u",
-      "-f"
-    ]
+    "subcommands": {
+      "install": { "arguments": { "type": "value" } },
+      "remove":  { "arguments": { "type": "value" } },
+      "update":  {},
+      "info":    { "arguments": { "type": "value" } },
+      "list":    {},
+      "help":    {},
+      "search":  { "arguments": { "type": "value" } },
+      "config":  {}
+    },
+    "options": ["-r", "-u", "-f"]
   },
+
   "nanosado": {
-    "subcommands": [
-      "nano",
-      "vim",
-      "vi"
-    ],
+    "subcommands": {
+      "nano": { "arguments": { "type": "file", "multiple": true } },
+      "vim":  { "arguments": { "type": "file", "multiple": true } },
+      "vi":   { "arguments": { "type": "file", "multiple": true } }
+    },
+    "options": []
+  },
+
+  "cd": {
+    "arguments": { "type": "dir" },
+    "options": []
+  },
+
+  "ls": {
+    "options": ["-a", "-l", "-h", "-al", "-la", "-lh", "-R", "-S", "-t", "-r"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "ll": {
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "mkdir": {
+    "options": ["-p", "-m", "-v"],
+    "arguments": { "type": "dir", "multiple": true }
+  },
+
+  "rmdir": {
+    "arguments": { "type": "dir", "multiple": true }
+  },
+
+  "rm": {
+    "options": ["-r", "-f", "-rf", "-d", "-v", "-i"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "cp": {
+    "options": ["-r", "-f", "-i", "-a", "-v", "-p"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "mv": {
+    "options": ["-f", "-i", "-n", "-v", "-b"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "touch": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "cat": {
+    "options": ["-n", "-b"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "less": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "more": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "head": {
+    "options": ["-n"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "tail": {
+    "options": ["-n", "-f"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "nano": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "vim": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "vi": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "emacs": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "grep": {
+    "options": ["-i", "-v", "-n", "-r", "-w", "-c", "-l", "-E", "-F"],
+    "arguments": { "type": "value" }
+  },
+
+  "find": {
+    "options": ["-name", "-type", "-mtime", "-atime", "-ctime", "-size",
+                "-exec", "-print", "-delete", "-maxdepth"],
+    "arguments": { "type": "dir" }
+  },
+
+  "sed": {
+    "options": ["-i", "-n", "-e"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "awk": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "sort": {
+    "options": ["-n", "-r", "-k", "-u"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "uniq": {
+    "options": ["-c", "-d", "-u"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "cut": {
+    "options": ["-d", "-f"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "wc": {
+    "options": ["-l", "-w", "-c"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "diff": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "patch": {
+    "options": [],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "tar": {
+    "options": ["-zxvf", "-cvf", "-xf", "-czf", "-xzf", "-tvf", "-cjf", "-xjf"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "zip": {
+    "options": ["-r", "-q", "-o"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "unzip": {
+    "options": ["-o", "-q", "-d"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "gzip": {
+    "options": ["-d"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "bzip2": {
+    "options": ["-d"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "xz": {
+    "options": ["-d"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "chmod": {
+    "options": ["-R", "+x", "+w", "+r", "-x"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "chown": {
+    "options": ["-R", "-v"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "chgrp": {
+    "options": ["-R"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "python": {
+    "options": ["-V", "--version", "-c", "-m", "-O"],
+    "arguments": { "type": "file" }
+  },
+
+  "python3": {
+    "options": ["-V", "--version", "-c", "-m", "-O"],
+    "arguments": { "type": "file" }
+  },
+
+  "node": {
+    "options": ["-v"],
+    "arguments": { "type": "file" }
+  },
+
+  "git": {
+    "subcommands": {
+      "init":     { "arguments": { "type": "dir" } },
+      "clone":    { "arguments": { "type": "value" } },
+      "add":      { "arguments": { "type": "file", "multiple": true } },
+      "commit":   { "options": ["-m", "-a"] },
+      "push":     { "options": ["-u", "-f"] },
+      "pull":     {},
+      "status":   {},
+      "log":      {},
+      "branch":   { "options": ["-a", "-d", "-D"] },
+      "checkout": { "options": ["-b"] },
+      "merge":    {},
+      "remote":   { "subcommands": { "add": {}, "remove": {}, "set-url": {}, "show": {} } },
+      "reset":    { "options": ["--soft", "--mixed", "--hard"] },
+      "stash":    { "subcommands": { "list": {}, "pop": {}, "drop": {} } },
+      "tag":      {},
+      "fetch":    {},
+      "restore":  { "arguments": { "type": "file", "multiple": true } },
+      "rebase":   {},
+      "config":   {}
+    },
+    "options": ["-m", "-a", "-f", "--force", "--global",
+                "--help", "--version", "-v", "-q"]
+  },
+
+  "docker": {
+    "subcommands": {
+      "run":    { "options": ["-it", "-d", "-p", "-v", "-e", "--name", "--rm"] },
+      "ps":     { "options": ["-a"] },
+      "images": {},
+      "pull":   { "arguments": { "type": "value" } },
+      "push":   { "arguments": { "type": "value" } },
+      "exec":   { "options": ["-it"] },
+      "rm":     {},
+      "rmi":    {},
+      "start":  {},
+      "stop":   {},
+      "restart":{},
+      "logs":   { "options": ["-f", "--tail"] },
+      "build":  { "options": ["-t", "-f"] },
+      "network":{ "subcommands": { "create": {}, "ls": {}, "rm": {}, "inspect": {} } },
+      "volume": { "subcommands": { "create": {}, "ls": {}, "rm": {}, "inspect": {} } },
+      "cp":     { "arguments": { "type": "file", "multiple": true } }
+    },
+    "options": ["-it", "-d", "-p", "-v", "-e", "--name", "--rm"]
+  },
+
+  "docker-compose": {
+    "subcommands": {
+      "up":      { "options": ["-d"] },
+      "down":    {},
+      "ps":      {},
+      "logs":    { "options": ["-f"] },
+      "build":   {},
+      "restart": {},
+      "exec":    {}
+    },
+    "options": ["-d"]
+  },
+
+  "kubectl": {
+    "subcommands": {
+      "get":         { "arguments": ["pods", "svc", "deploy", "nodes", "ns", "cm", "secret", "ingress"] },
+      "describe":    { "arguments": ["pods", "svc", "deploy", "nodes", "ns"] },
+      "create":      { "options": ["-f"] },
+      "delete":      { "options": ["-f"] },
+      "apply":       { "options": ["-f"] },
+      "logs":        { "options": ["-f", "--tail"] },
+      "exec":        { "options": ["-it"] },
+      "scale":       {},
+      "port-forward":{},
+      "explain":     {},
+      "edit":        {},
+      "rollout":     { "subcommands": { "status": {}, "restart": {}, "undo": {} } },
+      "label":       {},
+      "annotate":    {}
+    },
+    "options": ["-n", "-f", "-o", "-A", "-w"]
+  },
+
+  "npm": {
+    "subcommands": {
+      "install":   { "options": ["-g", "-S", "-D"] },
+      "uninstall": { "options": ["-g"] },
+      "start":     {},
+      "run":       { "arguments": { "type": "value" } },
+      "test":      {},
+      "init":      { "options": ["-y"] },
+      "cache":     { "subcommands": { "clean": {}, "verify": {} } },
+      "config":    { "subcommands": { "get": {}, "set": {}, "list": {} } }
+    },
+    "options": ["-g", "-S", "-D", "-v"]
+  },
+
+  "yarn": {
+    "subcommands": {
+      "add":    { "arguments": { "type": "value" } },
+      "remove": { "arguments": { "type": "value" } },
+      "start":  {},
+      "run":    { "arguments": { "type": "value" } },
+      "test":   {}
+    },
+    "options": ["-D", "-g"]
+  },
+
+  "pnpm": {
+    "subcommands": {
+      "add":     { "arguments": { "type": "value" } },
+      "remove":  { "arguments": { "type": "value" } },
+      "install": {},
+      "run":     { "arguments": { "type": "value" } }
+    },
+    "options": ["-g"]
+  },
+
+  "pip": {
+    "subcommands": {
+      "install":   { "arguments": { "type": "value" } },
+      "uninstall": { "arguments": { "type": "value" } },
+      "list":      {},
+      "show":      { "arguments": { "type": "value" } },
+      "freeze":    {},
+      "upgrade":   { "arguments": { "type": "value" } },
+      "cache":     { "subcommands": { "purge": {}, "list": {}, "dir": {} } },
+      "config":    { "subcommands": { "list": {}, "get": {}, "set": {} } }
+    },
+    "options": ["-U", "-q", "-v", "--no-cache-dir"]
+  },
+
+  "go": {
+    "subcommands": {
+      "run":     { "arguments": { "type": "file" } },
+      "build":   { "arguments": { "type": "dir" } },
+      "mod":     { "subcommands": { "init": {}, "tidy": {}, "download": {} } },
+      "install": {},
+      "env":     {}
+    },
+    "options": []
+  },
+
+  "mvn": {
+    "subcommands": {
+      "clean":   {},
+      "install": {},
+      "package": {},
+      "compile": {}
+    },
+    "options": []
+  },
+
+  "gradle": {
+    "subcommands": {
+      "clean": {},
+      "build": {},
+      "run":   {}
+    },
+    "options": []
+  },
+
+  "apt": {
+    "subcommands": {
+      "install":    { "arguments": { "type": "value" } },
+      "remove":     { "arguments": { "type": "value" } },
+      "update":     {},
+      "upgrade":    {},
+      "search":     { "arguments": { "type": "value" } },
+      "show":       { "arguments": { "type": "value" } },
+      "autoremove": {},
+      "clean":      {},
+      "autoclean":  {}
+    },
+    "options": ["-y", "-q", "-f"]
+  },
+
+  "yum": {
+    "subcommands": {
+      "install": { "arguments": { "type": "value" } },
+      "remove":  { "arguments": { "type": "value" } },
+      "update":  {},
+      "search":  { "arguments": { "type": "value" } },
+      "info":    { "arguments": { "type": "value" } },
+      "clean":   {},
+      "list":    {}
+    },
+    "options": ["-y", "-q"]
+  },
+
+  "dnf": {
+    "subcommands": {
+      "install": { "arguments": { "type": "value" } },
+      "remove":  { "arguments": { "type": "value" } },
+      "update":  {},
+      "search":  { "arguments": { "type": "value" } },
+      "info":    { "arguments": { "type": "value" } },
+      "list":    {}
+    },
+    "options": ["-y", "-q"]
+  },
+
+  "systemctl": {
+    "subcommands": {
+      "start":         { "arguments": { "type": "value" } },
+      "stop":          { "arguments": { "type": "value" } },
+      "restart":       { "arguments": { "type": "value" } },
+      "enable":        { "arguments": { "type": "value" } },
+      "disable":       { "arguments": { "type": "value" } },
+      "status":        { "arguments": { "type": "value" } },
+      "reload":        { "arguments": { "type": "value" } },
+      "daemon-reload": {},
+      "list-units":    {},
+      "mask":          { "arguments": { "type": "value" } },
+      "unmask":        { "arguments": { "type": "value" } }
+    },
+    "options": []
+  },
+
+  "curl": {
+    "options": ["-O", "-o", "-I", "-v", "-H", "-X", "-d", "-L", "-k"],
+    "arguments": { "type": "value" }
+  },
+
+  "wget": {
+    "options": ["-O", "-q", "-c", "-t", "-b"],
+    "arguments": { "type": "value" }
+  },
+
+  "scp": {
+    "options": ["-r", "-P", "-i"],
+    "arguments": { "type": "file", "multiple": true }
+  },
+
+  "ssh": {
+    "options": ["-p", "-i", "-l"],
+    "arguments": { "type": "value" }
+  },
+
+  "ping": {
+    "options": ["-c", "-i", "-s", "-W", "-t"],
+    "arguments": { "type": "value" }
+  },
+
+  "nmap": {
+    "options": ["-sV", "-sS", "-sT", "-p", "-Pn", "-A", "-O", "-T"],
+    "arguments": { "type": "value" }
+  },
+
+  "onyx-nmap": {
+    "options": ["-sV", "-sS", "-sT", "-p", "-Pn", "-A", "-O", "-T"],
+    "arguments": { "type": "value" }
+  },
+
+  "ip": {
+    "subcommands": {
+      "addr":      {},
+      "link":      {},
+      "route":     {},
+      "neigh":     {},
+      "rule":      {},
+      "addrlabel": {}
+    },
+    "options": []
+  },
+
+  "env": {
+    "arguments": { "type": "value" },
     "options": []
   }
 }

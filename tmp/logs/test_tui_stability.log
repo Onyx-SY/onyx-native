@@ -1,0 +1,6 @@
+PASS Ctrl+C 触发 action_cancel
+PASS worker 遇 BaseException 仍存活
+PASS 模态超时返回，不永久阻塞 worker
+PASS 退出清理（停线程 / 还原 stdout / 注销适配器）
+
+ALL PASS

@@ -1,0 +1,14 @@
+PASS X10 鼠标报文（含 0xBC 坐标字节）被剔除
+PASS 被 read 切开的 X10 报文同样被剔除
+PASS SGR 鼠标报文被剔除且不影响相邻字符
+PASS 显式关闭鼠标剔除时原样透传
+PASS 开启鼠标时 X10 鼠标报文被转写为 SGR（点击可被 Textual 解析，且不产生非法字节）
+PASS 中文、方向键、退格、Tab 原样通过（CRLF 归一化为 CR）
+PASS 跨批次的半截多字节字符被正确拼接
+PASS 孤立非法字节被丢弃（不产生 U+FFFD）
+PASS 解码器对崩溃样本不抛异常且只保留正常文本
+PASS 净化器异常时解码器仍有兜底
+PASS 净化器已挂载到 LinuxDriver 且可重复调用（幂等）
+PASS 鼠标追踪默认开启、可用 ONYX_TUI_MOUSE=0 关闭
+
+ALL PASS

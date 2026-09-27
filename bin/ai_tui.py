@@ -55,7 +55,10 @@ _CANCEL = "__cancel__"
 # 字节一律丢弃，避免滑动/滚轮时把一堆字节灌进输入框。
 # ⚠️ 只过滤「可打印字符」：Enter(\r) / 退格(\x7f) / Tab(\t) / Ctrl+X 等控制键必须放行，
 #    否则输入框会整体失效（历史 bug：Enter 被当成控制字节吞掉 → 完全无法发送）。
-_ESC_LEAK_WINDOW = 0.1
+# 窗口取 30ms：泄漏字节与 Esc 在**同一次 read** 里到达（微秒级相邻），30ms 足够覆盖；
+# 窗口越长，AI 执行期间（终端持续吐输出、触摸/滚轮报文频繁）误吞真实按键的概率越大
+# （用户反馈「AI 执行时输入有时不灵」）。
+_ESC_LEAK_WINDOW = 0.03
 
 # Markdown 主题：默认主题的标题只有「粗体+下划线」，观感上和白字几乎一样
 # （用户反馈「整屏都是一堆白字」）。这里给标题/代码/列表/引用都上真颜色。
@@ -236,7 +239,8 @@ def _enable_alt_enter_keys() -> None:
 # 同一批报文还会被 XTermParser 拆成 ESC + 一串可打印字节，灌进输入框（「信号泄露」）。
 #
 # 净化器在**字节层**做三件事（跨 read 保持状态，能处理被切开的序列）：
-#   1) 剔除 X10 / SGR 鼠标报文（本 App 零鼠标处理，留着只有害处）；
+#   1) 处理鼠标报文：X10 一律拦下（关闭鼠标→剔除；开启鼠标→转写成 SGR，见 _x10_to_sgr），
+#      SGR 在关闭鼠标时剔除、开启鼠标时放行（Textual 靠它做点击 / 滚轮）；
 #   2) 丢弃非法 UTF-8 字节（否则容错解码会把它们变成 U+FFFD 灌进输入框）；
 #   3) 其余字节原样透传（中文、Enter、方向键、Ctrl+X 等一律不受影响）。
 
@@ -252,6 +256,10 @@ _PASTE_END = b"\x1b[201~"
 # → 在单行框里等价于「直接发送」，多行模式永远进不去。CSI-u 则被稳定解析成 shift+enter。
 _ALT_ENTER_CSI_U = b"\x1b[13;2u"
 _MAX_PENDING = 64          # 未闭合序列的最大缓存（超出即视为普通字节放行）
+# 单次刷进日志区的最大条目数：命令一次性吐几千行时，若把积压全部在一次
+# RichLog.write 里写完，主线程会被占住几百毫秒（期间按键无响应 = 「输入不灵」）。
+# 分片刷（下一轮立刻接着刷）让出主线程，保证输入始终跟手。
+_FLUSH_MAX_ITEMS = 200
 
 
 def _utf8_len(b: int) -> int:
@@ -268,13 +276,40 @@ def _utf8_len(b: int) -> int:
 
 
 class _InputSanitizer:
-    """字节流净化器：鼠标报文剔除 + 非法 UTF-8 丢弃 + 半截序列缓存 + 换行归一化。"""
+    """字节流净化器：鼠标报文处理（X10 剔除/SGR 转写）+ 非法 UTF-8 丢弃 + 半截序列缓存 + 换行归一化。"""
 
     def __init__(self, strip_mouse: bool = True):
         self.strip_mouse = bool(strip_mouse)
         self._pending = bytearray()
         self._in_paste = False   # 括号粘贴（\x1b[200~ … \x1b[201~）内：内容原样透传
         self._last_cr = False    # 上一字节是否 CR（用于折叠 CRLF）
+        self._last_mouse_btn = 0  # 最近按下的鼠标键（X10→SGR 转写「释放」报文时要用）
+
+    def _x10_to_sgr(self, seq: bytes) -> bytes:
+        """把 legacy X10 鼠标报文 `ESC [ M Cb Cx Cy` 就地转写成 SGR 报文。
+
+        Textual 的解析器只认 SGR（`ESC [ < b ; x ; y M|m`），X10 会被整段丢掉；
+        而 X10 的 Cb/Cx/Cy 都是 `0x20 + 值`，与 SGR 的 b/x/y 一一对应：
+            b = Cb - 32,  x = Cx - 32,  y = Cy - 32
+        「释放」在 X10 里用键码 3，在 SGR 里必须写成小写 `m` 并带上刚按下的键，
+        所以这里记忆 self._last_mouse_btn。任何异常都返回 b""（= 当垃圾字节丢弃）。
+        """
+        try:
+            if len(seq) < 6:
+                return b""
+            cb = seq[3] - 32
+            cx = seq[4] - 32
+            cy = seq[5] - 32
+            if cb < 0 or cx <= 0 or cy <= 0:
+                return b""
+            if cb & 96:                     # 滚轮(64) / 拖动(32)：位语义与 SGR 相同，按 M 上报
+                return b"\x1b[<%d;%d;%dM" % (cb, cx, cy)
+            if (cb & 3) == 3:               # 释放：SGR 用小写 m + 原按键
+                return b"\x1b[<%d;%d;%dm" % (self._last_mouse_btn, cx, cy)
+            self._last_mouse_btn = cb & 3   # 按下：记住按键，供随后的释放报文使用
+            return b"\x1b[<%d;%d;%dM" % (cb, cx, cy)
+        except Exception:
+            return b""
 
     def feed(self, data: bytes) -> bytes:
         if not data:
@@ -311,14 +346,18 @@ class _InputSanitizer:
                     out += _ALT_ENTER_CSI_U
                     i += 2
                     continue
+                # X10 鼠标：ESC [ M + 3 字节（坐标字节可 >= 0x80，会打死严格 UTF-8 解码器）。
+                # 一律不让它原样进 Textual：关闭鼠标时剔除，开启鼠标时转写成 SGR
+                # （Textual 只认 SGR；转写后全是 ASCII，既点得中按钮也不会崩解码器）。
+                if buf.startswith(_MOUSE_X10, i):
+                    if i + 6 <= n:
+                        if not self.strip_mouse:
+                            out += self._x10_to_sgr(buf[i:i + 6])
+                        i += 6
+                        continue
+                    self._pending = bytearray(buf[i:])
+                    break
                 if self.strip_mouse:
-                    # X10 鼠标：ESC [ M + 3 字节（坐标字节可 >= 0x80）
-                    if buf.startswith(_MOUSE_X10, i):
-                        if i + 6 <= n:
-                            i += 6
-                            continue
-                        self._pending = bytearray(buf[i:])
-                        break
                     # SGR 鼠标：ESC [ < … 直到 M / m 收尾
                     if buf.startswith(_MOUSE_SGR, i):
                         j = i + 3
@@ -489,16 +528,20 @@ def _debug_dump_input(raw: bytes) -> None:
 
 
 def _tui_mouse_enabled() -> bool:
-    """是否启用鼠标追踪：默认关闭。
+    """是否启用鼠标追踪：**默认开启**（TUI 里的按钮 / 选项列表要靠点击才可用）。
 
-    Termux 触摸滑动会发 legacy 鼠标报文 → 既触发解码崩溃，又把字节漏进输入框；
-    本 App 不处理鼠标事件，关掉是纯收益。需要时用 ONYX_TUI_MOUSE=1 打开。
+    安全性：legacy X10 鼠标报文（`ESC [ M` + 3 字节，坐标字节可 >= 0x80）会被
+    _InputSanitizer 拦下 —— 关闭鼠标时直接剔除，开启鼠标时就地转写成 SGR（纯 ASCII），
+    因此**不会**再触发严格 UTF-8 解码崩溃，也不会把字节漏进输入框。
+    SGR 报文（`ESC [ < … M/m`）在开启鼠标时放行 → Textual 能解析成点击 / 滚轮事件。
+
+    想退回「纯键盘 + 触摸滑动」语义时设 ONYX_TUI_MOUSE=0/off/false/no（此时鼠标报文一律剔除）。
     """
     try:
         v = (os.environ.get("ONYX_TUI_MOUSE") or "").strip().lower()
     except Exception:
-        return False
-    return v in ("1", "true", "yes", "on")
+        return True
+    return v not in ("0", "false", "no", "off")
 
 
 
@@ -1514,7 +1557,9 @@ def _build_tui():
         /* 底部输入区 */
         #prompt-wrap { dock: bottom; height: auto; background: $background; }
         #todo-strip { height: auto; display: none; padding: 0 2; color: $onyx-muted; }
-        #status-bar { height: 1; color: $onyx-muted; padding: 0 2; }
+        /* 状态栏：窄屏放不下时自动折成第二行（不丢信息），故 height: auto；
+           但最多两行，且只在行数变化时才重新布局（见 _render_status），避免频闪 */
+        #status-bar { height: auto; max-height: 2; color: $onyx-muted; padding: 0 2; }
         #prompt { width: 100%; background: $surface; border: round $onyx-rail;
                   color: $foreground; }
         #prompt:focus { border: round $accent; }
@@ -1630,6 +1675,8 @@ def _build_tui():
             self._capture_stream = None  # 当前替换 sys.stdout/stderr 的捕获流
             self._is_wide = False  # 宽屏显示侧栏；窄屏在输入框上方显示任务状态条
             self._last_balance = None  # (platform, 余额文本)：查询失败时沿用上次成功值
+            self._last_status = {}     # 最近一次状态栏数据（窗口 resize 后按新宽度重排）
+            self._status_lines = -1    # 状态栏当前行数（只在行数变化时才重新布局，避免频闪）
             self._thinking = False      # AI 是否正在思考（驱动 #activity 转圈）
             self._subagent_text = ""    # 子代理活动尾行
             self._spin_i = 0
@@ -1716,6 +1763,8 @@ def _build_tui():
                                   max_lines=400)
                     yield Static("", id="thinking")
                 with Vertical(id="sidebar"):
+                    # 侧栏面板顶部：本 Python 进程的 PID（os.getpid()，非 shell 子进程）
+                    yield Static(f"PID {os.getpid()}", classes="panel-title", id="pid-line")
                     yield Static(_t("tui_todo_title", self._lang), classes="panel-title")
                     yield Static(_t("tui_tasks_none", self._lang), id="todo-body")
                     yield Static(_t("tui_files_title", self._lang), classes="panel-title")
@@ -1765,6 +1814,17 @@ def _build_tui():
             self._load_history()
             self.query_one("#prompt", Input).focus()
             self._set_wide(self.size.width >= 100)
+            # 状态栏：启动即渲染一次（空 Static 高度为 0 → 平时看不见、只有 AI 跑完才「闪一下」）
+            try:
+                self._render_status({"cwd": os.getcwd()})
+            except Exception:
+                pass
+            # 启动即在面板里显示**本 Python 进程**的 PID（os.getpid()，不是 shell 子进程），
+            # 便于在系统里定位 / 结束 Onyx 自己。
+            try:
+                self.sub_title = f"PID {os.getpid()}"
+            except Exception:
+                pass
             self._measure()
             self._sync_rich_width(full=True)   # 收集并同步进程内所有 Rich Console
             # 首帧 content_size 常为 0 → 稍后补量一次，保证宽度真的对齐
@@ -1778,6 +1838,34 @@ def _build_tui():
             ]
             for _th in self._threads:
                 _th.start()
+
+        def on_click(self, event) -> None:
+            """手机友好：点日志 / 状态栏 / 空白处 → 焦点回到输入框（软键盘随之弹出）。
+
+            之前「点屏幕任意位置都能唤出输入框」靠的是 Textual 的默认焦点规则，但点非可
+            聚焦区域时焦点会留在原处甚至丢失 → 软键盘不再弹出（用户反馈）。这里显式兜底：
+              - 模态框打开时不抢焦点（弹窗自己管）；
+              - 点在可交互控件上（按钮 / 输入框 / 选项列表 / 目录树）时不抢，保持原行为。
+            """
+            try:
+                from textual.screen import ModalScreen
+                if isinstance(self.screen, ModalScreen):
+                    return
+                from textual.widgets import Button, Input, OptionList, TextArea, DirectoryTree
+                if isinstance(getattr(event, "widget", None),
+                              (Button, Input, TextArea, OptionList, DirectoryTree)):
+                    return
+                ml = None
+                try:
+                    ml = self.query_one("#prompt-ml", PromptArea)
+                except Exception:
+                    ml = None
+                if ml is not None and getattr(ml, "display", False):
+                    ml.focus()
+                else:
+                    self.query_one("#prompt", Input).focus()
+            except Exception:
+                pass
 
         def on_unmount(self):
             """退出清理：停线程 / 停定时器 / abort 在途请求 / 还原 stdout / 注销钩子。
@@ -1841,6 +1929,9 @@ def _build_tui():
             self._measure()
             self._sync_rich_width()
             self._set_hint()   # 窄屏自动切短版提示
+            # 宽度变化 → 状态栏按新宽度重排（折行/展开），避免沿用旧布局
+            if getattr(self, "_last_status", None):
+                self._render_status(self._last_status)
 
         def _banner(self):
             """开场横幅：品牌行 + 一行引导（比一整段欢迎语更安静、更有辨识度）。"""
@@ -2031,15 +2122,22 @@ def _build_tui():
             except Exception:
                 pass
 
+        # 状态栏最多折成几行（窄屏兜底；行数超出才丢弃最低优先级段）
+        _STATUS_MAX_LINES = 2
+
         def _render_status(self, status):
-            """刷新状态栏：◆ 路径 │ 上下文 │ 缓存率 │ 余额（缺失项自动省略）。
+            """刷新状态栏：◆ 路径 │ 上下文 │ 缓存率 │ 余额。
 
             - 左侧一个 accent 菱形作视觉锚点，各段用发丝色 `│` 分隔；
-            - 数字紧凑化（17,214 → 17.2k），窄屏按宽度从尾部依次丢弃。
+            - 数字紧凑化（17,214 → 17.2k）；
+            - **一行放不下就折行**（最多 _STATUS_MAX_LINES 行），而不是直接丢弃 ——
+              修复窄屏只显示 path / 丢掉 cache 的问题；折行仍放不下时按优先级保留
+              （path > ctx > cache > 余额），余额最低且**绝不单独占一行**。
             """
             try:
                 from bin.ai_lib.ui import ONYX_PALETTE as _PAL
-                s = status or {}
+                s = dict(status or {})
+                self._last_status = s   # 供 on_resize 按新宽度重排
                 wide = self.size.width >= 90
                 segs = []   # [(文本, 颜色)]
                 cwd = s.get("cwd") or ""
@@ -2052,12 +2150,17 @@ def _build_tui():
                         pass
                     if not wide:
                         cwd = os.path.basename(cwd.rstrip("/")) or cwd
+                    # 紧凑化：路径段过长时截尾（保留信息量更大的尾部），
+                    # 否则它会先把 ctx / cache 挤出可见区（窄屏最常见）
+                    _cwd_cap = max(10, min(24, self.size.width - 24))
+                    if len(cwd) > _cwd_cap:
+                        cwd = "…" + cwd[-(_cwd_cap - 1):]
                     segs.append((cwd, _PAL["primary"]))
                 ctx = s.get("ctx") or 0
                 if ctx:
                     segs.append(("ctx " + _fmt_compact(ctx), _PAL["primary"]))
                 if s.get("cache_supported", True) and s.get("cache_pct") is not None:
-                    segs.append(("cache " + f"{s['cache_pct']:.1f}%", _PAL["warning"]))
+                    segs.append(("cache " + f"{s['cache_pct']:.0f}%", _PAL["warning"]))
                 bal = s.get("balance")
                 _plat = s.get("balance_platform") or ""
                 if bal:
@@ -2065,28 +2168,60 @@ def _build_tui():
                 elif self._last_balance and self._last_balance[0] == _plat:
                     # 刷新中 / 查询失败 → 沿用上一次成功值，避免余额段忽隐忽现
                     bal = self._last_balance[1]
-                if bal:
-                    segs.append((str(bal), _PAL["success"]))
                 try:
                     from rich.cells import cell_len as _cl
                 except Exception:
                     _cl = len
-                avail = max(16, self.size.width - 4)
-                while len(segs) > 1 and _cl("  │  ".join(t for t, _ in segs)) > avail:
-                    segs.pop()
+                # 紧凑分隔符：' · ' 比 '  │  ' 省 2 列 —— 窄屏一行放不下时会先丢余额，
+                # 省下的宽度能让 ctx / cache 稳定留在可见区（用户反馈的重点）
+                sep = " · "
+                sep_w = _cl(sep)
+                # 每行前缀「◆ 」/「  」占 2 列，左右 padding 各 2 列
+                avail = max(12, self.size.width - 6)
+                # ── 贪心折行：path / ctx / cache 优先，放不下就换行而不是丢弃 ──
+                lines = [[]]
+                line_w = 0
+                for seg in segs:
+                    w = _cl(seg[0])
+                    add = w if not lines[-1] else w + sep_w
+                    if lines[-1] and line_w + add > avail:
+                        if len(lines) < self._STATUS_MAX_LINES:
+                            lines.append([seg])
+                            line_w = w
+                        else:
+                            break   # 已到行数上限 → 丢弃剩余
+                    else:
+                        lines[-1].append(seg)
+                        line_w += add
+                # 余额：最低优先级 —— 只允许「追加到已有行尾」，绝不为它单开一行
+                # （窄屏一行放不下 path+ctx+cache+余额时，宁可省掉余额也不多占一行）
+                if bal:
+                    _seg = (str(bal), _PAL["success"])
+                    _w = _cl(_seg[0])
+                    if not lines[-1]:
+                        lines[-1].append(_seg)              # 前面没有任何段
+                    elif line_w + sep_w + _w <= avail:
+                        lines[-1].append(_seg)
+                lines = [ln for ln in lines if ln]
                 bar = self.query_one("#status-bar", Static)
-                if not segs:
+                if not lines:
                     bar.display = False
                 else:
                     from rich.text import Text as _T
                     from bin.ai_lib.ui import ONYX_PALETTE as _P, ONYX_VARS as _V
                     out = _T()
-                    out.append("◆ ", style="bold " + _P["accent"])
-                    for i, (txt, color) in enumerate(segs):
-                        if i:
-                            out.append("  │  ", style=_V["onyx-rail"])
-                        out.append(txt, style=color)
-                    bar.update(out, layout=False)
+                    for li, line in enumerate(lines):
+                        if li:
+                            out.append("\n")
+                        # 首行锚点用菱形，续行缩进对齐（保持左侧视觉轴线）
+                        out.append("◆ " if li == 0 else "  ",
+                                   style="bold " + _P["accent"])
+                        for i, (txt, color) in enumerate(line):
+                            if i:
+                                out.append(sep, style=_V["onyx-rail"])
+                            out.append(txt, style=color)
+                    bar.update(out, layout=(len(lines) != self._status_lines))
+                    self._status_lines = len(lines)
                     bar.display = True
             except Exception:
                 pass
@@ -2875,7 +3010,7 @@ def _build_tui():
                 except queue.Empty:
                     continue
                 batch = [first]
-                while True:                      # 一次取空积压
+                while len(batch) < _FLUSH_MAX_ITEMS:   # 取空积压（分片，见 _FLUSH_MAX_ITEMS）
                     try:
                         batch.append(self._out_q.get_nowait())
                     except queue.Empty:
@@ -3125,8 +3260,9 @@ def ai_tui_session(
 
     _mode.set_render_mode("tui")
     _enable_alt_enter_keys()   # Alt+Enter → alt+enter（Textual 会丢掉 ESC+CR 的 alt）
-    # 输入层加固：默认关闭鼠标追踪（Termux 触摸滑动会发 legacy X10 鼠标报文 →
-    # 严格 UTF-8 解码崩溃 + 字节漏进输入框），并在字节层装净化器兜住残留报文/非法字节。
+    # 输入层加固：默认开启鼠标追踪（按钮 / 选项列表要能点），并在字节层装净化器——
+    # X10 报文要么被剔除（关闭鼠标时）要么转写成 SGR（开启鼠标时），因此既点得中、
+    # 也不会再出现严格 UTF-8 解码崩溃 / 字节漏进输入框。
     _mouse = _tui_mouse_enabled()
     _install_input_sanitizer(strip_mouse=not _mouse)
     # AI 按键注册表跟随运行时 home（/config → 按键设置 的读写都基于它）

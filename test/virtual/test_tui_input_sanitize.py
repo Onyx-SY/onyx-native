@@ -106,21 +106,38 @@ def test_install_patch_and_idempotent():
     print("PASS 净化器已挂载到 LinuxDriver 且可重复调用（幂等）")
 
 
+def test_x10_mouse_converted_when_enabled():
+    # 开启鼠标（strip_mouse=False）时，X10 报文就地转写成 SGR（Textual 只认 SGR）
+    san = _InputSanitizer(strip_mouse=False)
+    # ESC[M + Cb(32+0=左键按下) + Cx(32+10) + Cy(32+5)
+    assert san.feed(b"\x1b[M\x20\x2a\x25") == b"\x1b[<0;10;5M"
+    # 释放：Cb = 32+3 → SGR 小写 m + 最近按下的键(0)
+    assert san.feed(b"\x1b[M\x23\x2a\x25") == b"\x1b[<0;10;5m"
+    # 滚轮：Cb = 32+64 → SGR 64（Textual 映射为 MouseScrollUp）
+    assert san.feed(b"\x1b[M\x60\x2a\x25") == b"\x1b[<64;10;5M"
+    # 坐标字节 >= 0x80（旧版崩溃样本）：转写后全是 ASCII，不再打死解码器
+    out = san.feed(b"\x1b[M\x20\xbc\x41")
+    assert out == b"\x1b[<0;156;33M" and max(out) < 0x80
+    print("PASS 开启鼠标时 X10 鼠标报文被转写为 SGR（点击可被 Textual 解析，且不产生非法字节）")
+
+
 def test_mouse_env_switch():
     old = os.environ.get("ONYX_TUI_MOUSE")
     try:
         os.environ.pop("ONYX_TUI_MOUSE", None)
-        assert _tui_mouse_enabled() is False, "默认必须关闭鼠标追踪（Termux 安全默认）"
-        os.environ["ONYX_TUI_MOUSE"] = "1"
-        assert _tui_mouse_enabled() is True
+        assert _tui_mouse_enabled() is True, "默认必须开启鼠标追踪（按钮 / 选项列表要能点）"
+        os.environ["ONYX_TUI_MOUSE"] = "0"
+        assert _tui_mouse_enabled() is False
         os.environ["ONYX_TUI_MOUSE"] = "off"
         assert _tui_mouse_enabled() is False
+        os.environ["ONYX_TUI_MOUSE"] = "1"
+        assert _tui_mouse_enabled() is True
     finally:
         if old is None:
             os.environ.pop("ONYX_TUI_MOUSE", None)
         else:
             os.environ["ONYX_TUI_MOUSE"] = old
-    print("PASS 鼠标追踪默认关闭、可由 ONYX_TUI_MOUSE 打开")
+    print("PASS 鼠标追踪默认开启、可用 ONYX_TUI_MOUSE=0 关闭")
 
 
 if __name__ == "__main__":
@@ -128,6 +145,7 @@ if __name__ == "__main__":
     test_x10_mouse_split_across_reads()
     test_sgr_mouse_stripped()
     test_mouse_kept_when_disabled()
+    test_x10_mouse_converted_when_enabled()
     test_valid_utf8_and_controls_pass()
     test_split_multibyte_char()
     test_invalid_bytes_dropped()

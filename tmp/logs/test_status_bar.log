@@ -1,0 +1,8 @@
+PASS 同步查询 + TTL 缓存
+PASS 后台刷新
+PASS force 强制刷新 + on_update 回调（余额实时更新）
+PASS ai_cmd 推送状态（含余额强制刷新 + 落地回调）
+PASS TUI 状态栏接线
+PASS 状态栏余额实时更新 + 失败时保留上次值
+
+ALL PASS

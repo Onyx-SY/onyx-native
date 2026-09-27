@@ -30,6 +30,22 @@
 修复：鼠标滚动过度接管问题，移除全局 mouse_support，仅保留键盘导航
 修复：多行输入自动缩进逻辑，基于 Pygments 词法分析实现智能缩进
 修复：多行模式下语法检测与切换，充分利用 SmartSyntaxDetector
+
+修复（AST 语法检查专项）：
+- 多行输入模式无条件使用 ml_input.kb（不再依赖 HAS_PYGMENTS），
+  避免无 Pygments 环境下 Enter 直接提交续行、破坏多行输入
+- CMD 多行输入同样使用 ml_input.kb 保证 Enter 语义一致
+- _multiline_text_complete 的 Python 分支复用 ASTValidator.is_complete_python 严格模式
+
+修复（PromptSession 缓存专项）：
+- 命中缓存时，completer/lexer/kb/style/auto_suggest 全部从缓存 bundle 复用，
+  不再「先建一遍再丢弃」——此前每次回车会白建一次 SmartCompleter，约 2~7ms
+- ptk.json 的 mtime 参与缓存键，用户改配置后自动重建
+- use_dropdown_menu 参与缓存键，并传给 create_key_bindings / PromptSession
+
+新增（命令树专项）：
+- _get_context 返回值扩展为 5 元组，追加 Optional[CommandNode]，
+  供树驱动补全使用；ctx_type 新增 "tree" 分支
 """
 
 import os
@@ -59,8 +75,10 @@ from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.validation import Validator, ValidationError
 
 # ── PromptSession 复用缓存：prompt() 快捷函数每次调用都会重建会话（约 20~45ms），
-#    按输入签名缓存后，提示符刷新不再付出会话构建开销 ──
-_SESSION_CACHE = {"key": None, "session": None}
+#    按输入签名缓存后，提示符刷新不再付出会话构建开销。
+#    bundle 里保存 (session, completer, lexer, kb, auto_suggest, comp_style)，
+#    命中时整包复用；此前命中后仍然每帧重建 completer/kb/style 再丢弃，白费 ~2-7ms。
+_SESSION_CACHE = {"key": None, "session": None, "bundle": None}
 
 # 导入拆分的模块
 from .kb import create_key_bindings
@@ -102,6 +120,7 @@ from .mul_line import (
     SyntaxDetector,
     SyntaxType,
     SmartSyntaxDetector,
+    ASTValidator,
     HAS_PYGMENTS,
 )
 
@@ -167,6 +186,7 @@ _ptk_config: Dict[str, Any] = {}
 # 元信息文本
 META_TEXTS = META_TEXTS_EN
 
+
 def _ensure_ptk_config() -> None:
     global _ptk_config
     # 2026-09 修复：禁用 prompt_toolkit 的光标位置查询（CPR）。
@@ -176,7 +196,9 @@ def _ensure_ptk_config() -> None:
     # prompt_toolkit 官方开关 PROMPT_TOOLKIT_NO_CPR=1 会让 responds_to_cpr 恒为 False，
     # 渲染层彻底不再发起 CPR 请求。
     os.environ["PROMPT_TOOLKIT_NO_CPR"] = "1"
+    # load_ptk_config 内部已按 mtime 缓存，不再每次读文件
     _ptk_config = load_ptk_config()
+
     # 应用配置覆盖
     global _HISTORY_MAX_MEMORY, _HISTORY_MAX_FILE, _HISTORY_FILE_NAME
     history_cfg = _ptk_config.get("history", {})
@@ -187,6 +209,7 @@ def _ensure_ptk_config() -> None:
     if "file_name" in history_cfg:
         _HISTORY_FILE_NAME = history_cfg["file_name"]
 
+
 def set_language(lang: str) -> None:
     """设置语言"""
     global _CURRENT_LANG, META_TEXTS
@@ -194,20 +217,25 @@ def set_language(lang: str) -> None:
         _CURRENT_LANG = lang.lower()
         META_TEXTS = META_TEXTS_EN
 
+
 def get_text(key: str) -> str:
     """获取本地化文本"""
     return LANG_TEXTS.get(_CURRENT_LANG, LANG_TEXTS["chinese"]).get(key, key)
+
 
 def set_virtual_root(root: str) -> None:
     global _VIRTUAL_ROOT
     _VIRTUAL_ROOT = root
 
+
 def get_virtual_root() -> str:
     return _VIRTUAL_ROOT
+
 
 def set_valid_commands(cmds: Iterable[str]) -> None:
     global _VALID_COMMANDS
     _VALID_COMMANDS = set(cmds)
+
 
 def set_user_home_dir(home_dir: str) -> None:
     global _USER_HOME_DIR
@@ -215,6 +243,7 @@ def set_user_home_dir(home_dir: str) -> None:
     history_file = os.path.join(home_dir, _HISTORY_FILE_NAME) if home_dir else None
     freq_mgr = get_command_freq(home_dir, history_file)
     freq_mgr.set_user_home_dir(home_dir, history_file)
+
 
 def set_com_cmd_config_path_from_root(root_dir: str) -> None:
     """
@@ -225,16 +254,19 @@ def set_com_cmd_config_path_from_root(root_dir: str) -> None:
     # 同时设置到 com 模块
     set_com_cmd_config_path(_COM_CMD_CONFIG_PATH)
 
+
 def get_com_cmd_config_path() -> str:
     """获取 com_cmd.json 路径"""
     global _COM_CMD_CONFIG_PATH
     return _COM_CMD_CONFIG_PATH
+
 
 def detect_and_set_terminal_type() -> str:
     """检测并设置终端类型，同时加载对应的命令"""
     global _TERMINAL_TYPE
     _TERMINAL_TYPE = get_detected_terminal_type()
     return _TERMINAL_TYPE
+
 
 def get_terminal_type() -> str:
     """获取当前终端类型"""
@@ -243,27 +275,28 @@ def get_terminal_type() -> str:
         _TERMINAL_TYPE = get_detected_terminal_type()
     return _TERMINAL_TYPE
 
+
 def _get_terminal_specific_commands() -> List[str]:
     """从 other_terminal_cmd.json 获取当前终端的内置命令"""
     terminal_type = get_terminal_type()
     all_cmds = get_other_terminal_cmds()
-    
+
     commands = []
-    # 获取终端专属命令
     if terminal_type in all_cmds:
         commands.extend(all_cmds[terminal_type])
-    
-    # 获取通用命令
+
     if 'common' in all_cmds:
         commands.extend(all_cmds['common'])
-    
+
     return commands
+
 
 # ===================== 异步历史持久化系统 =====================
 def _get_history_file_path() -> str:
     if _USER_HOME_DIR:
         return os.path.join(_USER_HOME_DIR, _HISTORY_FILE_NAME)
     return os.path.join(str(Path.home()), _HISTORY_FILE_NAME)
+
 
 def _start_history_writer():
     global _history_writer_thread, _history_writer_stop
@@ -272,6 +305,7 @@ def _start_history_writer():
     _history_writer_stop.clear()
     _history_writer_thread = threading.Thread(target=_history_writer_loop, daemon=True)
     _history_writer_thread.start()
+
 
 def _encode_multiline_for_storage(cmd: str) -> str:
     """
@@ -284,6 +318,7 @@ def _encode_multiline_for_storage(cmd: str) -> str:
     if '\n' in cmd:
         return json.dumps({"multiline": True, "cmd": cmd}, ensure_ascii=False)
     return cmd
+
 
 def _decode_multiline_from_storage(line: str) -> str:
     """
@@ -317,12 +352,14 @@ def _decode_multiline_from_storage(line: str) -> str:
 
     return line
 
+
 # ANSI 转义序列正则：CSI（\x1b[...m 等）、OSC（\x1b]...\x07）、单字符 ESC 序列
 _ANSI_ESCAPE_RE = re.compile(
     r'\x1b\[[0-9;?]*[ -/]*[@-~]'
     r'|\x1b\][^\x07\x1b]*(\x07|\x1b\\)'
     r'|\x1b[@-Z\\-_]'
 )
+
 
 def _clean_display_text(cmd: str, decode_escapes: bool = True) -> str:
     """
@@ -334,10 +371,10 @@ def _clean_display_text(cmd: str, decode_escapes: bool = True) -> str:
     """
     if not cmd:
         return cmd
-    
+
     # 先通过 MultiLineFormatter 解码（处理历史文件中的 null 分隔符等）
     result = MultiLineFormatter.decode_history_command(cmd)
-    
+
     if decode_escapes:
         replacements = [
             ('^J', '\n'),
@@ -350,12 +387,13 @@ def _clean_display_text(cmd: str, decode_escapes: bool = True) -> str:
         for old, new in replacements:
             if old in result:
                 result = result.replace(old, new)
-    
+
     # 清理 ANSI 转义序列（真实 ESC 字符）与 ^[ 字面残留
     result = _ANSI_ESCAPE_RE.sub('', result)
     result = result.replace('^[', '')
-    
+
     return result
+
 
 # ── 终端控制序列泄漏过滤 ──
 # CPR 应答（ESC[row;colR 或其残余 row;colR）、鼠标上报、OSC 标题等，可能绕过
@@ -365,6 +403,7 @@ _OSC_NOISE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ESC_NOISE_RE = re.compile(r"\x1b[@-Z\\-_]")
 _CPR_RESIDUE_RE = re.compile(r"(?:\x1b\[)?[0-9]*;[0-9]+R")
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
 
 def _strip_control_noise(text: str) -> str:
     """
@@ -382,6 +421,7 @@ def _strip_control_noise(text: str) -> str:
     if stripped.strip() == "":
         return ""
     return text
+
 
 def _history_writer_loop():
     batch = []
@@ -413,6 +453,7 @@ def _history_writer_loop():
             except Exception:
                 pass
 
+
 def _trim_history_file():
     file_path = _get_history_file_path()
     max_lines = _HISTORY_MAX_FILE
@@ -442,11 +483,12 @@ def _trim_history_file():
     except Exception:
         pass
 
+
 def _load_history_buffer() -> List[str]:
     """加载历史记录，正确解码多行命令"""
     file_path = _get_history_file_path()
     old_json_path = os.path.join(os.path.dirname(file_path), ".prompt_onyx_cmd_history.json")
-    
+
     if not os.path.exists(file_path) and os.path.exists(old_json_path):
         try:
             with open(old_json_path, 'r', encoding='utf-8') as f:
@@ -467,13 +509,13 @@ def _load_history_buffer() -> List[str]:
     try:
         if not os.path.exists(file_path):
             return []
-        
+
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             all_lines = f.readlines()
-        
+
         if len(all_lines) > _HISTORY_MAX_MEMORY:
             all_lines = all_lines[-_HISTORY_MAX_MEMORY:]
-        
+
         result = []
         for line in reversed(all_lines):
             line = line.strip()
@@ -481,10 +523,11 @@ def _load_history_buffer() -> List[str]:
                 decoded = _decode_multiline_from_storage(line)
                 cleaned = _clean_display_text(decoded)
                 result.append(cleaned)
-        
+
         return result
     except Exception:
         return []
+
 
 def _save_history_buffer_async(cmd: str):
     global _history_writer_thread
@@ -492,6 +535,7 @@ def _save_history_buffer_async(cmd: str):
         return
     _start_history_writer()
     _history_write_queue.put(cmd)
+
 
 # ===================== prompt_toolkit 历史桥接 =====================
 class OnyxHistory(History):
@@ -551,12 +595,17 @@ def init_history_navigation() -> None:
     """初始化历史导航，并触发命令频率管理器从历史文件中预加载"""
     global _HISTORY_BUFFER, _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT, _HISTORY_INITIALIZED
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
-    
+
     if not _HISTORY_INITIALIZED:
-        _HISTORY_BUFFER = _load_history_buffer()
-        _HISTORY_BUFFER = [_clean_display_text(cmd) if any(x in cmd for x in ['^J', '\\n', '^M', '\\r']) else cmd 
-                          for cmd in _HISTORY_BUFFER]
-    
+        # ⚠️ 必须「就地」写入：SmartCompleter 持有 _HISTORY_BUFFER 的引用，
+        # 一旦重新绑定（= 换成新 list），被缓存 PromptSession 里的补全器就永远
+        # 停在旧对象上 —— 表现为「虚影只认历史文件里的旧命令，当前会话新命令补不出来」。
+        _loaded = _load_history_buffer()
+        _HISTORY_BUFFER[:] = [
+            _clean_display_text(cmd) if any(x in cmd for x in ['^J', '\\n', '^M', '\\r']) else cmd
+            for cmd in _loaded
+        ]
+
     _CURRENT_HISTORY_INDEX = -1
     _NAVIGATION_START_INPUT = ""
     _PREFIX_NAVIGATION_ACTIVE = False
@@ -564,7 +613,7 @@ def init_history_navigation() -> None:
     _PREFIX_FILTERED_INDICES = []
     _PREFIX_CURRENT_POS = -1
     _HISTORY_INITIALIZED = True
-    
+
     # 注册导航重置回调：lexer 自动清除高亮时同步重置导航状态
     set_nav_reset_callback(reset_history_index)
 
@@ -572,30 +621,34 @@ def init_history_navigation() -> None:
         history_file = os.path.join(_USER_HOME_DIR, _HISTORY_FILE_NAME)
         freq_mgr = get_command_freq(_USER_HOME_DIR, history_file)
 
+
 def add_to_history(cmd: str) -> bool:
     """添加命令到历史记录"""
     global _HISTORY_BUFFER
     cmd_stripped = cmd.strip()
     if not cmd_stripped:
         return False
-    
+
     # 仅兼容旧格式的 ^J 显示转义；不把字面 \n（如 printf "a\nb"）误转为换行
     if '^J' in cmd_stripped:
         cmd_stripped = cmd_stripped.replace('^J', '\n')
-    
+
     if _HISTORY_BUFFER and _HISTORY_BUFFER[0] == cmd_stripped:
         return False
-    
+
     if cmd_stripped in _HISTORY_BUFFER:
         _HISTORY_BUFFER.remove(cmd_stripped)
-    
+
     _HISTORY_BUFFER.insert(0, cmd_stripped)
-    
+
+    # ⚠️ 就地截断，绝不能重新绑定：SmartCompleter 持有本列表的引用，
+    # 一旦换成新 list，补全器就停在旧对象上 → 当前会话新命令再也补不出虚影
+    # （历史文件满载 1000 条时首条新命令即触发，用户侧表现为「只认旧会话命令」）。
     if len(_HISTORY_BUFFER) > _HISTORY_MAX_MEMORY:
-        _HISTORY_BUFFER = _HISTORY_BUFFER[:_HISTORY_MAX_MEMORY]
-    
+        del _HISTORY_BUFFER[_HISTORY_MAX_MEMORY:]
+
     _save_history_buffer_async(cmd_stripped)
-    
+
     freq_manager = get_command_freq(
         _USER_HOME_DIR,
         os.path.join(_USER_HOME_DIR, _HISTORY_FILE_NAME) if _USER_HOME_DIR else None
@@ -603,11 +656,13 @@ def add_to_history(cmd: str) -> bool:
     freq_manager.record(cmd_stripped)
     return True
 
+
 def _find_history_index_by_content(content: str, start_from: int = 0) -> int:
     for i in range(start_from, len(_HISTORY_BUFFER)):
         if _HISTORY_BUFFER[i] == content:
             return i
     return -1
+
 
 def _build_prefix_filtered_indices(prefix: str) -> List[int]:
     """基于 token 匹配（任意位置子串）+ 按命令文本去重 — 用于 Up/Down 裸键"""
@@ -619,6 +674,7 @@ def _build_prefix_filtered_indices(prefix: str) -> List[int]:
             indices.append(i)
     return indices
 
+
 def _build_strict_prefix_filtered_indices(prefix: str) -> List[int]:
     """严格前缀匹配 + 按命令文本去重 — 用于 Alt+Up/Down"""
     indices = []
@@ -629,16 +685,15 @@ def _build_strict_prefix_filtered_indices(prefix: str) -> List[int]:
             indices.append(i)
     return indices
 
-# ── ANSI 反色高亮（swap fg/bg = 白框效果）──
-_HL_START = "\033[7m"   # reverse video
-# ── 高亮改为 ptk CommandLexer 方案（set_history_highlight_token），不再嵌入 ANSI ──
 
 # ── 历史导航匹配信息（供 kb.py 底部工具栏使用）──
-_NAV_MATCH_INFO: str = ""  # 如 "匹配: nmap (token: a) — 第 2/5 项"
+_NAV_MATCH_INFO: str = ""
+
 
 def _get_nav_match_info() -> str:
     """返回当前历史导航的匹配信息，供底部工具栏展示"""
     return _NAV_MATCH_INFO
+
 
 def _set_nav_match_info(token: str, current: int, total: int) -> None:
     """设置历史导航匹配信息"""
@@ -647,6 +702,7 @@ def _set_nav_match_info(token: str, current: int, total: int) -> None:
         _NAV_MATCH_INFO = f"🔍 \"{token}\" — {current}/{total}"
     else:
         _NAV_MATCH_INFO = ""
+
 
 def _format_history_for_display(cmd: str) -> str:
     """返回历史条目在缓冲区中的回填文本（导航显示与继续导航比较统一使用）。
@@ -660,16 +716,17 @@ def _format_history_for_display(cmd: str) -> str:
         return cmd
     return _clean_display_text(cmd)
 
+
 def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
     """处理普通 Up 键：空输入→线性遍历全部历史；有文字→子串匹配筛选 + ANSI 反色高亮"""
     global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT, _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
-    
+
     if not _HISTORY_BUFFER:
         return current_input, len(current_input)
-    
+
     _token = current_input.strip()
-    
+
     # ── 已在导航中 + 用户未手动编辑 → 继续当前模式 ──
     if _CURRENT_HISTORY_INDEX != -1:
         if _CURRENT_HISTORY_INDEX < len(_HISTORY_BUFFER) and current_input == _format_history_for_display(_HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]):
@@ -701,12 +758,12 @@ def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
             _PREFIX_VALUE = ""
             _PREFIX_FILTERED_INDICES = []
             _PREFIX_CURRENT_POS = -1
-    
+
     # ── 全新开始 ──
     if not _token:
         # 空输入 → 原版线性遍历
         clear_history_highlight_token()
-        
+
         if _CURRENT_HISTORY_INDEX == -1:
             _NAVIGATION_START_INPUT = current_input
             idx = _find_history_index_by_content(current_input)
@@ -722,27 +779,27 @@ def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
         _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]
         formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
-    
+
     # 有文字 → filtered-list 子串匹配
     if not _PREFIX_NAVIGATION_ACTIVE:
         _PREFIX_NAVIGATION_ACTIVE = True
         _PREFIX_VALUE = _token
         _PREFIX_FILTERED_INDICES = _build_prefix_filtered_indices(_token)
         set_history_highlight_token(_PREFIX_VALUE)
-        
+
         if not _PREFIX_FILTERED_INDICES:
             _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
-        
+
         _PREFIX_CURRENT_POS = 0
         # 如果当前输入恰好是第一个匹配，且还有更多匹配 → 跳到第二个（用格式化文本比较）
         if _format_history_for_display(_HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[0]]) == current_input and len(_PREFIX_FILTERED_INDICES) > 1:
             _PREFIX_CURRENT_POS = 1
-        
+
         _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
         formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
-    
+
     # 继续筛选列表（高亮始终用原始搜索 token _PREFIX_VALUE，而非当前缓冲区文字）
     set_history_highlight_token(_PREFIX_VALUE)
     if _PREFIX_CURRENT_POS < len(_PREFIX_FILTERED_INDICES) - 1:
@@ -755,15 +812,15 @@ def handle_up_arrow_normal(current_input: str) -> Tuple[str, int]:
 
 
 def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
-    """处理普通 Down 键：空输入→线性遍历全部历史（反向）；有文字→子串匹配筛选 + ANSI 反色高亮（反向）"""
+    """处理普通 Down 键：空输入→线性遍历全部历史（反向）；有文字→子串匹配筛选（反向）"""
     global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT, _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
-    
+
     if not _HISTORY_BUFFER:
         return current_input, len(current_input)
-    
+
     _token = current_input.strip()
-    
+
     # ── 已在导航中 + 用户未手动编辑 → 继续当前模式 ──
     if _CURRENT_HISTORY_INDEX != -1:
         if _CURRENT_HISTORY_INDEX < len(_HISTORY_BUFFER) and current_input == _format_history_for_display(_HISTORY_BUFFER[_CURRENT_HISTORY_INDEX]):
@@ -806,7 +863,7 @@ def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
             _PREFIX_VALUE = ""
             _PREFIX_FILTERED_INDICES = []
             _PREFIX_CURRENT_POS = -1
-    
+
     # ── 全新开始 ──
     if not _token:
         clear_history_highlight_token()
@@ -831,23 +888,23 @@ def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
             _NAVIGATION_RAW_COMMAND = None
             return original, len(original)
         return current_input, len(current_input)
-    
+
     # 有文字 → filtered-list 子串匹配（反向）
     if not _PREFIX_NAVIGATION_ACTIVE:
         _PREFIX_NAVIGATION_ACTIVE = True
         _PREFIX_VALUE = _token
         _PREFIX_FILTERED_INDICES = _build_prefix_filtered_indices(_token)
         set_history_highlight_token(_PREFIX_VALUE)
-        
+
         if not _PREFIX_FILTERED_INDICES:
             _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
-        
+
         _PREFIX_CURRENT_POS = len(_PREFIX_FILTERED_INDICES) - 1
         _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
         formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
-    
+
     # 继续筛选列表（高亮始终用原始 token）
     set_history_highlight_token(_PREFIX_VALUE)
     if _PREFIX_CURRENT_POS > 0:
@@ -865,15 +922,16 @@ def handle_down_arrow_normal(current_input: str) -> Tuple[str, int]:
         return current_input, len(current_input)
     return current_input, len(current_input)
 
+
 def handle_up_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
     """处理 Alt+Up：基于前缀的历史导航"""
     global _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND
     global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
-    
+
     _CURRENT_HISTORY_INDEX = -1
     _NAVIGATION_START_INPUT = ""
-    
+
     # 如果当前 PREFIX 状态是普通 Up/Down 留下的（token 是子串而非前缀），重置
     if _PREFIX_NAVIGATION_ACTIVE and _PREFIX_VALUE and not current_input.startswith(_PREFIX_VALUE):
         _PREFIX_NAVIGATION_ACTIVE = False
@@ -881,20 +939,20 @@ def handle_up_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
         _PREFIX_FILTERED_INDICES = []
         _PREFIX_CURRENT_POS = -1
         _NAVIGATION_RAW_COMMAND = None
-    
+
     if not _PREFIX_NAVIGATION_ACTIVE:
         prefix = current_input.strip()
         if not prefix:
             return handle_up_arrow_normal(current_input)
-        
+
         _PREFIX_NAVIGATION_ACTIVE = True
         _PREFIX_VALUE = prefix
         _PREFIX_FILTERED_INDICES = _build_strict_prefix_filtered_indices(prefix)
-        
+
         if not _PREFIX_FILTERED_INDICES:
             _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
-        
+
         for pos, idx in enumerate(_PREFIX_FILTERED_INDICES):
             if _format_history_for_display(_HISTORY_BUFFER[idx]) == current_input:
                 if pos < len(_PREFIX_FILTERED_INDICES) - 1:
@@ -906,12 +964,12 @@ def handle_up_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
                     _PREFIX_CURRENT_POS = pos
                     _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[idx]
                     return current_input, len(current_input)
-        
+
         _PREFIX_CURRENT_POS = 0
         _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[0]]
         formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
-    
+
     if _PREFIX_CURRENT_POS >= 0 and _PREFIX_CURRENT_POS < len(_PREFIX_FILTERED_INDICES):
         expected_idx = _PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]
         expected_cmd = _HISTORY_BUFFER[expected_idx]
@@ -930,7 +988,7 @@ def handle_up_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
                 _NAVIGATION_RAW_COMMAND = None
                 clear_history_highlight_token()
                 return current_input, len(current_input)
-    
+
     if _PREFIX_CURRENT_POS < len(_PREFIX_FILTERED_INDICES) - 1:
         _PREFIX_CURRENT_POS += 1
         _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
@@ -939,41 +997,42 @@ def handle_up_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
     else:
         return current_input, len(current_input)
 
+
 def handle_down_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
     """处理 Alt+Down：基于前缀的历史导航（反向）"""
     global _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND
     global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
-    
+
     _CURRENT_HISTORY_INDEX = -1
     _NAVIGATION_START_INPUT = ""
-    
+
     if _PREFIX_NAVIGATION_ACTIVE and _PREFIX_VALUE and not current_input.startswith(_PREFIX_VALUE):
         _PREFIX_NAVIGATION_ACTIVE = False
         _PREFIX_VALUE = ""
         _PREFIX_FILTERED_INDICES = []
         _PREFIX_CURRENT_POS = -1
         _NAVIGATION_RAW_COMMAND = None
-    
+
     if not _PREFIX_NAVIGATION_ACTIVE:
         prefix = current_input.strip()
         if not prefix:
             _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
-        
+
         _PREFIX_NAVIGATION_ACTIVE = True
         _PREFIX_VALUE = prefix
         _PREFIX_FILTERED_INDICES = _build_strict_prefix_filtered_indices(prefix)
-        
+
         if not _PREFIX_FILTERED_INDICES:
             _NAVIGATION_RAW_COMMAND = None
             return current_input, len(current_input)
-        
+
         _PREFIX_CURRENT_POS = len(_PREFIX_FILTERED_INDICES) - 1
         _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
         formatted = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
         return formatted, len(formatted)
-    
+
     if _PREFIX_CURRENT_POS >= 0 and _PREFIX_CURRENT_POS < len(_PREFIX_FILTERED_INDICES):
         expected_idx = _PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]
         expected_cmd = _HISTORY_BUFFER[expected_idx]
@@ -992,7 +1051,7 @@ def handle_down_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
                 _NAVIGATION_RAW_COMMAND = None
                 clear_history_highlight_token()
                 return current_input, len(current_input)
-    
+
     if _PREFIX_CURRENT_POS > 0:
         _PREFIX_CURRENT_POS -= 1
         _NAVIGATION_RAW_COMMAND = _HISTORY_BUFFER[_PREFIX_FILTERED_INDICES[_PREFIX_CURRENT_POS]]
@@ -1008,12 +1067,13 @@ def handle_down_arrow_with_prefix(current_input: str) -> Tuple[str, int]:
     else:
         return current_input, len(current_input)
 
+
 def reset_history_index() -> None:
     """重置所有历史导航状态"""
     global _CURRENT_HISTORY_INDEX, _NAVIGATION_START_INPUT, _NAVIGATION_RAW_COMMAND
     global _PREFIX_NAVIGATION_ACTIVE, _PREFIX_VALUE, _PREFIX_FILTERED_INDICES, _PREFIX_CURRENT_POS
     global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE, _MULTILINE_ABORTED
-    
+
     _CURRENT_HISTORY_INDEX = -1
     _NAVIGATION_START_INPUT = ""
     _NAVIGATION_RAW_COMMAND = None
@@ -1027,10 +1087,12 @@ def reset_history_index() -> None:
     _MULTILINE_ABORTED = False
     clear_history_highlight_token()
 
+
 # ===================== 新增：CMD 多行命令检测 =====================
 def _is_cmd() -> bool:
     """检查当前是否是 CMD 终端"""
     return get_terminal_type() == 'cmd'
+
 
 def _detect_cmd_multiline(line: str) -> Optional[str]:
     """
@@ -1039,28 +1101,29 @@ def _detect_cmd_multiline(line: str) -> Optional[str]:
     """
     if not _is_cmd():
         return None
-    
+
     stripped = line.strip().lower()
-    
+
     # 检测 IF 块（可能带 ELSE）
     if re.search(r'\bif\b.*\(', stripped) and not re.search(r'\)', stripped):
         return 'cmd_if'
-    
+
     # 检测 FOR 循环
     if re.search(r'\bfor\b.*\(', stripped) and not re.search(r'\)', stripped):
         return 'cmd_for'
-    
+
     # 检查未闭合的括号块
     open_count = stripped.count('(')
     close_count = stripped.count(')')
     if open_count > close_count:
         return 'cmd_block'
-    
+
     # 检查行续符 ^
     if stripped.endswith('^'):
         return 'cmd_continuation'
-    
+
     return None
+
 
 def _is_cmd_block_terminated(lines: List[str], line: str) -> bool:
     """
@@ -1079,6 +1142,7 @@ def _is_cmd_block_terminated(lines: List[str], line: str) -> bool:
                 return True  # 多余闭合，视为终止（错误状态）
     return balance == 0
 
+
 # 单行自闭合结构的终止符（行内即可闭合，如 'if x; then y; fi'）
 _SAME_LINE_TERMINATORS = {
     'if_fi': re.compile(r'\bfi\b'),
@@ -1095,23 +1159,27 @@ _SAME_LINE_TERMINATORS = {
 def _multiline_text_complete(text: str, expected_syntax: str) -> bool:
     """
     判断输入文本是否已是自闭合的完整结构（无需继续输入）：
-    - 粘贴的整块多行命令（已含终止行，如 'if …; then\n…\nfi'、heredoc 已含 EOF）
+    - 粘贴的整块多行命令（已含终止行，如 'if …; then\\n…\\nfi'、heredoc 已含 EOF）
     - 单行自闭合命令（如 'if x; then y; fi'、'for i in x; do echo; done'）
 
     返回 True 时不应进入续行模式，命令原样交给执行器；
     否则仍按原逻辑逐行收集（如 'if x; then' 换行等待 'fi'）。
+
+    修复：Python 分支复用 ASTValidator.is_complete_python 严格模式（唯一真源），
+    避免与 validate_python 的行为分叉。
     """
-    # python 块以缩进闭合（无显式终止符），用严格 AST 判定：
-    # 原始代码必须能直接解析（不能借助 _fix_incomplete_code 式的自动补全）。
     if expected_syntax == "python":
         try:
-            import ast as _ml_ast
-            _ml_ast.parse(text)
-            return True
-        except SyntaxError:
-            pass
+            return ASTValidator.is_complete_python(text)
         except Exception:
-            pass
+            try:
+                import ast as _ml_ast
+                _ml_ast.parse(text)
+                return True
+            except SyntaxError:
+                pass
+            except Exception:
+                pass
 
     state = None
     for raw_line in text.split("\n"):
@@ -1177,7 +1245,7 @@ def _process_multiline_input(
 ) -> Optional[str]:
     """
     处理多行输入（增强版，支持 heredoc #语法 切换，支持 CMD 多行块）
-    
+
     修复：确保多行输入模式下语法高亮正确应用，补全功能正常工作。
     新增：忽略以 # 开头的注释行的结构化语法检测。
     新增：CMD 的 IF/FOR 块结构支持。
@@ -1185,11 +1253,13 @@ def _process_multiline_input(
     修复：heredoc 中 #语法 切换在终止检查之前执行。
     修复：终止符优先级高于语法切换，防止 EOF 被 continue 跳过。
     修复：使用 SmartSyntaxDetector 重新评估语法，提升准确性。
+    修复（AST 语法检查专项）：多行模式无条件使用 ml_input.kb，
+    避免无 Pygments 环境下按 Enter 直接提交续行、破坏多行输入。
     """
     global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE, _MULTILINE_ABORTED
-    
+
     _MULTILINE_ABORTED = False
-    
+
     # 新增：CMD 多行处理
     cmd_type = _detect_cmd_multiline(user_input)
     if cmd_type and _is_cmd():
@@ -1202,7 +1272,7 @@ def _process_multiline_input(
             kb=kb,
             auto_suggest=auto_suggest,
         )
-    
+
     # 使用 SmartSyntaxDetector 检测首行可能的语法
     detected_syntax = detect_syntax_from_command(user_input)
     if detected_syntax == 'bash' or detected_syntax == 'unknown':
@@ -1210,50 +1280,52 @@ def _process_multiline_input(
         content_syntax, confidence = SmartSyntaxDetector.detect_with_confidence(user_input)
         if confidence > 0.6 and content_syntax != SyntaxType.BASH:
             detected_syntax = content_syntax.value
-    
+
     state = MultiLineDetector.detect(user_input, detected_syntax or "bash")
-    
+
     if state is None:
         return None
-    
+
     # 修复：输入可能已是完整块（整块粘贴，或单行自闭合如 'if x; then y; fi'）。
     # 此时不应进入续行模式——否则会要求用户重复输入终止符，破坏命令。
     if _multiline_text_complete(user_input, detected_syntax or "bash"):
         return None
-    
+
     # 如果检测到非 bash 语法，更新 state.syntax
     if detected_syntax and detected_syntax != 'bash' and state.syntax == 'bash':
         state.syntax = detected_syntax
-    
+
     _MULTILINE_ACTIVE = True
     _MULTILINE_STATE = state
     _MULTILINE_BUFFER = [user_input]
-    
+
     ml_input = MultiLineInput(
         syntax=state.syntax,
         virtual_root=virtual_root,
     )
-    
+
     # 设置初始的 lexer 和 completer（基于 ml_input）
     current_lexer = ml_input.lexer if ml_input.lexer is not None else lexer
     # heredoc 类型不启用补全
     use_completer = None if state.type in ('heredoc',) else (ml_input.completer if ml_input.completer is not None else completer)
-    
+
     prompt_text = ml_input._get_prompt_text(state)
-    
+
     while _MULTILINE_ACTIVE:
         try:
+            # 修复：Enter 换行语义与 Pygments 无关，始终使用 ml_input.kb；
+            # 否则无 Pygments 环境下按 Enter 会直接提交续行，破坏多行输入。
             line = prompt(
                 prompt_text,
                 lexer=current_lexer,
                 style=comp_style,
-                key_bindings=ml_input.kb if HAS_PYGMENTS else kb,
+                key_bindings=ml_input.kb,
                 auto_suggest=auto_suggest,
                 completer=use_completer,
                 complete_while_typing=(use_completer is not None),
                 # mouse_support 已移除，避免鼠标接管终端滚动
             )
-            
+
             if line is None or line.strip() == '__CANCEL__':
                 _MULTILINE_ACTIVE = False
                 _MULTILINE_STATE = None
@@ -1266,7 +1338,7 @@ def _process_multiline_input(
                 _MULTILINE_ABORTED = True
                 _MULTILINE_BUFFER = []
                 return None
-            
+
             # ===== 修复后的 heredoc 处理逻辑（终止符优先级最高）=====
             if state.type == 'heredoc':
                 # 1. 先检查是否是终止行（EOF 等），优先级最高
@@ -1277,7 +1349,7 @@ def _process_multiline_input(
                     result = '\n'.join(_MULTILINE_BUFFER)
                     _MULTILINE_BUFFER = []
                     return result
-                
+
                 # 2. 再检查语法切换（#python、#bash 等），仅当不是终止行时
                 if not state.heredoc_syntax_locked:
                     new_syntax = MultiLineDetector.detect_heredoc_syntax_switch(line)
@@ -1295,21 +1367,21 @@ def _process_multiline_input(
                         prompt_text = ml_input._get_prompt_text(state)
                         # 不将 #语法 行加入缓冲区（它是控制指令，不是内容）
                         continue
-                
+
                 # 3. 普通 heredoc 行
                 _MULTILINE_BUFFER.append(line)
                 prompt_text = ml_input._get_prompt_text(state)
                 continue
             # ===== heredoc 处理结束 =====
-            
+
             # 非 heredoc 的普通多行处理
             is_comment_line = line.strip().startswith('#')
-            
+
             if is_comment_line:
                 _MULTILINE_BUFFER.append(line)
                 prompt_text = ml_input._get_prompt_text(state)
                 continue
-            
+
             # 重新评估累积内容的语法（仅在非 heredoc 模式下）
             if not state.heredoc_syntax_locked:
                 full_code = '\n'.join(_MULTILINE_BUFFER + [line])
@@ -1324,11 +1396,11 @@ def _process_multiline_input(
                     if state.type not in ('heredoc',):
                         use_completer = ml_input.completer if ml_input.completer is not None else completer
                     prompt_text = ml_input._get_prompt_text(state)
-            
+
             # 使用 ml_input 的深度栈更新逻辑
             terminated, new_state = ml_input.process_line(line, state)
             _MULTILINE_BUFFER.append(line)
-            
+
             if terminated:
                 # 多行输入结束
                 _MULTILINE_ACTIVE = False
@@ -1348,9 +1420,9 @@ def _process_multiline_input(
                     use_completer = ml_input.completer if ml_input.completer is not None else completer
                 else:
                     use_completer = None
-            
+
             prompt_text = ml_input._get_prompt_text(state)
-            
+
         except KeyboardInterrupt:
             _MULTILINE_ACTIVE = False
             _MULTILINE_STATE = None
@@ -1367,7 +1439,7 @@ def _process_multiline_input(
             result = '\n'.join(_MULTILINE_BUFFER)
             _MULTILINE_BUFFER = []
             return result if result else None
-    
+
     return None
 
 
@@ -1383,7 +1455,7 @@ def _process_cmd_multiline_input(
 ) -> Optional[str]:
     """
     处理 CMD 多行输入（IF/FOR 块结构）
-    
+
     CMD 的多行语法：
     IF condition (
         command1
@@ -1391,16 +1463,17 @@ def _process_cmd_multiline_input(
     ) ELSE (
         command3
     )
-    
+
     FOR %%i IN (set) DO (
         command1
     )
-    
+
     终止条件：括号完全闭合。
-    修复：使用 ml_input 的补全器和 lexer（如果有）。
+    修复：使用 ml_input.kb 保证 Enter 换行语义一致（原代码用外部 kb，
+    其 Enter 绑定是「接受目录补全」，会破坏 CMD 多行块的换行输入）。
     """
     global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE, _MULTILINE_ABORTED
-    
+
     _MULTILINE_ABORTED = False
     _MULTILINE_ACTIVE = True
     _MULTILINE_BUFFER = [user_input]
@@ -1409,30 +1482,31 @@ def _process_cmd_multiline_input(
         syntax='bash',  # CMD 没有专门的 Pygments lexer，用 bash 近似
         start_line=user_input,
     )
-    
+
     ml_input = MultiLineInput(
         syntax='bash',
         virtual_root=virtual_root,
     )
-    
+
     current_lexer = lexer  # CMD 多行不强制 pygments
     use_completer = None  # 默认禁用补全，避免干扰
-    
+
     prompt_text = 'more> '
-    
+
     while _MULTILINE_ACTIVE:
         try:
+            # 修复：CMD 多行同样用 ml_input.kb 保证 Enter 语义一致
             line = prompt(
                 prompt_text,
                 lexer=current_lexer,
                 style=comp_style,
-                key_bindings=kb,
+                key_bindings=ml_input.kb,
                 auto_suggest=auto_suggest,
                 completer=use_completer,
                 complete_while_typing=False,
                 # mouse_support 已移除，避免鼠标接管终端滚动
             )
-            
+
             if line is None or line.strip() == '__CANCEL__':
                 _MULTILINE_ACTIVE = False
                 _MULTILINE_STATE = None
@@ -1440,9 +1514,9 @@ def _process_cmd_multiline_input(
                 _MULTILINE_ABORTED = True
                 _MULTILINE_BUFFER = []
                 return None
-            
+
             _MULTILINE_BUFFER.append(line)
-            
+
             # 检查括号是否闭合
             if _is_cmd_block_terminated([user_input], '\n'.join(_MULTILINE_BUFFER[1:])):
                 _MULTILINE_ACTIVE = False
@@ -1450,11 +1524,11 @@ def _process_cmd_multiline_input(
                 result = '\n'.join(_MULTILINE_BUFFER)
                 _MULTILINE_BUFFER = []
                 return result
-            
+
             # 更新提示符
             if _MULTILINE_STATE.type in ('cmd_if', 'cmd_for'):
                 prompt_text = 'more> '
-            
+
         except KeyboardInterrupt:
             _MULTILINE_ACTIVE = False
             _MULTILINE_STATE = None
@@ -1468,8 +1542,9 @@ def _process_cmd_multiline_input(
             result = '\n'.join(_MULTILINE_BUFFER)
             _MULTILINE_BUFFER = []
             return result if result else None
-    
+
     return None
+
 
 # ===================== 主输入函数 =====================
 def _consume_pending_multiline_recall(user_input: str, virtual_root: str = "") -> str:
@@ -1547,19 +1622,19 @@ def universal_input(
     _USER_HOME_DIR = user_home_dir
     set_user_home_dir(user_home_dir)
 
-    # 确保 ptk 配置已加载
+    # 确保 ptk 配置已加载（内部有 mtime 缓存）
     _ensure_ptk_config()
 
     # 新增：检测终端类型
     _TERMINAL_TYPE = detect_and_set_terminal_type()
-    
+
     # 设置 com_cmd.json 路径（优先使用 virtual_root 推导）
     if com_cmd_config_path:
         set_com_cmd_config_path(com_cmd_config_path)
     elif virtual_root:
         default_com_cmd_path = os.path.join(virtual_root, "onyx", "etc", "com_cmd.json")
         set_com_cmd_config_path(default_com_cmd_path)
-    
+
     # 设置 other_terminal_cmd.json 路径
     if other_terminal_cmd_path:
         set_other_terminal_cmds_path(other_terminal_cmd_path)
@@ -1623,92 +1698,121 @@ def universal_input(
         terminal_commands = _get_terminal_specific_commands()
         if terminal_commands:
             completion_items.update(terminal_commands)
-        
+
         # 确保 sudo 和 sado 在补全列表中
         completion_items.add('sudo')
         completion_items.add('sado')
 
         set_valid_commands(completion_items)
 
-        # 创建智能补全器，传入基础命令列表和 JSON 补全详情
-        completer = SmartCompleter(
-            list(completion_items),
-            show_hidden=True,
-            cmd_config_path=cmd_config_path,          # 外部 JSON 详情
-            com_cmd_config_path=actual_com_cmd_path or "",  # 内部 JSON 详情
-            virtual_root=virtual_root,
-            user_home_dir=user_home_dir,
-            history_buffer=_HISTORY_BUFFER
-        )
-
-        if virtual_root and os.path.isdir(virtual_root):
-            cache = get_path_cache()
-            warm_paths = [virtual_root]
-            if user_home_dir and os.path.isdir(user_home_dir):
-                warm_paths.append(user_home_dir)
-            cache.warm_up(warm_paths, virtual_root=virtual_root, show_hidden=True)
-
-        lexer = CommandLexer(valid_commands=_VALID_COMMANDS, virtual_root=virtual_root)
-        
-        # 使用智能虚影补全（基于频率的完整命令建议）
-        from .com import SmartAutoSuggest
-        auto_suggest = SmartAutoSuggest(completer)
-
-        # 应用 ptk 颜色配置
-        ptk_colors = _ptk_config.get("colors", {})
-        default_comp_style = {
-            "completion-menu": "bg:#2d2d30 #cccccc",
-            "completion-menu.completion": "bg:#2d2d30 #aaaaaa",
-            "completion-menu.completion.current": "bg:#007acc #ffffff",
-            "completion-menu.meta": "bg:#3d3d40 #888888",
-            "completion-menu.meta.current": "bg:#007acc #cccccc",
-            "scrollbar.background": "bg:#1e1e1e",
-            "scrollbar.button": "bg:#555555",
-            "bottom-toolbar": "bg:#007acc #ffffff",
-        }
-        for key, value in ptk_colors.items():
-            if key in default_comp_style:
-                default_comp_style[key] = value
-        comp_style = PromptStyle.from_dict(default_comp_style)
-
-        # 应用 ptk 键位配置，获取自定义键绑定
-        kb = create_key_bindings(sys_type=sys_type, terminal_type=get_terminal_type(), ptk_config=_ptk_config)
-
-        # 补全自动触发过滤器：受 ESC+Space 全局开关控制
-        from .kb import is_completion_locked
-
-        @Condition
-        def completion_typing_filter():
-            return not is_completion_locked()
-
-        prompt_text = prompt_func()
-        # 复用 PromptSession（prompt() 快捷函数每次都会重建会话，约 20~45ms/次）
+        # ── 计算 PromptSession 缓存键 ──
         try:
             _vc = _VALID_COMMANDS
             _vhash = hash(frozenset(_vc.keys() if isinstance(_vc, dict) else _vc))
         except Exception:
             _vhash = -1
+
+        # ptk.json 的 mtime 参与 key：用户改配置后自动重建 session
+        _ptk_mtime = 0.0
+        try:
+            _cfg_path = os.path.expanduser(PTK_CONFIG_PATH)
+            if os.path.exists(_cfg_path):
+                _ptk_mtime = os.path.getmtime(_cfg_path)
+        except Exception:
+            pass
+
+        _comp_cfg = (_ptk_config.get("completion") or {})
+        _use_dropdown = bool(_comp_cfg.get("use_dropdown_menu", True))
+        _reserve_space = int(_comp_cfg.get("reserve_space_for_menu", 6)) if _use_dropdown else 0
+
         _cache_key = (
-            virtual_root, sys_type, get_terminal_type(), _vhash,
+            virtual_root, sys_type, get_terminal_type(), _vhash, _ptk_mtime,
+            user_home_dir,
             repr(sorted((_ptk_config.get("colors") or {}).items())),
+            repr(sorted((_ptk_config.get("key_bindings") or {}).items())),
+            _use_dropdown,
         )
-        if _SESSION_CACHE.get("key") == _cache_key and _SESSION_CACHE.get("session") is not None:
-            session = _SESSION_CACHE["session"]
+
+        # ── 缓存命中：整包复用（不重建 completer/lexer/kb/style）──
+        _bundle = _SESSION_CACHE.get("bundle")
+        if _SESSION_CACHE.get("key") == _cache_key and _bundle is not None:
+            session, completer, lexer, kb, auto_suggest, comp_style = _bundle
+            _log_info(
+                f"复用 PromptSession（终端={get_terminal_type()}，根={virtual_root}）",
+                session_id,
+            )
         else:
+            # ── 缓存未命中：真正构建 ──
+            completer = SmartCompleter(
+                list(completion_items),
+                show_hidden=True,
+                cmd_config_path=cmd_config_path,
+                com_cmd_config_path=actual_com_cmd_path or "",
+                virtual_root=virtual_root,
+                user_home_dir=user_home_dir,
+                history_buffer=_HISTORY_BUFFER,
+            )
+
+            if virtual_root and os.path.isdir(virtual_root):
+                cache = get_path_cache()
+                warm_paths = [virtual_root]
+                if user_home_dir and os.path.isdir(user_home_dir):
+                    warm_paths.append(user_home_dir)
+                cache.warm_up(warm_paths, virtual_root=virtual_root, show_hidden=True)
+
+            lexer = CommandLexer(valid_commands=_VALID_COMMANDS, virtual_root=virtual_root)
+
+            # 使用智能虚影补全（基于频率的完整命令建议）
+            from .com import SmartAutoSuggest
+            auto_suggest = SmartAutoSuggest(completer)
+
+            # 应用 ptk 颜色配置
+            ptk_colors = _ptk_config.get("colors", {})
+            default_comp_style = {
+                "completion-menu": "bg:#2d2d30 #cccccc",
+                "completion-menu.completion": "bg:#2d2d30 #aaaaaa",
+                "completion-menu.completion.current": "bg:#007acc #ffffff",
+                "completion-menu.meta": "bg:#3d3d40 #888888",
+                "completion-menu.meta.current": "bg:#007acc #cccccc",
+                "scrollbar.background": "bg:#1e1e1e",
+                "scrollbar.button": "bg:#555555",
+                "bottom-toolbar": "bg:#007acc #ffffff",
+            }
+            for key, value in ptk_colors.items():
+                if key in default_comp_style:
+                    default_comp_style[key] = value
+            comp_style = PromptStyle.from_dict(default_comp_style)
+
+            # 应用 ptk 键位配置，获取自定义键绑定（含 use_dropdown_menu 开关）
+            kb = create_key_bindings(
+                sys_type=sys_type,
+                terminal_type=get_terminal_type(),
+                ptk_config=_ptk_config,
+                use_dropdown_menu=_use_dropdown,
+            )
+
+            # 补全自动触发过滤器：受 ESC+Space 全局开关控制
+            from .kb import is_completion_locked
+
+            @Condition
+            def completion_typing_filter():
+                return not is_completion_locked()
+
             # Ctrl+X Ctrl+E 外部编辑器：ptk 的内置回退表硬编码 /usr/bin/*，
             # Termux/Android 下不存在，需显式通过 $EDITOR 告知一个真实路径。
             _editor = _detect_editor()
             if _editor and not (os.environ.get("VISUAL") or os.environ.get("EDITOR")):
                 os.environ["EDITOR"] = _editor
+
             session = PromptSession(
                 completer=completer,
                 lexer=lexer,
-                complete_while_typing=completion_typing_filter,
+                complete_while_typing=completion_typing_filter if _use_dropdown else False,
                 style=comp_style,
                 key_bindings=kb,
                 # mouse_support 已移除，避免鼠标接管终端滚动
                 complete_in_thread=True,
-                reserve_space_for_menu=6,
+                reserve_space_for_menu=_reserve_space,
                 auto_suggest=auto_suggest,
                 # Ctrl+R 反查覆盖【跨会话】历史（此前未传 history，只覆盖本次运行）
                 history=_PTK_HISTORY,
@@ -1717,12 +1821,18 @@ def universal_input(
                 # Ctrl+X Ctrl+E 打开外部编辑器
                 enable_open_in_editor=bool(_editor),
             )
+
             _SESSION_CACHE["key"] = _cache_key
             _SESSION_CACHE["session"] = session
+            _SESSION_CACHE["bundle"] = (session, completer, lexer, kb, auto_suggest, comp_style)
+
             _log_info(
                 f"新建 PromptSession（终端={get_terminal_type()}，根={virtual_root}）",
                 session_id,
             )
+
+        # prompt 文本每次现取（可能包含当前目录/用户名等动态内容）
+        prompt_text = prompt_func()
         user_input = session.prompt(prompt_text)
 
         # ── Alt+Enter：进入独立全屏多行编辑区（可滚动回看、能改任意行）──
@@ -1773,12 +1883,12 @@ def universal_input(
                 kb=kb,
                 auto_suggest=auto_suggest,
             )
-            
+
             if multiline_result is not None:
                 user_input_stripped = multiline_result.strip()
-                
+
                 user_input_stripped = _clean_display_text(user_input_stripped, decode_escapes=False)
-                
+
                 if user_input_stripped:
                     add_to_history(user_input_stripped)
                     reset_history_index()
@@ -1820,6 +1930,7 @@ def universal_input(
             print(Fore.RED + f"Input error: {e}" + (Style.RESET_ALL if Style else ""))
         reset_history_index()
         return ""
+
 
 __all__ = [
     'universal_input',

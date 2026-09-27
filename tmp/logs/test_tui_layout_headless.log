@@ -1,0 +1,14 @@
+PASS 结构：#log-wrap > (#log, #thinking)，默认隐藏
+PASS 已移除底部 #activity
+PASS todo 带序号与状态字形：' 1 ✓ A\n 2 ▸ b\n 3 ○ C'
+PASS 宽屏侧栏显示
+PASS 思考中显示在输出框内（Region(x=0, y=34, width=86, height=1)）左对齐，结束即隐藏
+PASS 批量投递落盘（3 → 8 行）
+PASS Rich Console 全量同步（force_terminal/颜色/宽度=81）
+PASS AI 回复底色块在日志中保留（背景色）
+PASS #stream 流式区显隐
+PASS Ctrl+L 清空日志区
+PASS 转义序列泄漏防护（窗口内丢弃 / 窗口外正常）
+PASS 多行粘贴不丢内容
+
+ALL PASS

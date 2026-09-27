@@ -2425,6 +2425,7 @@ def _lazy_help(cmd_parts: List[str], request_id: str) -> None:
     from bin.help.help import main as help_handler
     return help_handler(cmd_parts, request_id)
 
+
 # -------------------------- 工具箱命令映射（第一级优先级） --------------------------
 
 
@@ -2448,6 +2449,7 @@ BUILTIN_COMMANDS: Dict[str, Callable[[List[str], str], None]] = {
     "source": _lazy_source,
     "sado": handle_sado,
     "nanosado": handle_nanosado,
+    "mktool": handle_mktool,
     }
 
 # -------------------------- 命令提示符生成 --------------------------

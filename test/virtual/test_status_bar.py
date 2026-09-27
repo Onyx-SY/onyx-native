@@ -122,6 +122,57 @@ def test_tui_status_wiring():
     print("PASS TUI 状态栏接线")
 
 
+def test_status_push_thread_safe():
+    """回归：余额刷新的 on_update 跑在 cost.py 的后台线程，那里没有 thread-local。
+
+    旧实现回调里只传 `_cache_supported` → 回推时 ctx=0 / cache_pct=None，
+    把刚推上去的「ctx / cache」两段整段抹掉（用户看到「回复完闪一下，然后没了」）。
+    """
+    src = open(os.path.join(ROOT, "bin", "ai_cmd.py"), encoding="utf-8").read()
+    assert "_ctx: Optional[int] = None" in src, "缺少显式 ctx 入参"
+    assert "_cache_pct: Optional[float] = None" in src, "缺少显式 cache_pct 入参"
+    assert "_c=_ctx" in src and "_p=_cache_pct" in src, "on_update 回调必须把 ctx/cache 闭包带过去"
+    assert "if _ctx is None:" in src and "if _cache_pct is None:" in src, "显式值应优先于 thread-local"
+    print("PASS 状态栏推送线程安全（后台回推不丢 ctx/cache）")
+
+
+def test_status_bar_compact():
+    """窄屏紧凑化：分隔符省 2 列、cache 整数百分比、长路径截尾。"""
+    src = open(os.path.join(ROOT, "bin", "ai_tui.py"), encoding="utf-8").read()
+    assert 'sep = " · "' in src, "分隔符应紧凑化"
+    assert "cache_pct']:.0f}%" in src, "cache 应用整数百分比"
+    assert "_cwd_cap" in src, "长路径应截尾"
+    print("PASS 状态栏紧凑格式")
+
+
+def test_background_balance_callback_thread():
+    """on_update 确实在后台线程执行 —— 这正是必须显式传 ctx/cache 的原因。"""
+    import threading
+
+    main_tid = threading.get_ident()
+    seen = {}
+    done = threading.Event()
+
+    def fake(platform, api_key):
+        return 1.0, "CNY", "success"
+
+    def on_upd(r):
+        seen["tid"] = threading.get_ident()
+        done.set()
+
+    orig = cost.get_balance
+    cost.get_balance = fake
+    cost._BALANCE_CACHE.clear()
+    try:
+        cost.get_cached_balance("deepseek", "k", force=True, on_update=on_upd)
+        assert done.wait(5.0), "on_update 应被回调"
+        assert seen["tid"] != main_tid, "on_update 应在后台线程执行"
+    finally:
+        cost.get_balance = orig
+        cost._BALANCE_CACHE.clear()
+    print("PASS 余额回调在后台线程（thread-local 为空 → 必须显式传 ctx/cache）")
+
+
 def _bar_text(bar) -> str:
     """取 Static 当前内容（Static 把内容存在 _Static__content）。"""
     r = getattr(bar, "_Static__content", None)
@@ -170,5 +221,8 @@ if __name__ == "__main__":
     test_cached_balance_force_and_on_update()
     test_ai_cmd_pushes_status()
     test_tui_status_wiring()
+    test_status_push_thread_safe()
+    test_status_bar_compact()
+    test_background_balance_callback_thread()
     test_tui_balance_updates_and_keeps_last()
     print("\nALL PASS")

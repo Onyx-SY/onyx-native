@@ -1,44 +1,180 @@
 {
   "cmd_para": [
     {
-      "cmd": ["activite"],
-      "opts": ["-m", "-t", "--help", "--version"],
-      "params": ["low", "mid", "adv"],
+      "cmd": [
+        "activite"
+      ],
+      "opts": [
+        "-m",
+        "-t",
+        "--help",
+        "--version"
+      ],
+      "params": [
+        "low",
+        "mid",
+        "adv"
+      ],
       "type": "string"
     },
     {
-      "cmd": ["manage"],
+      "cmd": [
+        "manage"
+      ],
       "opts": [],
-      "params": ["set", "clean"],
+      "params": [
+        "set",
+        "clean"
+      ],
       "type": "string"
     },
     {
-      "cmd": ["config-onyx-repl"],
-      "opts": ["ui", "list", "get", "set", "reset", "--all", "-h", "--help", "keys", "keys set", "keys reset", "keys list"],
-      "params": ["history_up", "history_down", "prefix_history_up", "prefix_history_down", "completion_next", "completion_prev", "completion_page_up", "completion_page_down", "completion_menu_up", "completion_menu_down", "completion_trigger", "completion_alt_next", "completion_alt_prev", "completion_lock", "clear_screen", "multiline_editor", "language", "debug-times", "debug-parsecmd", "clean-log-time", "adv_danger_cmd_prompt", "mcp", "spring-mode", "builtin-adv-syntax", "sandbox", "prompt-style", "history-len", "true", "false"],
+      "cmd": [
+        "config-onyx-repl"
+      ],
+      "opts": [
+        "ui",
+        "list",
+        "get",
+        "set",
+        "reset",
+        "--all",
+        "-h",
+        "--help",
+        "keys",
+        "keys set",
+        "keys reset",
+        "keys list",
+        "repl",
+        "repl list",
+        "repl get",
+        "repl set",
+        "repl reset",
+        "colors",
+        "colors list",
+        "colors set",
+        "colors reset"
+      ],
+      "params": [
+        "history_up",
+        "history_down",
+        "prefix_history_up",
+        "prefix_history_down",
+        "completion_next",
+        "completion_prev",
+        "completion_page_up",
+        "completion_page_down",
+        "completion_menu_up",
+        "completion_menu_down",
+        "completion_trigger",
+        "completion_alt_next",
+        "completion_alt_prev",
+        "completion_lock",
+        "clear_screen",
+        "multiline_editor",
+        "language",
+        "debug-times",
+        "debug-parsecmd",
+        "clean-log-time",
+        "adv_danger_cmd_prompt",
+        "mcp",
+        "spring-mode",
+        "builtin-adv-syntax",
+        "sandbox",
+        "prompt-style",
+        "history-len",
+        "true",
+        "false",
+        "display.default-color",
+        "completion-menu",
+        "completion-menu.completion",
+        "completion-menu.completion.current",
+        "completion-menu.meta",
+        "completion-menu.meta.current",
+        "scrollbar.background",
+        "scrollbar.button",
+        "bottom-toolbar",
+        "completion.show_hidden",
+        "completion.complete_while_typing",
+        "completion.complete_in_thread",
+        "completion.max_completions",
+        "completion.reserve_space_for_menu",
+        "history.memory_limit",
+        "history.file_limit",
+        "history.file_name",
+        "auto_suggest.enabled",
+        "auto_suggest.strategy"
+      ],
       "type": "string"
     },
     {
-      "cmd": ["autocmd"],
+      "cmd": [
+        "autocmd"
+      ],
       "opts": [],
-      "params": ["add", "remove", "list"],
+      "params": [
+        "add",
+        "remove",
+        "list"
+      ],
       "type": "string"
     },
     {
-      "cmd": ["ls"],
-      "opts": ["-l", "-a", "-t", "-r", "-R", "-S", "-i", "-d", "-h", "-F", "--list", "--all", "--sort=time", "--reverse", "--recursive", "--sort=size", "--inode", "--directory", "--human-readable", "--classify", "--help", "--version"],
+      "cmd": [
+        "ls"
+      ],
+      "opts": [
+        "-l",
+        "-a",
+        "-t",
+        "-r",
+        "-R",
+        "-S",
+        "-i",
+        "-d",
+        "-h",
+        "-F",
+        "--list",
+        "--all",
+        "--sort=time",
+        "--reverse",
+        "--recursive",
+        "--sort=size",
+        "--inode",
+        "--directory",
+        "--human-readable",
+        "--classify",
+        "--help",
+        "--version"
+      ],
       "params": [],
       "type": "path",
-      "extra_cmds": ["nano"] 
+      "extra_cmds": [
+        "nano"
+      ]
     },
     {
-      "cmd": ["cd"],
-      "opts": ["-P", "-L", "--physical", "--logical", "--help", "--version"],
+      "cmd": [
+        "cd"
+      ],
+      "opts": [
+        "-P",
+        "-L",
+        "--physical",
+        "--logical",
+        "--help",
+        "--version"
+      ],
       "params": [],
       "type": "dir"
-    },
+    }
   ],
-  "common_opts": ["--help", "--version", "-h", "-v"],
+  "common_opts": [
+    "--help",
+    "--version",
+    "-h",
+    "-v"
+  ],
   "param_types": {
     "path": "file/directory path",
     "dir": "directory path",

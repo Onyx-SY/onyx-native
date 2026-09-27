@@ -1,8 +1,8 @@
-"""Smoke test: 3-tier dangerous command confirmation (2026-09, fail-closed).
+"""Smoke test: 3-tier dangerous command confirmation (2026-09, fail-open above 300k).
 
 规则（与 helpers.confirm_dangerous_command 文档一致）：
   - ctx < 300k          → 信任窗口，直接放行（不弹 UI）
-  - 300k ≤ ctx ≤ 600k   → 弹窗，10s 无操作默认**拒绝**（timeout_default=False）
+  - 300k ≤ ctx ≤ 600k   → 弹窗，10s 无操作默认**执行**（timeout_default=True，用户指示）
   - ctx > 600k          → 强制人工回答（timeout=None）
   - ctx ≤ 0（估算失败） → 按强制档处理（安全方向）
   - lang_text 缺键/空   → 回退完整词表/内置默认，绝不 KeyError
@@ -33,15 +33,15 @@ with patch.object(helpers, "ui_confirm_dangerous", side_effect=AssertionError("U
     ui.assert_not_called()
     print("PASS: ctx<300k auto-allow (trust zone), no UI")
 
-# 2. 300k <= ctx <= 600k: UI called with timeout=10, timeout_default=False (fail-closed)
-with patch.object(helpers, "ui_confirm_dangerous", return_value=(False, "timeout", "")) as ui:
+# 2. 300k <= ctx <= 600k: UI called with timeout=10, timeout_default=True (fail-open, 用户指示)
+with patch.object(helpers, "ui_confirm_dangerous", return_value=(True, "timeout", "")) as ui:
     ok, resp, reason = helpers.confirm_dangerous_command(
         "rm -rf tmp", "rm", LANG, "s1", "", 0, context_tokens=400_000)
     kwargs = ui.call_args.kwargs
     assert kwargs["timeout"] == 10, kwargs
-    assert kwargs["timeout_default"] is False, kwargs      # 超时 = 拒绝（旧实现是 True）
-    assert ok is False and resp == "n", (ok, resp)         # 超时未确认 → 不放行
-    print("PASS: 300k<=ctx<=600k soft-confirm (timeout=10, default DENY)")
+    assert kwargs["timeout_default"] is True, kwargs        # 超时 = 执行（用户指示）
+    assert ok is True and resp == "y", (ok, resp)           # 超时 → 放行
+    print("PASS: 300k<=ctx<=600k soft-confirm (timeout=10, default EXECUTE)")
 
 # 3. ctx > 600k: UI called with timeout=None (force answer)
 with patch.object(helpers, "ui_confirm_dangerous", return_value=(False, "n", "用户拒绝")) as ui:

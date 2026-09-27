@@ -132,6 +132,7 @@ def _get_lang_strings(language: str) -> Dict[str, str]:
             "system": "系统",
             "tools_count": "工具数量",
             "boot_time": "启动耗时",
+            "pid": "进程 PID",
             "system_info": "系统信息",
             "shell_ready": "Shell 就绪",
             "shell_prompt": "输入命令开始操作（输入 exit 退出）",
@@ -148,6 +149,7 @@ def _get_lang_strings(language: str) -> Dict[str, str]:
             "system": "System",
             "tools_count": "Tools",
             "boot_time": "Boot Time",
+            "pid": "PID",
             "system_info": "System Info",
             "shell_ready": "Shell Ready",
             "shell_prompt": "Enter command (type exit to quit)",
@@ -284,6 +286,7 @@ def show_start_banner(
         print(f"{padding}{lang['system']}: {sys_color}{system_type}{Style.RESET_ALL}")
         print(f"{padding}{lang['tools_count']}: {Fore.CYAN}{tools_count}{Style.RESET_ALL}")
         print(f"{padding}{lang['boot_time']}: {Fore.YELLOW}{boot_time}{Style.RESET_ALL}")
+        print(f"{padding}{lang['pid']}: {Fore.MAGENTA}{os.getpid()}{Style.RESET_ALL}")
         print()
         return
     
@@ -334,6 +337,9 @@ def show_start_banner(
     # 启动耗时（带动态进度条）
     boot_display, _ = _get_boot_bar(boot_time, terminal_width)
     info_table.add_row(f"{lang['boot_time']}:", boot_display)
+    
+    # 进程 PID（便于在系统里定位 / 结束本次启动的 Onyx 进程）
+    info_table.add_row(f"{lang['pid']}:", f"[bold bright_white]{os.getpid()}[/bold bright_white]")
     
     # 4. 创建信息面板（宽度随终端自适应，最多 100 列避免拉伸过度）
     # PC 宽屏时面板填满终端，手机窄屏时保持紧凑

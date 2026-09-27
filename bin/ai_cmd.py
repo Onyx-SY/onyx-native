@@ -1853,8 +1853,16 @@ def handle_ai(
     except Exception:
         _tui_mode = False
 
-    def _push_status_bar(_cache_supported: bool = True, _force_balance: bool = False) -> None:
+    def _push_status_bar(_cache_supported: bool = True, _force_balance: bool = False,
+                         _ctx: Optional[int] = None,
+                         _cache_pct: Optional[float] = None) -> None:
         """把 路径 / 上下文 / 缓存率 / 余额 推送到 TUI 状态栏（REPL 无适配器则跳过）。
+
+        ⚠️ ctx / cache_pct 默认从 `_thread_locals` 读 —— 那是 **AI 工作线程** 的
+        thread-local。而余额刷新的 `on_update` 回调跑在 cost.py 起的 **后台线程** 里，
+        在那里读 thread-local 恒为 0 / None，会把刚推上去的「ctx / cache」两段整段
+        抹掉（用户看到的就是「AI 回复完闪一下，然后缓存/上下文就没了」）。
+        所以这里支持显式传入；`on_update` 回调必须把工作线程算好的值闭包带过去。
 
         _force_balance=True：忽略余额缓存的 TTL，强制后台刷新一次，并在刷新落地后
         自动再推一次状态 —— 这样每轮结束余额就立刻更新（旧行为要等下一轮、或等
@@ -1865,10 +1873,12 @@ def handle_ai(
             _ad = get_ui_adapter()
             if _ad is None or not hasattr(_ad, "set_status"):
                 return
-            _ctx = getattr(_thread_locals, "last_prompt_tokens", 0) or 0
-            _hit = getattr(_thread_locals, "last_cache_hit", 0) or 0
-            _miss = getattr(_thread_locals, "last_cache_miss", 0) or 0
-            _cache_pct = (_hit / (_hit + _miss) * 100.0) if (_hit + _miss) else None
+            if _ctx is None:
+                _ctx = getattr(_thread_locals, "last_prompt_tokens", 0) or 0
+            if _cache_pct is None:
+                _hit = getattr(_thread_locals, "last_cache_hit", 0) or 0
+                _miss = getattr(_thread_locals, "last_cache_miss", 0) or 0
+                _cache_pct = (_hit / (_hit + _miss) * 100.0) if (_hit + _miss) else None
             _bal = None
             _plat = ""
             try:
@@ -1878,7 +1888,10 @@ def handle_ai(
                 _key = _kc.get("api_key", "")
                 if _plat and _key:
                     # 刷新落地（后台线程）→ 再推一次：UI 随即显示新余额（不再等下一轮）
-                    _on_upd = ((lambda _r: _push_status_bar(_cache_supported))
+                    # 注意：必须带上本次调用已算好的 ctx / cache_pct —— 后台线程没有
+                    # thread-local，否则这一次回推会把这两段清空。
+                    _on_upd = ((lambda _r, _c=_ctx, _p=_cache_pct, _s=_cache_supported:
+                                _push_status_bar(_s, _ctx=_c, _cache_pct=_p))
                                if _force_balance else None)
                     _b, _cur, _st = get_cached_balance(_plat, _key,
                                                        force=_force_balance, on_update=_on_upd)
@@ -2163,7 +2176,12 @@ def handle_ai(
                         console.print(_mcp_t("[dim]📦 对话压缩: 无可安全压缩的旧消息（tool_calls 链覆盖全部）[/]",
                                              "[dim]📦 Conversation compact: no safely compressible old messages (tool_calls chain covers all)[/]"))
                     else:
-                        conversation_history = _new_hist
+                        # ⚠️ 就地替换，不能只 `conversation_history = _new_hist`：
+                        # 这个 list 是调用方（REPL/TUI 的 ctx["_conversation_history"]）持有的
+                        # **同一个对象**，重绑定局部名调用方看不到 → 本轮结束又把旧列表存回去，
+                        # 压缩等于白做（下次又压一遍）。`[:] =` 让「当前会话的 AI 记忆」在
+                        # 压缩发生的那一瞬间就被替换成压缩后的历史。
+                        conversation_history[:] = _new_hist
                         # 通知缓存诊断：rewrite 版本号 +1，归因缓存断裂为日志重写
                         from .ai_lib.api import bump_rewrite_version as _bump
                         _bump(current_session_id)
@@ -2197,7 +2215,9 @@ def handle_ai(
                             session_id=current_session_id,
                         )
                         if _new_hist is not None:
-                            conversation_history = _new_hist
+                            # ⚠️ 就地替换（同手动压缩）：压缩一发生，当前会话的记忆立刻生效，
+                            # 而不是等这一轮结束才由调用方同步（旧写法重绑定局部名会丢掉压缩）。
+                            conversation_history[:] = _new_hist
                             from .ai_lib.api import bump_rewrite_version as _bump
                             _bump(current_session_id)
                             console.print(

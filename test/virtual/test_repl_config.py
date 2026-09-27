@@ -36,6 +36,8 @@ rc._FILE_SETTINGS = {k: os.path.join(rc.CONFIG_DIR, os.path.basename(v))
                      for k, v in rc._FILE_SETTINGS.items()}
 rc.CONFIG_JSON_PATH = os.path.join(_TMP, "config.json")
 rc.SANDBOX_CONFIG_PATH = os.path.join(_TMP, "sandbox")
+# ptk.json（主 REPL 配置）也重定向到临时目录，绝不碰真实配置
+rc._ptk_path = lambda: os.path.join(_TMP, "ptk.json")
 with open(rc.CONFIG_JSON_PATH, "w", encoding="utf-8") as f:
     json.dump({"display_info": {"command_prompts": {"onyx": "x", "kali": "y"}},
                "system_info": {"current_prompt_type": "onyx", "max_history_len": 10000}},
@@ -174,19 +176,134 @@ def test_tui_lists_all_settings():
             await pilot.pause(0.3)
             from textual.widgets import OptionList
             ol = app.query_one("#cfg-items", OptionList)
-            # 最后一项是「⌨️ 主 REPL 按键」入口
-            assert ol.option_count == len(rc.SETTINGS) + 1, ol.option_count
+            # 行 = 通用设置 + 主 REPL 分区入口（4）+ 「⌨️ 主 REPL 按键」入口
+            assert ol.option_count == len(rc.SETTINGS) + len(rc.PTK_SECTIONS) + 1, ol.option_count
             texts = [str(ol.get_option_at_index(i).prompt) for i in range(ol.option_count)]
             joined = "\n".join(texts)
             for sid in SETTING_IDS:
                 assert sid in joined, f"TUI 未列出 {sid}"
+            for _sec, cn, _en in rc.PTK_SECTIONS:
+                assert cn in joined, f"TUI 未列出主 REPL 分区 {cn}"
             # Enter 打开编辑框 → Esc 取消，不写盘
+            # 注意：必须断言「真的退出了弹窗」—— 旧 bug 是 _Edit 只声明了
+            # Binding("escape", "cancel") 却没有 action_cancel，Esc 完全无响应，
+            # 用户会卡在编辑框里（这里以前只按不查，所以漏掉了）。
             await pilot.press("enter")
             await pilot.pause(0.3)
+            assert type(app.screen).__name__ == "_Edit", "Enter 应打开编辑弹窗"
             await pilot.press("escape")
             await pilot.pause(0.2)
+            assert type(app.screen).__name__ != "_Edit", \
+                "Esc 应关闭编辑弹窗（_Edit 需实现 action_cancel）"
     asyncio.run(_run())
     print("PASS TUI 配置界面：列出全部配置项，可进入编辑并取消")
+
+
+def test_ptk_settings():
+    """主 REPL（ptk.json）配置：默认值与 lib 对齐 + 读写往返 + 非法值被拒。"""
+    # 默认值快照必须与 lib.terminal.com:DEFAULT_PTK_CONFIG 一致（防止两边漂移）
+    try:
+        from lib.terminal.com import DEFAULT_PTK_CONFIG as _lib
+        for section, items in rc._PTK_FALLBACK.items():
+            for k, v in items.items():
+                assert _lib.get(section, {}).get(k) == v, \
+                    f"ptk 默认值漂移：{section}.{k} 本地={v} lib={_lib.get(section, {}).get(k)}"
+    except ImportError:
+        pass
+
+    ids = [s["id"] for s in rc.PTK_SETTINGS]
+    assert len(ids) == len(set(ids)), "ptk 配置项 id 必须唯一"
+    assert "colors.completion-menu" in ids and "auto_suggest.enabled" in ids
+
+    # 读写往返
+    ok, err = rc.ptk_set("colors.completion-menu", "bg:#101010 #eeeeee")
+    assert ok, err
+    assert rc.ptk_get("colors.completion-menu") == "bg:#101010 #eeeeee"
+    assert rc.get_value("colors.completion-menu") == "bg:#101010 #eeeeee"   # 通用接口也认
+    saved = json.load(open(rc._ptk_path(), encoding="utf-8"))
+    assert saved["colors"]["completion-menu"] == "bg:#101010 #eeeeee", saved
+
+    # bool / int / choice
+    assert rc.ptk_set("auto_suggest.enabled", "no")[0]
+    assert rc.ptk_get("auto_suggest.enabled") == "false"
+    assert rc.ptk_set("completion.max_completions", "250")[0]
+    assert rc.ptk_get("completion.max_completions") == "250"
+    assert rc.ptk_set("completion.max_completions", "abc")[0] is False
+    assert rc.ptk_set("auto_suggest.strategy", "nope")[0] is False
+
+    # 名字解析 + 恢复默认
+    assert rc._ptk_resolve("completion-menu", "colors") == "colors.completion-menu"
+    assert rc._ptk_resolve("completion.show_hidden") == "completion.show_hidden"
+    assert rc._ptk_resolve("nope") is None
+    assert rc.ptk_reset("colors.completion-menu")
+    assert rc.ptk_get("colors.completion-menu") == rc._PTK_FALLBACK["colors"]["completion-menu"]
+    assert rc.ptk_reset_all("colors") == len(rc._PTK_COLOR_META)
+    print(f"PASS 主 REPL 配置：{len(ids)} 项，默认值与 lib 对齐、读写/校验/恢复 OK")
+
+
+def test_home_follows_env():
+    """回归：配置目录必须跟随运行时 $HOME（否则「写一个路径、读另一个路径」）。"""
+    import importlib
+    old = os.environ.get("HOME")
+    fake = os.path.join(_TMP, "fakehome")
+    try:
+        os.environ["HOME"] = fake
+        m = importlib.reload(rc)
+        assert m.USER_HOME_DIR == fake, m.USER_HOME_DIR
+        assert m.CONFIG_DIR == os.path.join(fake, ".config", "onyx"), m.CONFIG_DIR
+        assert m._FILE_SETTINGS["language"] == os.path.join(fake, ".config", "onyx", "language")
+    finally:
+        if old is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old
+        importlib.reload(rc)
+        # reload 会重置路径 → 重新指回临时目录
+        rc.CONFIG_DIR = os.path.join(_TMP, ".config", "onyx")
+        rc._FILE_SETTINGS = {k: os.path.join(rc.CONFIG_DIR, os.path.basename(v))
+                             for k, v in rc._FILE_SETTINGS.items()}
+        rc.CONFIG_JSON_PATH = os.path.join(_TMP, "config.json")
+        rc.SANDBOX_CONFIG_PATH = os.path.join(_TMP, "sandbox")
+        rc._ptk_path = lambda: os.path.join(_TMP, "ptk.json")
+    print("PASS home 路径：USER_HOME_DIR/CONFIG_DIR 跟随 $HOME")
+
+
+def test_modal_does_not_bubble():
+    """回归：模态框里选中值后，栈只能弹一层（OptionSelected 不得冒泡到 App 再开一个框）。"""
+    cls = rc.build_tui_app("chinese")
+    assert cls is not None, "Textual 不可用"
+    app = cls()
+
+    async def _run():
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.3)
+            from textual.widgets import OptionList
+            ol = app.query_one("#cfg-items", OptionList)
+            # 进「🎨 颜色」分区（通用设置之后第一个分区）
+            ol.highlighted = len(rc.SETTINGS)
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            assert type(app.screen).__name__ == "_PtkScreen", type(app.screen).__name__
+            # 打开第一项的颜色编辑框 → 输入新样式 → Enter
+            sec = app.screen
+            sec.query_one("#cfg-items", OptionList).highlighted = 0
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            assert type(app.screen).__name__ == "_Edit", type(app.screen).__name__
+            app.screen.query_one("#val").value = "bg:#222222 #dddddd"
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            stack = [type(s).__name__ for s in app.screen_stack]
+            assert stack == ["Screen", "_PtkScreen"], f"弹窗栈异常（冒泡 bug）：{stack}"
+            assert rc.ptk_get("colors.completion-menu") == "bg:#222222 #dddddd"
+    asyncio.run(_run())
+    print("PASS 弹窗不冒泡：选完值只关一层并落盘")
+
+
+def test_usage_mentions_repl():
+    assert "repl list" in rc._USAGE_CN and "colors set" in rc._USAGE_CN
+    assert "repl list" in rc._USAGE_EN and "colors set" in rc._USAGE_EN
+    print("PASS 用法文案：已包含 repl / colors 子命令")
 
 
 def main():
@@ -197,6 +314,10 @@ def main():
     test_completion_and_whitelist()
     test_help_doc()
     test_tui_lists_all_settings()
+    test_ptk_settings()
+    test_home_follows_env()
+    test_modal_does_not_bubble()
+    test_usage_mentions_repl()
     print("\nALL PASS")
 
 

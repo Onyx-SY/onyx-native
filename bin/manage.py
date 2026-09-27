@@ -33,7 +33,12 @@ try:
     USER = _getpass.getuser()
 except Exception:
     USER = os.environ.get("USER") or os.environ.get("LOGNAME") or "default"
-USER_HOME_DIR = os.path.join(ROOT_DIR, "root") if USER == "root" else os.path.join(ROOT_DIR, "home", USER)
+# 用户主目录：**运行时 $HOME 优先**（沙箱开=虚拟 home / 关=OS 真实 home），
+# 与 bin/ai_lib/config.py、core/bootstrap.py:init_user_home 一致；
+# 缺失时才回退静态 home（否则「写一个路径、读另一个路径」）。
+_STATIC_USER_HOME_DIR = (os.path.join(ROOT_DIR, "root") if USER == "root"
+                         else os.path.join(ROOT_DIR, "home", USER))
+USER_HOME_DIR = os.environ.get("HOME") or _STATIC_USER_HOME_DIR
 CONFIG_DIR = os.path.join(USER_HOME_DIR, ".config", "onyx")
 CONFIG_JSON_PATH = os.path.join(ROOT_DIR, "onyx", "etc", "config.json")
 LOG_DIR = os.path.join(ROOT_DIR, "onyxlog", "onyx")

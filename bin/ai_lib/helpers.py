@@ -508,11 +508,20 @@ def is_dangerous_command(cmd_str: str, dangerous_commands: set) -> Tuple[bool, s
         return False, ""
 
 
-# ── 危险命令上下文分级阈值（token 数，2026-09 恢复信任区间）──
+# ── 危险命令上下文分级阈值（token 数，2026-09 用户恢复信任区间）──
 _CTX_TRUST_BELOW = 300_000        # 上下文 < 300k：信任 AI 不弹提示（可用 ONYX_DANGER_TRUST_TOKENS 收紧）
-_CTX_TIMEOUT_BELOW = 600_000      # 300k ≤ 上下文 ≤ 600k：弹窗，超时默认**拒绝**（fail-closed）
+_CTX_TIMEOUT_BELOW = 600_000      # 300k ≤ 上下文 ≤ 600k：弹窗，10s 超时默认**执行**（用户指示：大上下文易误判）
 _CTX_FORCE_ABOVE = 600_000        # 上下文 > 600k：强制用户回答（无超时）
 _CONFIRM_TIMEOUT_SECONDS = 10
+
+
+def _timeout_default_execute() -> bool:
+    """软确认档的超时默认动作：默认**执行**（fail-open；用户指示：大上下文易误判）。
+
+    需要回到 fail-closed（超时 = 拒绝）时设 ONYX_DANGER_TIMEOUT_DENY=1。
+    """
+    v = os.environ.get("ONYX_DANGER_TIMEOUT_DENY", "").strip().lower()
+    return v not in ("1", "true", "yes", "on")
 
 
 def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
@@ -524,7 +533,8 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
 
     规则：
       - 上下文 < 300k：完全不弹危险提示，直接放行（信任 AI；硬安全由沙盒边界提供）
-      - 300k ≤ 上下文 ≤ 600k：弹窗询问，超时**默认拒绝**（fail-closed；旧实现是超时自动放行）
+      - 300k ≤ 上下文 ≤ 600k：弹窗询问，10s 无操作**默认执行**（fail-open；
+        用户指示：大上下文下模型容易把安全命令误判为危险，超时拒绝会把 AI 卡死）
       - 上下文 > 600k：强制用户回答（无超时，必须 y/n，不自动放行）
       - 上下文估算失败（≤0）：按 >600k 强制确认处理（安全方向）
       - extra_dangerous 参数保留（调用方兼容）；特别高危清单与普通危险命令同走三级
@@ -591,7 +601,10 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
                      f"{_trust_below // 1000}k): {cmd_str}", session_id)
         return True, "auto", ""
 
-    # ── 第二级：信任窗口 ≤ 上下文 ≤ 600k → 弹窗询问，超时**默认拒绝**（fail-closed）──
+    # ── 第二级：信任窗口 ≤ 上下文 ≤ 600k → 弹窗询问，10s 超时默认**执行**（fail-open）──
+    # 用户指示（2026-09）：上下文 >300k 时模型容易把「其实安全」的命令误判为危险，
+    # 若超时默认拒绝，人不在旁边就会把 AI 卡死。故本档超时改为「默认执行」；
+    # 真危险仍可当场按 n 拒绝；>600k 仍是强制人工回答（无超时，不会自动放行）。
     # 注意：context_tokens <= 0 表示估算失败 → 必须落到下面的「强制确认」档（安全方向），
     # 不能走软确认。旧写法 `<= _CTX_TIMEOUT_BELOW` 会让 0 落进软确认，与上方文档
     # 「估算失败 → 强制确认」自相矛盾。
@@ -600,10 +613,10 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
             log_info(f"AI dangerous command soft-confirm (ctx {context_tokens // 1000}k): {cmd_str}", session_id)
         console.print(
             (f"[yellow]⚠️ 上下文 {context_tokens // 1000}k：危险命令需确认，"
-             f"{int(_CONFIRM_TIMEOUT_SECONDS)} 秒无操作默认**拒绝**[/]"
+             f"{int(_CONFIRM_TIMEOUT_SECONDS)} 秒无操作默认**执行**[/]"
              if current_lang == "chinese"
              else f"[yellow]⚠️ Context {context_tokens // 1000}k: confirmation required, "
-                  f"auto-**denied** after {int(_CONFIRM_TIMEOUT_SECONDS)}s[/]")
+                  f"auto-**executed** after {int(_CONFIRM_TIMEOUT_SECONDS)}s[/]")
         )
         # 确认框全程走真实终端（防 stdout 被捕获流替换导致框不可见）
         with real_terminal_io():
@@ -612,14 +625,14 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
                 command=f"{_lt('danger_cmd_display')}: {cmd_str}",
                 reason=_lt('danger_cmd_msg').format(cmd_name),
                 timeout=_CONFIRM_TIMEOUT_SECONDS,
-                # ⚠️ fail-closed：超时 = 拒绝。
-                # 旧值 True 意味着「人不在 → 危险命令照样执行」，正是「没确认就当成已确认」。
-                timeout_default=False,
+                # fail-open（用户指示）：大上下文易误判，超时 = 执行。
+                # 想回到 fail-closed 就设 ONYX_DANGER_TIMEOUT_DENY=1。
+                timeout_default=_timeout_default_execute(),
             )
         if user_resp == "timeout":
             refuse_reason = (
-                "确认超时（已默认拒绝，未执行）" if current_lang == "chinese"
-                else "Confirmation timeout (denied, not executed)"
+                "确认超时（已默认执行）" if current_lang == "chinese"
+                else "Confirmation timeout (executed by default)"
             )
     else:
         # ── 第三级：上下文 > 600k → 强制用户回答（无超时，不自动放行）──

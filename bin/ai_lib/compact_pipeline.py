@@ -44,7 +44,8 @@ def _run_shell_cmd(cmd: str, timeout: int = 10) -> str:
 # ── 对话压缩管道（/compact 与自动压缩共用）──
 # 自动压缩阈值：估算 token 数（含 reasoning_content），超过即触发。
 # 压缩会重置缓存前缀（一次性 miss），换来后续注意力集中与更长的有效记忆窗口。
-_AUTO_COMPACT_TOKEN_THRESHOLD = 600 * 1024
+# 2026-09 用户指示：600K → 800K（600K 时压缩过于频繁，且压缩瞬间会话记忆不一致）
+_AUTO_COMPACT_TOKEN_THRESHOLD = 800 * 1024
 
 # 工具 schema 的固定 token 开销：校准 tokPerChar 时从真实 prompt tokens 中扣除。
 # 回退值 22000（约 55 个内置工具 + 描述）；首次使用时按实际工具 JSON 字节实测。
@@ -288,7 +289,7 @@ def _platform_context_window() -> int:
 
 
 def _effective_compact_threshold(session_id: str = "") -> int:
-    """自动压缩生效阈值 = min(用户 600K, 实测/默认窗口 − 13K 安全缓冲)。"""
+    """自动压缩生效阈值 = min(用户 800K, 实测/默认窗口 − 13K 安全缓冲)。"""
     _win = _SESSION_CONTEXT_WINDOWS.get(session_id) or _platform_context_window()
     _thr = min(_AUTO_COMPACT_TOKEN_THRESHOLD, _win - _WINDOW_SAFETY_BUFFER)
     return max(_thr, 32 * 1024)

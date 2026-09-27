@@ -4,8 +4,11 @@
 提供上下键历史导航、前缀历史导航（Alt+上下）、补全菜单选择等绑定
 支持从 ptk.json 配置加载键位
 修复：右键逐项补全（Tab 键下一项，Shift+Tab 上一项）
-新增：鼠标点击补全支持（由 prompt 的 mouse_support=True 提供） - 已移除，改用键盘导航
 新增：补全菜单翻页键绑定（PageUp/PageDown）
+新增：use_dropdown_menu 开关，关闭后 Tab 直接内联接受首个补全
+修复：default_keys 补齐（此前 completion_menu_up/down、completion_trigger、
+      completion_lock、multiline_editor 等键从未注册，导致 Alt+Enter、
+      ESC+Space、Ctrl+Space 全部无效）
 """
 
 from prompt_toolkit.key_binding import KeyBindings
@@ -25,18 +28,52 @@ def is_completion_locked() -> bool:
     return _completion_locked
 
 
-def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_config: Dict[str, Any] = None) -> KeyBindings:
+def create_key_bindings(
+    sys_type: str = "",
+    terminal_type: str = "bash",
+    ptk_config: Dict[str, Any] = None,
+    use_dropdown_menu: bool = True,
+) -> KeyBindings:
     """
     创建并返回 prompt_toolkit 的 KeyBindings 对象。
-    
+
     Args:
         sys_type: 系统类型 (Windows/Linux/Mac)
         terminal_type: 终端类型 (bash/cmd/powershell/zsh/fish)
         ptk_config: 来自 ptk.json 的配置字典
+        use_dropdown_menu: True 时 Tab 在补全菜单里上下选择；
+                           False 时 Tab 直接内联接受第一个补全（无下拉菜单）
     """
     from . import input_lib as input_lib_module
 
     kb = KeyBindings()
+
+    # ── 完整的默认键位（与 com.DEFAULT_PTK_CONFIG["key_bindings"] 对齐）──
+    default_keys = {
+        "history_up": "up",
+        "history_down": "down",
+        "prefix_history_up": "escape, up",
+        "prefix_history_down": "escape, down",
+        "completion_next": "tab",
+        "completion_prev": "s-tab",
+        "clear_screen": "c-l",
+        "completion_page_up": "pageup",
+        "completion_page_down": "pagedown",
+        # 以下是此前漏掉、实际未注册的键
+        "completion_menu_up": "c-up",
+        "completion_menu_down": "c-down",
+        "completion_trigger": "c-space",
+        "completion_alt_next": "c-n",
+        "completion_alt_prev": "c-p",
+        "completion_lock": "escape, space",
+        "multiline_editor": "escape, enter",
+    }
+
+    # 从 ptk_config 中覆盖键位（只覆盖非空值，避免把默认键覆盖成 None）
+    if ptk_config and "key_bindings" in ptk_config:
+        for key, value in ptk_config["key_bindings"].items():
+            if value:
+                default_keys[key] = value
 
     def _add(action_key: str):
         """按 default_keys（来自 ptk.json）绑定 handler；支持 'escape, space' 多键序列。"""
@@ -49,27 +86,7 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
         except Exception:
             return lambda f: f
 
-    # 默认键位映射
-    default_keys = {
-        "history_up": "up",
-        "history_down": "down",
-        "prefix_history_up": "escape, up",
-        "prefix_history_down": "escape, down",
-        "completion_next": "tab",
-        "completion_prev": "s-tab",
-        "clear_screen": "c-l",
-        "completion_page_up": "pageup",
-        "completion_page_down": "pagedown"
-    }
-
-    # 从 ptk_config 中加载键位，若缺失则使用默认值
-    if ptk_config and "key_bindings" in ptk_config:
-        user_keys = ptk_config["key_bindings"]
-        for key in default_keys:
-            if key in user_keys:
-                default_keys[key] = user_keys[key]
-
-    # 普通上下键：永远遍历全部历史（不接管补全菜单 — 补全选择用 Ctrl+Up/Down）
+    # ── 普通上下键：永远遍历全部历史 ──
     @kb.add(default_keys["history_up"])
     def _(event):
         buffer = event.app.current_buffer
@@ -86,7 +103,7 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
             buffer.text = new_text
             buffer.cursor_position = new_pos
 
-    # Alt+上下键 / Shift+上下键：根据前缀历史导航
+    # ── Alt+上下键 / Shift+上下键：前缀历史导航 ──
     @kb.add('escape', 'up')
     @kb.add('s-up')
     def prefix_up(event):
@@ -109,34 +126,32 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
             buffer.text = new_text
             buffer.cursor_position = new_pos
 
-    # 如果用户自定义了前缀导航的键位，我们额外绑定它们
+    # 用户自定义了前缀导航键位时，额外绑定
     prefix_up_keys = default_keys.get("prefix_history_up", "")
     if prefix_up_keys and prefix_up_keys not in ("escape, up", "s-up"):
-        for key_combo in [prefix_up_keys]:
-            @kb.add(*key_combo.split(','))
-            def custom_prefix_up(event):
-                buffer = event.app.current_buffer
-                if buffer.complete_state:
-                    buffer.cancel_completion()
-                new_text, new_pos = input_lib_module.handle_up_arrow_with_prefix(buffer.text)
-                if new_text != buffer.text:
-                    buffer.text = new_text
-                    buffer.cursor_position = new_pos
+        @kb.add(*[p.strip() for p in prefix_up_keys.split(',') if p.strip()])
+        def custom_prefix_up(event):
+            buffer = event.app.current_buffer
+            if buffer.complete_state:
+                buffer.cancel_completion()
+            new_text, new_pos = input_lib_module.handle_up_arrow_with_prefix(buffer.text)
+            if new_text != buffer.text:
+                buffer.text = new_text
+                buffer.cursor_position = new_pos
 
     prefix_down_keys = default_keys.get("prefix_history_down", "")
     if prefix_down_keys and prefix_down_keys not in ("escape, down", "s-down"):
-        for key_combo in [prefix_down_keys]:
-            @kb.add(*key_combo.split(','))
-            def custom_prefix_down(event):
-                buffer = event.app.current_buffer
-                if buffer.complete_state:
-                    buffer.cancel_completion()
-                new_text, new_pos = input_lib_module.handle_down_arrow_with_prefix(buffer.text)
-                if new_text != buffer.text:
-                    buffer.text = new_text
-                    buffer.cursor_position = new_pos
+        @kb.add(*[p.strip() for p in prefix_down_keys.split(',') if p.strip()])
+        def custom_prefix_down(event):
+            buffer = event.app.current_buffer
+            if buffer.complete_state:
+                buffer.cancel_completion()
+            new_text, new_pos = input_lib_module.handle_down_arrow_with_prefix(buffer.text)
+            if new_text != buffer.text:
+                buffer.text = new_text
+                buffer.cursor_position = new_pos
 
-    # Ctrl+上下键：补全菜单选择
+    # ── Ctrl+上下键：补全菜单选择 ──
     @_add("completion_menu_up")
     def _(event):
         buffer = event.app.current_buffer
@@ -153,12 +168,11 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
         else:
             buffer.start_completion(select_first=False)
 
-    # 补全翻页（PageUp/PageDown）
+    # ── 补全翻页（PageUp/PageDown）──
     @kb.add(default_keys["completion_page_up"])
     def _(event):
         buffer = event.app.current_buffer
         if buffer.complete_state:
-            # prompt_toolkit 内置的补全菜单翻页支持
             buffer.complete_previous_page()
 
     @kb.add(default_keys["completion_page_down"])
@@ -167,16 +181,41 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
         if buffer.complete_state:
             buffer.complete_next_page()
 
-    # 补全下一项/上一项（Tab/Shift+Tab）
-    @kb.add(default_keys["completion_next"])
-    def _(event):
-        buffer = event.app.current_buffer
-        # 清除 ghost suggestion，防止虚影残留与补全叠加导致文本损坏
-        buffer.suggestion = None
-        if buffer.complete_state:
-            buffer.complete_next()
-        else:
-            buffer.start_completion(select_first=False)
+    # ── Tab / Shift+Tab ──
+    if use_dropdown_menu:
+        @kb.add(default_keys["completion_next"])
+        def _(event):
+            buffer = event.app.current_buffer
+            # 清除 ghost suggestion，防止虚影残留与补全叠加导致文本损坏
+            buffer.suggestion = None
+            if buffer.complete_state:
+                buffer.complete_next()
+            else:
+                buffer.start_completion(select_first=False)
+    else:
+        @kb.add(default_keys["completion_next"])
+        def _(event):
+            """关闭下拉菜单：Tab 直接内联接受第一个补全。"""
+            buffer = event.app.current_buffer
+            buffer.suggestion = None
+            try:
+                doc = buffer.document
+                completions = list(buffer.completer.get_completions(doc, None))
+            except Exception:
+                completions = []
+            if not completions:
+                return
+            c = completions[0]
+            try:
+                buffer.apply_completion(c)
+            except Exception:
+                # 兜底：手工替换
+                sp = getattr(c, "start_position", 0) or 0
+                ins = doc.cursor_position + sp
+                if ins < 0:
+                    ins = 0
+                buffer.text = doc.text[:ins] + c.text + doc.text[doc.cursor_position:]
+                buffer.cursor_position = ins + len(c.text)
 
     @kb.add(default_keys["completion_prev"])
     def _(event):
@@ -186,7 +225,7 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
         else:
             buffer.start_completion(select_first=False)
 
-    # 手动触发补全
+    # ── 手动触发补全 ──
     @_add("completion_trigger")
     def _(event):
         buffer = event.app.current_buffer
@@ -208,20 +247,18 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
         else:
             buffer.start_completion(select_first=False)
 
-    # 清屏
+    # ── 清屏 ──
     @kb.add(default_keys["clear_screen"])
     def _(event):
-        # cls / clear：cmd/powershell 用 cls；bash 会话即使运行在 Windows 上也用 clear
         if terminal_type in ("cmd", "powershell") or (sys_type == "Windows" and terminal_type in ("", "cmd")):
             os.system('cls')
         else:
             os.system('clear')
         event.app.renderer.reset()
 
-    # 回车：路径补全时接受目录并级联继续补全；非目录补全走默认提交
+    # ── 回车：路径补全时接受目录并级联继续补全 ──
     @Condition
     def is_dir_completion():
-        """仅当补全菜单打开且当前选中项为目录时返回 True"""
         try:
             app = get_app()
             buffer = app.current_buffer
@@ -241,18 +278,16 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
             buffer.apply_completion(cc)
             buffer.start_completion(select_first=False)
 
-    # ESC+Space：全局切换补全锁定（锁住后输入不弹补全，再按解锁）
+    # ── ESC+Space：全局切换补全锁定 ──
     @_add("completion_lock")
     def _(event):
         global _completion_locked
         buffer = event.app.current_buffer
-        # 如果当前菜单打开，先关闭
         if buffer.complete_state:
             buffer.cancel_completion()
-        # 翻转全局锁定状态
         _completion_locked = not _completion_locked
 
-    # 右键：接受虚影（complete_while_typing 自动处理后续补全刷新）
+    # ── 右键：接受虚影 ──
     @kb.add('right')
     def _(event):
         buffer = event.app.current_buffer
@@ -260,8 +295,6 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
             sug_text = buffer.suggestion.text
             buffer.suggestion = None
             if '\n' in sug_text:
-                # 多行命令虚影：不能塞进单行缓冲区（会显示成 ^J 或被压成一行），
-                # 记录待重放，清空缓冲区；回车后以多行形式补全并执行
                 input_lib_module._PENDING_MULTILINE_RECALL = buffer.text + sug_text
                 buffer.text = ""
                 buffer.cursor_position = 0
@@ -272,7 +305,7 @@ def create_key_bindings(sys_type: str = "", terminal_type: str = "bash", ptk_con
             if pos < len(buffer.text):
                 buffer.cursor_position = pos + 1
 
-    # Alt+Enter：进入独立全屏多行编辑区（键名可在 ptk.json 里改）
+    # ── Alt+Enter：进入独立全屏多行编辑区 ──
     @_add("multiline_editor")
     def _(event):
         buffer = event.app.current_buffer

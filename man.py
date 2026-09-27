@@ -3,6 +3,17 @@
 """
 跨平台手册页扫描器 —— 纯异步后台扫描模式
 支持增量更新：一次性建立 man 页索引 + 节流批量落盘，不阻塞主程序
+
+新增（com_cmd.json 协同）：
+- 用户在 com_cmd.json 里已经定义过的命令，不再进行 man 扫描
+- 内置 ARG_TYPE_HINTS：常见系统命令自动带上 arguments.type
+
+修复（结构化 JSON 保全）：
+- 合并两个 JSON 时不再用 set() 展开 subcommands，
+  改用递归 _merge_node / _merge_subcommands，保留 dict 嵌套结构
+- subcommands 是 dict（新格式）时不再被压成 list
+- _scan_loop 不再强塞 "subcommands": []，避免污染节点结构
+- 已损坏的旧 command.json（subcommands 被压平）会在下次加载时自动以 cmd.json 为准覆盖
 """
 
 import os
@@ -17,7 +28,7 @@ import signal
 import threading
 import argparse
 from pathlib import Path
-from typing import Dict, List, Set, Optional, Tuple
+from typing import Dict, List, Set, Optional, Tuple, Any, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
@@ -30,7 +41,6 @@ SCAN_PROGRESS_PATH = os.path.join(CACHE_DIR, "scan_progress.json")
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# 配置 logging，只输出错误
 logging.basicConfig(
     level=logging.ERROR,
     format='%(levelname)s: %(message)s'
@@ -38,9 +48,178 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ═══════════════════════════════════════════════════════════
+# 结构化 JSON 递归合并
+# ═══════════════════════════════════════════════════════════
+#
+# 背景：cmd.json 用新格式（subcommands 是 dict，可嵌套），
+# command.json 里可能混有旧格式（subcommands 是 list）。
+# 合并时必须保留 dict 结构，不能 set() 展平。
+#
+# 合并规则：
+#   options      → 数组并集（去重）
+#   arguments    → a 有则用 a，没有则从 b 拿
+#   type         → 同上
+#   multiple     → 只要任一方为真则为真
+#   subcommands  → 见 _merge_subcommands
+# ═══════════════════════════════════════════════════════════
+
+def _merge_subcommands(a: Any, b: Any) -> Any:
+    """递归合并两个 subcommands 结构，保留 dict 语义。
+
+    - dict + dict   ：递归合并（同名子节点继续 _merge_node）
+    - list + list   ：字符串并集（去重、保序）
+    - dict + list   ：以 dict 为准，忽略 list（dict 通常代表更新、更结构化）
+    - list + dict   ：以 dict 为准，忽略 list
+    - 其他/None     ：返回非空的一方
+    """
+    a_is_dict = isinstance(a, dict)
+    b_is_dict = isinstance(b, dict)
+    a_is_list = isinstance(a, list)
+    b_is_list = isinstance(b, list)
+
+    if a_is_dict and b_is_dict:
+        result: Dict[str, Any] = dict(a)
+        for k, v in b.items():
+            if k in result:
+                result[k] = _merge_node(result[k], v)
+            else:
+                result[k] = v
+        return result
+
+    if a_is_list and b_is_list:
+        seen: List[str] = []
+        for x in a:
+            if isinstance(x, str) and x not in seen:
+                seen.append(x)
+        for x in b:
+            if isinstance(x, str) and x not in seen:
+                seen.append(x)
+        return seen
+
+    # 类型冲突 → 优先 dict
+    if b_is_dict and not a_is_dict:
+        return dict(b)
+    if a_is_dict and not b_is_dict:
+        return dict(a)
+    if b_is_list and not a_is_list:
+        return list(b)
+    if a_is_list and not b_is_list:
+        return list(a)
+
+    return a if a is not None else b
+
+
+def _merge_node(a: Any, b: Any) -> Dict[str, Any]:
+    """递归合并两个命令节点规格，保留嵌套结构。"""
+    if not isinstance(a, dict):
+        a = {}
+    if not isinstance(b, dict):
+        b = {}
+
+    result: Dict[str, Any] = dict(a)
+
+    # options：数组并集，保序去重
+    opts: List[str] = []
+    for o in result.get("options", []) or []:
+        if isinstance(o, str) and o not in opts:
+            opts.append(o)
+    for o in b.get("options", []) or []:
+        if isinstance(o, str) and o not in opts:
+            opts.append(o)
+    if opts:
+        result["options"] = opts
+
+    # subcommands：递归合并
+    if "subcommands" in a or "subcommands" in b:
+        result["subcommands"] = _merge_subcommands(
+            a.get("subcommands", []),
+            b.get("subcommands", []),
+        )
+
+    # arguments：a 有则保留 a，否则用 b
+    if "arguments" not in result and "arguments" in b:
+        result["arguments"] = b["arguments"]
+
+    # type：同上
+    if "type" not in result and "type" in b:
+        result["type"] = b["type"]
+
+    # multiple：任一为真即真
+    if b.get("multiple") or a.get("multiple"):
+        result["multiple"] = True
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════
+# com_cmd.json 协同：用户已处理过的命令跳过扫描
+# ═══════════════════════════════════════════════════════════
+
+_COM_CMD_JSON_PATH: Optional[str] = None
+_COM_CMD_COMMANDS: Optional[Set[str]] = None
+
+
+def set_com_cmd_path(path: str) -> None:
+    global _COM_CMD_JSON_PATH, _COM_CMD_COMMANDS
+    _COM_CMD_JSON_PATH = path or None
+    _COM_CMD_COMMANDS = None
+
+
+def _resolve_com_cmd_path() -> Optional[str]:
+    global _COM_CMD_JSON_PATH
+
+    if _COM_CMD_JSON_PATH and os.path.exists(_COM_CMD_JSON_PATH):
+        return _COM_CMD_JSON_PATH
+
+    candidates: List[str] = []
+
+    env_path = os.environ.get("ONYX_COM_CMD_JSON", "").strip()
+    if env_path:
+        candidates.append(env_path)
+
+    try:
+        from lib.terminal.com import get_com_cmd_config_path  # type: ignore
+        p = get_com_cmd_config_path()
+        if p:
+            candidates.append(p)
+    except Exception:
+        pass
+
+    candidates.append("/onyx/etc/com_cmd.json")
+    candidates.append(os.path.join(BASE_DIR, "etc", "com_cmd.json"))
+
+    for p in candidates:
+        if p and os.path.exists(p):
+            _COM_CMD_JSON_PATH = p
+            return p
+    return None
+
+
+def get_com_cmd_commands() -> Set[str]:
+    global _COM_CMD_COMMANDS
+    if _COM_CMD_COMMANDS is not None:
+        return _COM_CMD_COMMANDS
+
+    result: Set[str] = set()
+    path = _resolve_com_cmd_path()
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k in data.keys():
+                    if isinstance(k, str) and k:
+                        result.add(k)
+        except Exception as e:
+            logger.debug(f"读取 com_cmd.json 失败: {e}")
+
+    _COM_CMD_COMMANDS = result
+    return result
+
+
 @dataclass
 class SystemConfig:
-    """系统配置信息"""
     platform: str
     man_dirs: List[str] = field(default_factory=list)
     use_man_command: bool = True
@@ -50,18 +229,49 @@ class SystemConfig:
 
 class AsyncManScanner:
     """异步后台手册页扫描器 - 增量更新模式"""
-    
+
+    # ── 常见命令的参数类型提示 ──
+    ARG_TYPE_HINTS: Dict[str, str] = {
+        "cd":     "dir", "mkdir": "dir", "rmdir": "dir",
+        "pushd":  "dir", "popd":  "dir", "chdir": "dir",
+        "tree":   "dir", "du":    "dir", "df":    "dir",
+
+        "cat":    "file", "less":  "file", "more":  "file",
+        "head":   "file", "tail":  "file",
+        "nano":   "file", "vim":   "file", "vi":    "file",
+        "emacs":  "file", "micro": "file",
+        "md5sum": "file", "sha256sum": "file",
+        "base64": "file",
+        "gzip":   "file", "bzip2": "file", "xz":    "file",
+        "unzip":  "file", "zip":   "file",
+
+        "python":  "file", "python3": "file", "python2": "file",
+        "node":    "file", "ruby":    "file", "perl":    "file",
+        "lua":     "file",
+        "bash":    "file", "sh":      "file", "zsh":     "file",
+        "fish":    "file",
+
+        "cp":      "file", "mv":      "file", "rm":      "file",
+        "chmod":   "file", "chown":   "file", "chgrp":   "file",
+        "touch":   "file", "stat":    "file", "file":    "file",
+        "sed":     "file", "awk":     "file", "sort":    "file",
+        "uniq":    "file", "cut":     "file", "wc":      "file",
+        "diff":    "file", "patch":   "file", "tar":     "file",
+        "scp":     "file",
+
+        "find":    "dir",
+        "grep":    "file",
+    }
+
     def __init__(self):
         self.config = self._detect_system()
         self._stop_flag = False
         self._scan_thread = None
         self._current_progress = self._load_progress()
         self._man_index: Optional[Dict[str, List[Path]]] = None
-        
+
     def _detect_system(self) -> SystemConfig:
-        """检测当前系统环境"""
         config = SystemConfig(platform='unknown')
-        
         try:
             if os.path.exists("/data/data/com.termux") or "termux" in sys.prefix.lower():
                 config.platform = 'termux'
@@ -69,27 +279,25 @@ class AsyncManScanner:
                 config.use_man_command = True
                 config.use_apropos = False
                 return config
-            
+
             if sys.platform == "darwin":
                 config.platform = 'macos'
                 config.man_dirs = ["/usr/share/man", "/opt/local/share/man", "/usr/local/share/man"]
                 return config
-            
+
             if sys.platform.startswith("win32") or sys.platform == "cygwin":
                 config.platform = 'windows'
                 config.use_man_command = False
                 config.use_apropos = False
                 return config
-            
+
             config.platform = 'linux'
             config.man_dirs = ["/usr/share/man", "/usr/local/share/man"]
         except Exception as e:
             logger.debug(f"系统检测失败: {e}")
-        
         return config
-    
+
     def _load_progress(self) -> Dict:
-        """加载扫描进度"""
         if os.path.exists(SCAN_PROGRESS_PATH) and os.path.getsize(SCAN_PROGRESS_PATH) > 0:
             try:
                 with open(SCAN_PROGRESS_PATH, 'r', encoding='utf-8') as f:
@@ -97,17 +305,15 @@ class AsyncManScanner:
             except Exception as e:
                 logger.debug(f"加载扫描进度失败: {e}")
         return {"scanned": [], "last_index": 0, "total_commands": 0}
-    
+
     def _save_progress(self):
-        """保存扫描进度"""
         try:
             with open(SCAN_PROGRESS_PATH, 'w', encoding='utf-8') as f:
                 json.dump(self._current_progress, f, indent=2)
         except Exception as e:
             logger.debug(f"保存扫描进度失败: {e}")
-    
+
     def _load_builtin_commands(self) -> Dict:
-        """加载内置 cmd.json 中的命令数据"""
         if os.path.exists(BUILTIN_CMD_JSON):
             try:
                 with open(BUILTIN_CMD_JSON, 'r', encoding='utf-8') as f:
@@ -115,18 +321,23 @@ class AsyncManScanner:
             except Exception as e:
                 logger.debug(f"加载内置命令文件失败: {e}")
         return {}
-    
-    def _load_existing_commands(self) -> Dict:
-        """加载已存在的命令数据（合并内置命令）"""
-        commands = {}
 
-        # 先加载内置命令作为基础
+    def _load_existing_commands(self) -> Dict:
+        """加载已存在的命令数据。
+
+        优先级：cmd.json（内置，新格式，作为基础）> command.json（缓存，旧格式兼容）
+
+        合并时用 _merge_node 递归合并，保留 subcommands 的 dict 嵌套结构，
+        不会再出现「dict 被 set() 压成 list」的问题。
+        """
+        # 1. 以 cmd.json 为基础
         try:
             commands = self._load_builtin_commands()
         except Exception as e:
             logger.debug(f"加载内置命令失败: {e}")
+            commands = {}
 
-        # 加载已保存的命令文件，合并到内置命令上（已保存的优先级更高）
+        # 2. 把 command.json 的增量合并进来
         if os.path.exists(COMMAND_JSON_PATH):
             try:
                 with open(COMMAND_JSON_PATH, 'r', encoding='utf-8') as f:
@@ -135,20 +346,19 @@ class AsyncManScanner:
                 logger.debug(f"加载命令文件失败: {e}")
                 saved = {}
 
-            for cmd, info in saved.items():
-                if cmd in commands:
-                    existing_opts = set(commands[cmd].get("options", []))
-                    new_opts = set(info.get("options", []))
-                    existing_opts.update(new_opts)
-                    commands[cmd]["options"] = sorted(existing_opts)
-                    existing_sub = set(commands[cmd].get("subcommands", []))
-                    new_sub = set(info.get("subcommands", []))
-                    existing_sub.update(new_sub)
-                    commands[cmd]["subcommands"] = sorted(existing_sub)
-                else:
-                    commands[cmd] = info
+            if isinstance(saved, dict):
+                for cmd, info in saved.items():
+                    if not isinstance(cmd, str):
+                        continue
+                    if cmd in commands:
+                        # 递归合并：cmd.json 里已有的结构优先保留，
+                        # command.json 只贡献新增的 options / 类型提示
+                        commands[cmd] = _merge_node(commands[cmd], info)
+                    else:
+                        # 只存在于缓存里的命令（man 页扫出来的），原样保留
+                        commands[cmd] = info
         else:
-            # 首次运行：将内置命令写入 command.json
+            # 首次运行：把内置命令写入缓存
             if commands:
                 try:
                     self._save_commands(commands)
@@ -158,7 +368,6 @@ class AsyncManScanner:
         return commands
 
     def _save_commands(self, commands: Dict):
-        """保存命令数据（原子写入：先写 .tmp 再替换，崩溃不丢数据）"""
         tmp_path = COMMAND_JSON_PATH + ".tmp"
         try:
             with open(tmp_path, 'w', encoding='utf-8') as f:
@@ -171,13 +380,8 @@ class AsyncManScanner:
                     os.remove(tmp_path)
                 except OSError:
                     pass
-    
-    def _build_man_index(self) -> Dict[str, List[Path]]:
-        """一次性建立 man 手册页索引：{命令名: [手册页路径]}
 
-        对每个 man 分区目录只 listdir 一次，避免逐命令重复 listdir（原实现是 O(N×M)）。
-        语义与原 find_manpage_files 一致：按「命令名.」前缀匹配，每个分区取首个匹配。
-        """
+    def _build_man_index(self) -> Dict[str, List[Path]]:
         index: Dict[str, List[Path]] = {}
         seen: Set[Tuple[str, str]] = set()
         try:
@@ -207,13 +411,11 @@ class AsyncManScanner:
         return index
 
     def find_manpage_files(self, cmd_name: str) -> List[Path]:
-        """查找命令的手册页文件（走一次性索引，O(1)）"""
         if self._man_index is None:
             self._man_index = self._build_man_index()
         return list(self._man_index.get(cmd_name, []))
-    
+
     def read_manpage_content(self, manpage_path: Path) -> str:
-        """读取手册页内容"""
         try:
             if str(manpage_path).endswith('.gz'):
                 with gzip.open(manpage_path, 'rt', encoding='utf-8', errors='ignore') as f:
@@ -224,11 +426,9 @@ class AsyncManScanner:
         except Exception as e:
             logger.debug(f"读取手册页失败 {manpage_path}: {e}")
             return ""
-    
+
     def parse_options_from_roff(self, content: str) -> Set[str]:
-        """从 roff 格式中解析选项"""
         options = set()
-        
         try:
             patterns = [
                 r'\\fB\\-\\-[a-zA-Z][a-zA-Z0-9\-]*\\fP',
@@ -238,7 +438,6 @@ class AsyncManScanner:
                 r'(?<!\w)--([a-zA-Z][a-zA-Z0-9\-]+)(?=\s|,|$|\))',
                 r'(?<!\w)-([a-zA-Z0-9])(?=\s|,|$|\))',
             ]
-            
             for pattern in patterns:
                 matches = re.findall(pattern, content)
                 for match in matches:
@@ -252,7 +451,7 @@ class AsyncManScanner:
                         clean = match.replace('\\fB', '').replace('\\fP', '').replace('\\-', '-')
                         if clean.startswith('--') or (clean.startswith('-') and len(clean) == 2):
                             options.add(clean)
-            
+
             synopsis_match = re.search(r'\.SH\s+SYNOPSIS(.*?)(\.SH\s+|$)', content, re.DOTALL | re.IGNORECASE)
             if synopsis_match:
                 synopsis = synopsis_match.group(1)
@@ -266,11 +465,9 @@ class AsyncManScanner:
                         options.add(f"--{opt}")
         except Exception as e:
             logger.debug(f"解析选项失败: {e}")
-        
         return options
-    
+
     def extract_options_quick(self, cmd: str) -> List[str]:
-        """快速提取选项"""
         options = set()
         try:
             manpage_files = self.find_manpage_files(cmd)
@@ -284,11 +481,9 @@ class AsyncManScanner:
         except Exception as e:
             logger.debug(f"提取选项失败 {cmd}: {e}")
         return sorted(options)
-    
+
     def get_all_commands(self) -> List[str]:
-        """获取系统中的所有命令"""
         commands = set()
-        
         try:
             path_dirs = os.environ.get("PATH", "").split(os.pathsep)
             for path_dir in path_dirs:
@@ -302,7 +497,7 @@ class AsyncManScanner:
                                 commands.add(item)
                 except (PermissionError, OSError):
                     continue
-            
+
             for man_dir in self.config.man_dirs:
                 if not os.path.exists(man_dir):
                     continue
@@ -319,41 +514,55 @@ class AsyncManScanner:
                         continue
         except Exception as e:
             logger.debug(f"获取命令列表失败: {e}")
-        
         return sorted(commands)
-    
+
     def start_background_scan(self):
-        """启动后台扫描线程（非阻塞）"""
         if self._scan_thread and self._scan_thread.is_alive():
             return
-        
         self._stop_flag = False
         self._scan_thread = threading.Thread(target=self._scan_loop, daemon=True)
         self._scan_thread.start()
-    
+
     def stop_scan(self):
-        """停止扫描"""
         self._stop_flag = True
         if self._scan_thread:
             self._scan_thread.join(timeout=2)
-    
+
+    def _apply_type_hint(self, node: Dict, cmd: str) -> None:
+        """给命令节点补上类型提示（只在原节点没有 arguments / type 时补）。"""
+        hint = self.ARG_TYPE_HINTS.get(cmd)
+        if not hint:
+            return
+        if not isinstance(node, dict):
+            return
+        if "arguments" in node or "type" in node:
+            return
+        node["arguments"] = {"type": hint}
+
     def _scan_loop(self):
-        """后台扫描循环 —— 在现有缓存上增量，不重复扫描已有选项的命令"""
+        """后台扫描循环
+
+        - 跳过 com_cmd.json 中已定义的命令
+        - 跳过已有选项的命令（增量）
+        - 只更新 options 和类型提示，不触碰 subcommands 结构
+        """
         try:
-            # 加载已有命令（内置 + 已扫描缓存）
             existing = self._load_existing_commands()
             all_commands = self.get_all_commands()
 
-            # 只扫描新命令，以及缓存中尚无选项的命令（首次补充扫描）
+            handled_by_user = get_com_cmd_commands()
+            if handled_by_user:
+                logger.debug(f"com_cmd.json 已定义 {len(handled_by_user)} 个命令，跳过扫描")
+
             to_scan = [
                 cmd for cmd in all_commands
-                if cmd not in existing or not existing[cmd].get("options")
+                if cmd not in handled_by_user
+                and (cmd not in existing or not existing[cmd].get("options"))
             ]
 
             self._current_progress["total_commands"] = len(all_commands)
             self._save_progress()
 
-            # 节流落盘参数：每 SAVE_EVERY 条 或 每 SAVE_INTERVAL 秒落一次盘
             SAVE_EVERY = 100
             SAVE_INTERVAL = 2.0
             last_save = time.time()
@@ -364,39 +573,44 @@ class AsyncManScanner:
 
                 try:
                     options = self.extract_options_quick(cmd)
+
+                    # ── 关键：不要碰 subcommands 结构 ──
+                    if cmd not in existing:
+                        # 新命令：只放 options，不加 subcommands 字段
+                        existing[cmd] = {"options": []}
+
+                    node = existing[cmd]
+                    if not isinstance(node, dict):
+                        node = {"options": []}
+                        existing[cmd] = node
+
                     if options:
-                        if cmd in existing:
-                            existing_opts = set(existing[cmd].get("options", []))
-                            existing_opts.update(options)
-                            existing[cmd]["options"] = sorted(existing_opts)
-                            if "subcommands" not in existing[cmd]:
-                                existing[cmd]["subcommands"] = []
-                        else:
-                            existing[cmd] = {"subcommands": [], "options": options}
-                    else:
-                        if cmd not in existing:
-                            existing[cmd] = {"subcommands": [], "options": []}
+                        existing_opts = set(node.get("options", []))
+                        existing_opts.update(options)
+                        node["options"] = sorted(existing_opts)
+
+                    # 补类型提示（只在没有 arguments/type 时）
+                    self._apply_type_hint(node, cmd)
+
                 except Exception as e:
                     logger.debug(f"扫描命令失败 {cmd}: {e}")
 
-                # 节流落盘：不再每条都全量写盘（原为 O(N²)），每 100 条或每 2 秒落一次
                 if (i + 1) % SAVE_EVERY == 0 or (time.time() - last_save) >= SAVE_INTERVAL:
                     self._current_progress["scanned"] = list(existing.keys())
                     self._current_progress["last_index"] = i + 1
                     self._save_commands(existing)
                     self._save_progress()
                     last_save = time.time()
-                # 温和让出 CPU，避免长时间独占
+
                 if (i + 1) % 50 == 0:
                     time.sleep(0)
 
-            # 结束/中断：强制落盘一次最终结果
+            # 最终落盘
             self._current_progress["scanned"] = list(existing.keys())
             self._current_progress["last_index"] = len(to_scan)
             self._save_commands(existing)
             self._save_progress()
 
-            # 扫描完成，清理进度文件
             if os.path.exists(SCAN_PROGRESS_PATH):
                 try:
                     os.remove(SCAN_PROGRESS_PATH)
@@ -410,7 +624,6 @@ _scanner: Optional[AsyncManScanner] = None
 
 
 def get_scanner() -> AsyncManScanner:
-    """获取全局扫描器实例"""
     global _scanner
     if _scanner is None:
         _scanner = AsyncManScanner()
@@ -418,13 +631,11 @@ def get_scanner() -> AsyncManScanner:
 
 
 def start_background_scan():
-    """启动后台扫描（供 Onyx.py 调用）"""
     scanner = get_scanner()
     scanner.start_background_scan()
 
 
 def incremental_update():
-    """增量更新（仅扫描新命令）"""
     scanner = get_scanner()
     scanner.start_background_scan()
 
@@ -433,23 +644,25 @@ def main():
     parser = argparse.ArgumentParser(description="跨平台命令扫描器")
     parser.add_argument("--force", action="store_true", help="强制重新扫描")
     parser.add_argument("--background", action="store_true", help="后台模式（静默运行）")
+    parser.add_argument("--com-cmd", dest="com_cmd", default="",
+                        help="用户的补全详情文件路径（com_cmd.json）；其中已定义的命令将跳过扫描")
     args = parser.parse_args()
-    
-    # 后台模式：降低优先级并静默输出
+
+    if args.com_cmd:
+        set_com_cmd_path(args.com_cmd)
+
     if args.background:
         if hasattr(os, 'nice'):
             try:
                 os.nice(19)
             except Exception:
                 pass
-        # 重定向标准输出和错误到 null
         sys.stdout = open(os.devnull, 'w')
         sys.stderr = open(os.devnull, 'w')
-        # 禁用 logging 输出
         logging.disable(logging.CRITICAL)
-    
+
     scanner = get_scanner()
-    
+
     if args.force and os.path.exists(COMMAND_JSON_PATH):
         try:
             os.remove(COMMAND_JSON_PATH)
@@ -460,10 +673,9 @@ def main():
                 os.remove(SCAN_PROGRESS_PATH)
             except Exception:
                 pass
-    
+
     scanner.start_background_scan()
-    
-    # 等待扫描完成（后台模式不等待）
+
     if not args.background:
         try:
             if scanner._scan_thread:

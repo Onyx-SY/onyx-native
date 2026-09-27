@@ -841,6 +841,7 @@ class PathResolver:
 
 
 # ===================== 路径补全引擎 =====================
+# ===================== 路径补全引擎 =====================
 class PathCompleterEngine:
     def __init__(self, show_hidden: bool = True, follow_symlinks: bool = True, use_cache: bool = True, virtual_root: str = ""):
         self.show_hidden = show_hidden
@@ -851,17 +852,35 @@ class PathCompleterEngine:
 
     def get_completions(self, path_prefix: str, start_pos: int = 0) -> List[Tuple[str, str, str, int]]:
         if not path_prefix:
-            return self._list_directory_with_prefix(os.getcwd(), "", start_pos)
+            return self._list_directory_with_prefix(os.getcwd(), "", 0)
 
         dir_path, file_prefix, _ = PathResolver.split_for_completion(path_prefix, self.virtual_root)
+
+        # ──────────────────────────────────────────────────────────────
+        # 修复：补全只替换「文件前缀」部分，而不是整个 current_word。
+        #
+        # 症状：cd /etc 选择补全后，路径变成 etc/ 而不是 /etc/；
+        #       cd /etc/ 选择子目录 passwd 后，变成 passwd 而不是 /etc/passwd。
+        #
+        # 原因：调用方传入的 start_pos = -len(current_word)，ptk 应用补全时
+        #       会删掉「整个当前词」再插入补全文本。而 current_word 里其实
+        #       已经包含「用户敲定的目录前缀」（/、/etc/、~/doc 等），这一
+        #       段不该被删。真正需要替换的只有 file_prefix（= 用户还没输完
+        #       的尾部）：
+        #         cd /etc  → file_prefix='etc'  → 只替换 'etc'，保留 '/' → /etc/
+        #         cd /etc/ → file_prefix=''     → 纯追加         → /etc/passwd
+        # ──────────────────────────────────────────────────────────────
+        adjusted_start = -len(file_prefix) if file_prefix else 0
 
         cache_key = f"{dir_path}:{file_prefix}:{self.show_hidden}:{self.virtual_root}"
         if self.use_cache and self.cache:
             cached = self.cache.get(cache_key)
             if cached is not None:
-                return [(text, meta, color, start_pos) for text, meta, color, _ in cached]
+                # 缓存里存的 start 是构建时快照，这里用 adjusted_start 重写，
+                # 保证同一缓存项可服务于不同输入前缀长度（如 'e' 与 'etc'）
+                return [(text, meta, color, adjusted_start) for text, meta, color, _ in cached]
 
-        completions = self._list_directory_with_prefix(dir_path, file_prefix, start_pos)
+        completions = self._list_directory_with_prefix(dir_path, file_prefix, adjusted_start)
 
         if self.use_cache and self.cache and completions:
             cache_items = [(text, meta, color, 0) for text, meta, color, _ in completions]

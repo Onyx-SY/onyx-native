@@ -7,9 +7,20 @@ import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from lib.terminal.colors import Fore, Style
-from rich.console import Console
 
-console = Console()
+# rich 惰性导入：`rich.console` 全套（含 rich.text/style/themes…）约 330ms，
+# 是本模块最大的一笔启动开销，而全文件只有 `manage set mood` 一处用到 Console。
+# 改为首次使用时才导入，oneshot（-c 单条命令）与常规启动都不再付这笔钱。
+_console = None
+
+
+def _get_console():
+    """惰性获取 rich Console（首次调用才加载 rich.console）。"""
+    global _console
+    if _console is None:
+        from rich.console import Console
+        _console = Console()
+    return _console
 
 # Windows 环境适配配置
 WINDOWS = os.name == "nt"
@@ -409,7 +420,7 @@ def handle_set_option(options: List[str], request_id: str) -> None:
         success = write_config_file(MCP_ENABLED_PATH, opt_value)
 
     elif opt_name == "mood":
-        console.print(Fore.YELLOW + _get_msg("情感模块已移除", "Mood module has been removed"))
+        _get_console().print(Fore.YELLOW + _get_msg("情感模块已移除", "Mood module has been removed"))
         success = True
 
     elif opt_name == "spring-mode":

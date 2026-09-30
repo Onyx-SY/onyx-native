@@ -20,6 +20,20 @@
 - _complete_path 异常分支补上 yield from
 - SmartSyntaxDetector.detect 无任何特征命中时回退 BASH，而非误判 PYTHON
 - _ensure_pygments_loaded 加线程锁，避免竞态半初始化
+
+修复（续行检测缺口专项 · P2）：
+- MultiLineDetector 新增 _has_unclosed_quote / _has_unclosed_paren 两个
+  引号/括号感知的静态检查（跳过转义、引号内部不当成配对）
+- detect() 在所有既定模式未命中时新增兜底：
+    · 未闭合引号   → 返回 unclosed_quote 状态（新类型）
+    · 未闭合括号   → 复用 bracket_open 状态（含行中括号）
+  此前 echo "abc、print(1 这类「明显没打完」的输入识别不出，
+  直接当完整命令扔给 shell 报语法错误
+- TERMINATORS 新增 unclosed_quote 终止条件
+- CONTINUATION_PROMPTS / _simple_multiline_input.prompts 补充
+  'unclosed_quote': 'quote> ' 提示符
+- _simple_multiline_input 补充 state.lines 累积（旧路径此前不累积，
+  导致基于 state.lines 的终止条件永远只看到当前行）
 """
 
 import re
@@ -1282,10 +1296,11 @@ class MultiLineDetector:
         'then': 'then',
     }
 
-    # 修复：Python 终止条件更贴近实际缩进块语义
+    # Python 终止条件更贴近实际缩进块语义
     # - python_block / python_function / python_class：只有当「非空且非缩进行且不以冒号结尾且不以
     #   . 或 , 或 \ 等续行符结尾」时才视为结束块
     # - 顶层装饰器：直到出现非装饰器、非空行
+    # - unclosed_quote：仅当累积文本的引号全部闭合时终止（P2 新增）
     TERMINATORS = {
         'heredoc': lambda state, line: line.strip() == state.delimiter,
         'if_fi': lambda state, line: re.match(r'\s*\bfi\b', line),
@@ -1335,7 +1350,73 @@ class MultiLineDetector:
         'fish_function': lambda state, line: re.match(r'\s*end\b', line),
         'fish_switch': lambda state, line: re.match(r'\s*end\b', line),
         'fish_begin': lambda state, line: re.match(r'\s*end\b', line),
+        # P2 新增：未闭合引号，直到累积文本中引号全部闭合才终止
+        'unclosed_quote': lambda state, line: (
+            not MultiLineDetector._has_unclosed_quote('\n'.join(state.lines + [line]))
+        ),
     }
+
+    @classmethod
+    def _has_unclosed_quote(cls, text: str) -> bool:
+        """检测文本里是否有未闭合的引号（考虑转义）。
+
+        P2 新增：识别 echo 后跟未闭合双引号、x = 后跟未闭合单引号
+        这类「明显没打完」的输入，避免它们被当作完整命令直接交给 shell。
+
+        规则：
+        - 反斜杠转义跳过两字符
+        - 单引号内遇到双引号不切换（反之亦然）
+        - 三引号（三个双引号 / 三个单引号）按奇偶引号计数即可满足判定
+        """
+        in_single = False
+        in_double = False
+        i = 0
+        n = len(text)
+        while i < n:
+            c = text[i]
+            if c == '\\' and i + 1 < n:
+                i += 2
+                continue
+            if c == "'" and not in_double:
+                in_single = not in_single
+            elif c == '"' and not in_single:
+                in_double = not in_double
+            i += 1
+        return in_single or in_double
+
+    @classmethod
+    def _has_unclosed_paren(cls, text: str) -> bool:
+        """检测是否有未闭合的括号（考虑引号与转义）。
+
+        P2 新增：识别 print(1、echo (a 这类「行中括号未闭合」的输入。
+        此前 PYTHON_MULTILINE_PATTERNS 里的 bracket_open 只匹配行尾括号，
+        行中的 `print(1` 会漏掉，现在靠这个兜底补上。
+
+        - 引号内部括号不计入深度
+        - 反斜杠转义跳过两字符
+        - 最终深度 > 0 → 有未闭合
+        """
+        depth = 0
+        in_single = False
+        in_double = False
+        i = 0
+        n = len(text)
+        while i < n:
+            c = text[i]
+            if c == '\\' and i + 1 < n:
+                i += 2
+                continue
+            if c == "'" and not in_double:
+                in_single = not in_single
+            elif c == '"' and not in_single:
+                in_double = not in_double
+            elif not in_single and not in_double:
+                if c in '([{':
+                    depth += 1
+                elif c in ')]}':
+                    depth -= 1
+            i += 1
+        return depth > 0
 
     @classmethod
     def _is_cmd_parens_closed(cls, state: MultiLineState, line: str) -> bool:
@@ -1405,6 +1486,29 @@ class MultiLineDetector:
 
                 state.nest_stack.append(ml_type)
                 return state
+
+        # ── P2 兜底：所有既定模式未命中，但文本明显没打完 ──
+        # 1) 未闭合引号 → unclosed_quote
+        if cls._has_unclosed_quote(line):
+            state = MultiLineState(
+                type='unclosed_quote',
+                syntax=expected_syntax or 'bash',
+                start_line=line,
+                indent_level=cls._get_indent_level(line),
+            )
+            state.nest_stack.append('unclosed_quote')
+            return state
+
+        # 2) 未闭合括号（含行中括号）→ 复用 bracket_open
+        if cls._has_unclosed_paren(line):
+            state = MultiLineState(
+                type='bracket_open',
+                syntax=expected_syntax or 'bash',
+                start_line=line,
+                indent_level=cls._get_indent_level(line),
+            )
+            state.nest_stack.append('bracket_open')
+            return state
 
         return None
 
@@ -1751,6 +1855,8 @@ class MultiLineInput:
         'cmd_if': 'if> ',
         'cmd_for': 'for> ',
         'cmd_block': '()> ',
+        # P2 新增：未闭合引号时的续行提示符
+        'unclosed_quote': 'quote> ',
     }
 
     def __init__(self, syntax: str = "auto", virtual_root: str = ""):
@@ -1927,20 +2033,30 @@ class MultiLineInput:
             return self.CONTINUATION_PROMPTS.get(key, 'heredoc> ')
         return self.CONTINUATION_PROMPTS.get(state.type, '> ')
 
-    def _get_prompt_text(self, state: MultiLineState) -> str:
+    def _get_prompt_text(self, state: MultiLineState):
+        """构造续行提示符。
+    
+        修复（ANSI 泄漏专项 · P3）：
+        - 不再手写 \\033[..m ANSI 转义序列。prompt_toolkit 的 prompt()
+          不会把 ANSI 当控制码解析，只会原样输出 → 用户看到
+          ^[[32m✓ heredoc-bash> ^[[0m 这样的乱码。
+        - 改用纯字符串 + 状态标记字符（✓ / !），ptk 按普通文本渲染，
+          干净、跨终端一致。想要颜色可以改成 FormattedText 并配套
+          一份样式表，但没必要为了两个标记上样式。
+        """
         prompt = self._get_heredoc_prompt(state)
-
+    
+        # 状态标记：✓ 表示语法已完整，! 表示有语法错误，空表示普通续行
         if not state.ast_valid and state.ast_error:
-            prompt = f"\033[31m! {prompt}\033[0m"
+            marker = "! "
         elif state.ast_valid and len(state.lines) > 2:
-            prompt = f"\033[32m✓ {prompt}\033[0m"
-
+            marker = "✓ "
+        else:
+            marker = ""
+    
         if state.function_name:
-            prompt = f"\033[36m{state.function_name} ▶ {prompt}\033[0m"
-
-        if HAS_PYGMENTS:
-            return HTML(f'<multiline-prompt>{prompt}</multiline-prompt>')
-        return prompt
+            return f"{state.function_name} ▶ {marker}{prompt}"
+        return f"{marker}{prompt}"
 
     def process_line(self, line: str, state: MultiLineState) -> Tuple[bool, Optional[MultiLineState]]:
         if state.nest_stack:
@@ -2105,6 +2221,9 @@ def _simple_multiline_input(
     input_func: Callable = input,
 ) -> Tuple[str, bool]:
     lines = [initial_line]
+    # P2 修复：让 state.lines 从首行起累积，否则基于 state.lines 的终止条件
+    # （如 unclosed_quote / bracket_open）永远只看到当前行，无法正确判断闭合
+    state.lines = lines
 
     prompts = {
         'heredoc': 'heredoc> ',
@@ -2129,6 +2248,8 @@ def _simple_multiline_input(
         'cmd_if': 'if> ',
         'cmd_for': 'for> ',
         'cmd_block': '()> ',
+        # P2 新增
+        'unclosed_quote': 'quote> ',
     }
 
     prompt = prompts.get(state.type, '> ')

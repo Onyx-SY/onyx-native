@@ -57,7 +57,9 @@ ACTIONS: List[Tuple[str, str, str, str, List[str]]] = [
      None),   # None = 平台相关默认（见 multiline_default_keys）
 
     # ── TUI 补全菜单 ──
-    ("complete.accept", "complete", "接受补全", "Accept completion", ["tab"]),
+    # complete.accept(Tab)：菜单已开时**选中并插入下一项**（循环），菜单关着则只打开菜单
+    # —— 与主 REPL 的 completion_next / AI REPL 的 _complete_next 一致，不再是「只接受高亮项」。
+    ("complete.accept", "complete", "循环补全下一项", "Cycle to next completion", ["tab"]),
     ("complete.next", "complete", "下一项补全", "Next completion", ["down"]),
     ("complete.prev", "complete", "上一项补全", "Previous completion", ["up"]),
 

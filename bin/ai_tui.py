@@ -1684,6 +1684,8 @@ def _build_tui():
             self._adapter = TUIAdapter(self)
             self._lang = (ctx or {}).get("lang", "chinese") or "chinese"
             self._menu_cands = []      # 当前补全候选 [(插入文本, 描述, 替换长度)]
+            self._menu_base_text = None  # Tab 循环补全的基准文本（None=尚未开始循环）
+            self._menu_cycle_idx = -1    # 当前已应用的候选下标（-1=还没选过）
             self._suggester = HistorySuggester(
                 _ai_history_path(self._sk.get("user_home_dir") or ""),
                 _slash_commands(self._lang),
@@ -2292,6 +2294,21 @@ def _build_tui():
             except Exception:
                 pass
             self._menu_cands = []
+            self._menu_reset_cycle()
+
+        def _menu_reset_cycle(self) -> None:
+            """补全循环复位：下次按 Tab 从「只打开菜单、不插入」重新开始。"""
+            self._menu_base_text = None
+            self._menu_cycle_idx = -1
+
+        def _menu_cycle_text(self) -> str:
+            """当前循环下标对应的完整输入文本（尚未开始循环返回 ""）。"""
+            base = self._menu_base_text
+            if base is None or not (0 <= self._menu_cycle_idx < len(self._menu_cands)):
+                return ""
+            value, _meta, replace_len = self._menu_cands[self._menu_cycle_idx]
+            cut = max(0, len(base) - replace_len)
+            return base[:cut] + value
 
         def _menu_update(self, text: str) -> None:
             """按当前输入刷新补全菜单（输入 / 或路径时才出现）。"""
@@ -2299,6 +2316,12 @@ def _build_tui():
                 menu = self.query_one("#complete-menu", CompletionMenu)
             except Exception:
                 return
+            # Tab 循环补全写入输入框会异步触发 on_input_changed → 这里必须原样保留候选与
+            # 循环下标。旧实现每次重算都把 menu.highlighted 复位 0，于是连按 Tab 永远停在
+            # 第一项（用户反馈「只做了一次完整补全，手感很怪」）。
+            if text and text == self._menu_cycle_text():
+                return
+            self._menu_reset_cycle()
             if not (text or "").strip():
                 self._menu_hide()
                 return
@@ -2351,25 +2374,67 @@ def _build_tui():
                 pass
 
         def action_complete_accept(self) -> None:
-            """Tab：接受高亮候选（菜单未开则先按当前输入打开）。"""
+            """Tab：打开补全菜单 → 再按 Tab 依次向下循环选择候选（对齐主 REPL 手感）。
+
+            旧实现是「直接把第 0 个候选整词填进去」，而且填完又调 _menu_update 把
+            highlighted 复位成 0 → 连按 Tab 永远停在第一项，等于只做了一次完整补全。
+
+            现行为与 shell REPL（lib/terminal/kb.py 的 completion_next）及 AI REPL
+            （bin/ai_interactive.py 的 _complete_next）一致：
+              ① 菜单未开 → 只打开菜单、**不插入**（≈ start_completion(select_first=False)）；
+              ② 菜单已开 → 选中并插入**下一项**，到末尾回到第一项（≈ complete_next 环绕）。
+            每次插入都基于「循环开始时的基准文本」替换，保证在候选间来回切换不叠加。
+            """
             try:
                 menu = self.query_one("#complete-menu", CompletionMenu)
                 inp = self.query_one("#prompt", PromptInput)
             except Exception:
                 return
-            if menu.display and self._menu_cands:
-                idx = menu.highlighted if isinstance(menu.highlighted, int) else 0
-                if 0 <= idx < len(self._menu_cands):
-                    value, _meta, replace_len = self._menu_cands[idx]
-                    text = inp.value or ""
-                    inp.value = text[: len(text) - replace_len] + value
-                    try:
-                        inp.cursor_position = len(inp.value)
-                    except Exception:
-                        pass
-                    self._menu_update(inp.value)
+            text = inp.value or ""
+
+            # ① 菜单未开：只打开菜单（不插入任何内容）
+            if not (menu.display and self._menu_cands):
+                self._menu_update(text)
+                if menu.display and self._menu_cands:
+                    self._menu_base_text = text      # 记下基准文本，后续 Tab 基于它替换
+                    self._menu_cycle_idx = -1
                 return
-            self._menu_update(inp.value or "")
+
+            # ② 菜单已开：循环到下一项并插入
+            if self._menu_base_text is None:
+                self._menu_base_text = text
+                self._menu_cycle_idx = -1
+            n = len(self._menu_cands)
+            if n <= 0:
+                return
+            self._menu_cycle_idx = (self._menu_cycle_idx + 1) % n
+            value, _meta, replace_len = self._menu_cands[self._menu_cycle_idx]
+            base = self._menu_base_text or ""
+            cut = max(0, len(base) - replace_len)
+            new_text = base[:cut] + value
+            try:
+                inp.value = new_text
+                inp.cursor_position = len(new_text)
+            except Exception:
+                pass
+            try:
+                menu.highlighted = self._menu_cycle_idx   # 高亮跟着走，看得见选中了哪一项
+            except Exception:
+                pass
+
+        def _menu_sync_cycle_from_menu(self, menu) -> None:
+            """↓/↑ 手动移动高亮后，让 Tab 的循环下标跟上（否则下次 Tab 会跳回原处）。"""
+            try:
+                idx = menu.highlighted
+                if isinstance(idx, int) and 0 <= idx < len(self._menu_cands):
+                    if self._menu_base_text is None:
+                        try:
+                            self._menu_base_text = self.query_one("#prompt", PromptInput).value or ""
+                        except Exception:
+                            self._menu_base_text = ""
+                    self._menu_cycle_idx = idx
+            except Exception:
+                pass
 
         def action_menu_down(self) -> None:
             """↓（菜单未显示时）→ 历史下一条。"""
@@ -2377,6 +2442,7 @@ def _build_tui():
                 menu = self.query_one("#complete-menu", CompletionMenu)
                 if menu.display:
                     menu.action_cursor_down()
+                    self._menu_sync_cycle_from_menu(menu)
                     return
             except Exception:
                 pass
@@ -2388,6 +2454,7 @@ def _build_tui():
                 menu = self.query_one("#complete-menu", CompletionMenu)
                 if menu.display:
                     menu.action_cursor_up()
+                    self._menu_sync_cycle_from_menu(menu)
                     return
             except Exception:
                 pass

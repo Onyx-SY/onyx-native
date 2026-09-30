@@ -2851,11 +2851,14 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
     current_lang = get_current_lang()
 
     # ========== TUI 依赖自举（默认模式为 TUI 时确保 textual 可用；失败静默回退 REPL）==========
-    try:
-        from bin.ai_lib.tui_deps import ensure_tui_deps_at_startup as _ensure_tui
-        _ensure_tui(quiet=True)
-    except Exception:
-        pass
+    # ⚠️ 单条命令模式（-c / oneshot）永远不会进入 TUI/REPL，跳过该自举：
+    # 省掉 bin.ai_lib.tui_deps + bin.ai_lib.mode + importlib.metadata/zipfile 等约 100ms 启动开销。
+    if not oneshot:
+        try:
+            from bin.ai_lib.tui_deps import ensure_tui_deps_at_startup as _ensure_tui
+            _ensure_tui(quiet=True)
+        except Exception:
+            pass
 
     lang_msgs = {
         "chinese": {
@@ -3135,12 +3138,16 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
         record_step("21.persistent_mode_cache")
 
         # 16. 其他初始化
-        init_prompt_from_storage()
+        # 提示符配置 / 历史导航都是交互式 REPL 专属：oneshot（-c 单条命令）下其产物无人消费，
+        # 且 init_prompt_from_storage 会写 ~/.prompt.conf，跳过可省启动耗时与无谓落盘。
+        if not oneshot:
+            init_prompt_from_storage()
         record_step("22.init_prompt_from_storage")
-        
-        init_history_navigation()
+
+        if not oneshot:
+            init_history_navigation()
         record_step("23.init_history_navigation")
-        
+
         load_user_config()
         record_step("24.load_user_config")
 
@@ -3195,8 +3202,9 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
         record_step("29.auto_clean_expired_logs")
         record_step("30.handle_manage")
 
-        # 21. 加载自启命令
-        load_autocmd()
+        # 21. 加载自启命令（autocmd 只在交互式会话执行，oneshot 下连加载都省掉）
+        if not oneshot:
+            load_autocmd()
         record_step("32.load_autocmd")
         
         if not oneshot and AUTO_CMDS and global_config.get("user_config", {}).get("enable_autocmd", True):
@@ -3206,11 +3214,13 @@ def initialize_onyx_environment(request_id: str, oneshot: bool = False) -> bool:
                 parse_and_execute(cmd_info["cmd"])
         record_step("33.execute_autocmd")
 
-        # 22. RC 文件创建
-        check_and_create_system_rc()
+        # 22. RC 文件创建（onyx.onyxrc / .onyxrc 只被交互式会话 source，oneshot 用不到）
+        if not oneshot:
+            check_and_create_system_rc()
         record_step("34.check_and_create_system_rc")
-        
-        check_and_create_user_rc()
+
+        if not oneshot:
+            check_and_create_user_rc()
         record_step("35.check_and_create_user_rc")
         
         # ========== 保存计时结果 ==========

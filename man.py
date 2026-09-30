@@ -14,6 +14,14 @@
 - subcommands 是 dict（新格式）时不再被压成 list
 - _scan_loop 不再强塞 "subcommands": []，避免污染节点结构
 - 已损坏的旧 command.json（subcommands 被压平）会在下次加载时自动以 cmd.json 为准覆盖
+
+修复（Python 3.14 导入死锁专项）：
+- _resolve_com_cmd_path 不再 `from lib.terminal.com import ...`。
+  此前后台扫描线程会顺着 man.py → com.py 把 prompt_toolkit 整包拖进来，
+  与主线程首次导入 prompt_toolkit 撞车，在 3.14 上触发
+  _DeadlockError: deadlock detected by _ModuleLock('prompt_toolkit.lexers')。
+  现在只在 com 模块【已经被主线程加载过】时才去读取它的路径，
+  后台线程不再主动导入 com，避免抢模块锁。
 """
 
 import os
@@ -155,6 +163,16 @@ def _merge_node(a: Any, b: Any) -> Dict[str, Any]:
 # ═══════════════════════════════════════════════════════════
 # com_cmd.json 协同：用户已处理过的命令跳过扫描
 # ═══════════════════════════════════════════════════════════
+#
+# ⚠️ Python 3.14 死锁规避：
+# 本模块运行在【后台扫描线程】里。此前 _resolve_com_cmd_path() 里写了
+#   from lib.terminal.com import get_com_cmd_config_path
+# 而 com.py 顶部硬编码导入整个 prompt_toolkit。当主线程同时在
+# input_lib.py 里首次导入 prompt_toolkit 时，两边会在
+# _ModuleLock('prompt_toolkit.lexers') 上互等，3.14 直接抛
+# _DeadlockError。修复：后台线程不再主动导入 com，
+# 只读取 sys.modules 里【已被主线程加载过】的实例。
+# ═══════════════════════════════════════════════════════════
 
 _COM_CMD_JSON_PATH: Optional[str] = None
 _COM_CMD_COMMANDS: Optional[Set[str]] = None
@@ -178,13 +196,23 @@ def _resolve_com_cmd_path() -> Optional[str]:
     if env_path:
         candidates.append(env_path)
 
-    try:
-        from lib.terminal.com import get_com_cmd_config_path  # type: ignore
-        p = get_com_cmd_config_path()
-        if p:
-            candidates.append(p)
-    except Exception:
-        pass
+    # ── 关键修复：绝不主动 import lib.terminal.com ──
+    # 只在它【已经被主线程加载过】时才去读取它登记的路径。
+    # 若尚未加载，本线程直接跳过 —— 宁可少一个候选路径，
+    # 也不能触发 com.py 首次导入，把 prompt_toolkit 拖进后台线程。
+    com_mod = sys.modules.get("lib.terminal.com")
+    if com_mod is None:
+        # 兜底：尝试已在 sys.modules 里的其它可能包名
+        com_mod = sys.modules.get("onyx.lib.terminal.com")
+    if com_mod is not None:
+        try:
+            p = getattr(com_mod, "get_com_cmd_config_path", None)
+            if callable(p):
+                path_val = p()
+                if path_val:
+                    candidates.append(path_val)
+        except Exception:
+            pass
 
     candidates.append("/onyx/etc/com_cmd.json")
     candidates.append(os.path.join(BASE_DIR, "etc", "com_cmd.json"))

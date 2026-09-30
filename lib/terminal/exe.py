@@ -200,6 +200,13 @@ _FILTERED_PREFIXES = ('__READY_', '__VAR_', '__FUNC_', '__CWD_')
 # ======================================================================
 _current_pty_size = (24, 80)
 _shell_lock = threading.Lock()
+
+# 可调超时（环境变量可覆盖，便于高负载 / 慢设备调优）
+_ECHO_SKIP_TIMEOUT = float(os.environ.get('ONYX_ECHO_TIMEOUT', '0.2'))
+_WRITE_TOTAL_TIMEOUT = float(os.environ.get('ONYX_WRITE_TIMEOUT', '10'))
+_SHELL_READY_TIMEOUT = float(os.environ.get('ONYX_SHELL_READY_TIMEOUT', '5'))
+# 回显行里可能夹着 shell 的控制序列（\x1b[?2004l 等），比较前需剥掉
+_ANSI_RE = re.compile(rb'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[=>]')
 _persistent_shell: Optional['PersistentShell'] = None
 # AI 执行模式标志 — 由 ai_cmd.py 在执行命令前设为 True，执行后恢复
 # 用于给 AI 触发的命令加超时保护和用户弹窗
@@ -430,12 +437,75 @@ def get_shell_from_type() -> str:
 
 
 _shell_cache: Optional[str] = None
+# 用户显式指定的底层 shell（--shell / ONYX_SHELL），绝对路径；None = 未指定
+_shell_override: Optional[str] = None
+
+# 已知 shell 候选（用于 --list-shells 与覆盖解析）
+_KNOWN_SHELL_NAMES = ('bash', 'zsh', 'fish', 'sh', 'dash', 'ksh',
+                      'pwsh', 'powershell', 'cmd')
+
+
+def _resolve_shell_candidate(name_or_path: Optional[str]) -> Optional[str]:
+    """把 'fish' / '/usr/bin/fish' 解析为可执行绝对路径；无效返回 None。"""
+    if not name_or_path:
+        return None
+    cand = str(name_or_path).strip()
+    if not cand:
+        return None
+    is_path = os.sep in cand or (os.altsep and os.altsep in cand)
+    if is_path:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return os.path.abspath(cand)
+        return None
+    found = shutil.which(cand)
+    return found or None
+
+
+def list_available_shells() -> List[Tuple[str, str]]:
+    """列出本机可用的已知 shell：[(名字, 绝对路径), ...]（去重、保序）。
+
+    非 Windows 上跳过 'cmd'（避免把 Termux/Unix 上同名的无关命令列进来）。
+    """
+    out: List[Tuple[str, str]] = []
+    seen = set()
+    _is_win = platform.system() == "Windows"
+    for name in _KNOWN_SHELL_NAMES:
+        if name == 'cmd' and not _is_win:
+            continue
+        path = shutil.which(name)
+        if path and path not in seen:
+            seen.add(path)
+            out.append((name, path))
+    return out
+
+
+def set_shell_override(name_or_path: Optional[str]) -> Optional[str]:
+    """设置底层 shell 覆盖。返回解析后的绝对路径；无效（不存在）返回 None。"""
+    global _shell_override, _shell_cache
+    resolved = _resolve_shell_candidate(name_or_path)
+    _shell_override = resolved
+    _shell_cache = None          # 强制 get_shell() 重新计算
+    if resolved:
+        debug_log(f"Shell override set: {resolved}")
+    return resolved
+
 
 def get_shell() -> str:
     """Get available shell for current system (uses terminal type detection)"""
-    global _shell_cache
+    global _shell_cache, _shell_override
     if _shell_cache:
         return _shell_cache
+
+    # ── 0. 用户显式覆盖（--shell / ONYX_SHELL）优先级最高 ──
+    override = _shell_override or os.environ.get('ONYX_SHELL') or ''
+    if override:
+        resolved = _resolve_shell_candidate(override)
+        if resolved:
+            _shell_override = resolved
+            _shell_cache = resolved
+            debug_log(f"Using shell override: {resolved}")
+            return resolved
+        debug_log(f"Shell override {override!r} not found, falling back to auto-detect", 'error')
     
     if TERMINAL_TYPE_AVAILABLE:
         _shell_cache = get_shell_from_type()
@@ -529,6 +599,8 @@ class PersistentShell:
         self.shell = shell_path or get_shell()
         self.master_fd = None
         self.pid: Optional[int] = None
+        # shell 进程 starttime（/proc/<pid>/stat 第 22 字段）——防 PID 复用误判
+        self._start_ticks = 0
         self.cwd = cwd or os.getcwd()
         self._dead = False
         self.shell_name = os.path.basename(self.shell).lower()
@@ -717,7 +789,17 @@ class PersistentShell:
             if not self._prompt_probed:
                 self._probe_and_learn_prompt()
 
-            # 用 PS1 中的 DONE marker 检测命令完成
+            # 命令文本若含哨兵串（例如用户 echo "$PS1"）→ 换一个哨兵，
+            # 否则命令回显/输出里的哨兵会被误判为「命令结束」。
+            if self._done_marker and self._done_marker in cmd:
+                debug_log("Command contains sentinel string; regenerating marker")
+                self._done_marker = f"__DONE_{uuid.uuid4().hex[:12]}__"
+                try:
+                    self._ensure_sentinel()
+                except Exception:
+                    pass
+
+            # 用哨兵检测命令完成
             _done_marker = self._done_marker
             full_cmd = f"{cmd}\n"
             debug_log(f"Passthrough full_cmd: {repr(full_cmd[:200])}")
@@ -800,7 +882,7 @@ class PersistentShell:
             else:
                 self._drain_output(max_iterations=20, quiet_timeout=0.03)
             _echo_pending = True  # 需要跳过 shell 回显的命令文本
-            _echo_buf = ""        # 累积回显字节
+            _echo_buf = b""       # 累积回显字节（bytes：与原始数据同域，避免编解码损坏）
             _echo_start_time = time.time()  # echo 跳过超时计时（TUI 程序无 \n 时避免吞输出）
 
             try:
@@ -845,6 +927,73 @@ class PersistentShell:
                 except Exception:
                     return _s
 
+            # ── 哨兵扫描状态（累积缓冲 + 延迟转发）──
+            # 哨兵可能被 4096 字节分块切开：只对单次 read 做正则会漏检 → 命令永不返回。
+            # 这里维护「尚未转发」的尾部字节缓冲，只转发确定不属于哨兵前缀的部分
+            # （KEEP 字节），命中时精确截断。转发的是**原始字节**，无 UTF-8 往返损坏。
+            _SENT_KEEP = 40   # 哨兵最长约 30B（含 CRLF）；越小转发越实时
+            _scan_bytes = bytearray()
+            _last_out_byte = [None]   # 最近一次已转发内容的最后一个字节
+            _sent_re_b = re.compile(
+                rb'(?:^|\n)' + re.escape(_done_marker.encode('utf-8')) + rb'(?::(-?\d+))?'
+            )
+            _sentinel_seen = False
+            _hard_timed_out = False
+            _sentinel_lost = False
+
+            def _scan_feed(_b: bytes):
+                """喂入原始字节并转发安全部分。返回 (found, exit_code_or_None)。"""
+                nonlocal _scan_bytes
+                if not _b:
+                    return False, None
+                _scan_bytes.extend(_b)
+                _buf = bytes(_scan_bytes)
+                _m = _sent_re_b.search(_buf)
+                if _m:
+                    _cut = _m.start()
+                    if _cut > 0 and _buf[_cut - 1:_cut] == b'\r':
+                        _cut -= 1          # 哨兵的 CR 也切掉，避免多一个空行
+                    _head = _buf[:_cut]
+                    if _head:
+                        if not _head.endswith(b'\n'):
+                            _head += b'\n'   # 输出未以换行结束 → 补一个
+                    elif _last_out_byte[0] not in (None, b'\n'):
+                        _head = b'\n'        # 上次输出没换行结尾 → 补一个，避免粘连
+                    _scan_bytes = bytearray(_buf[_m.end():])
+                    if _head:
+                        _emit(_head)
+                        _last_out_byte[0] = _head[-1:]
+                        if output_buffer is not None:
+                            output_buffer.append(
+                                _safe(_head.decode('utf-8', 'replace').replace('\r\n', '\n')))
+                    _c = _m.group(1)
+                    return True, (int(_c) if _c is not None else None)
+                if len(_buf) > _SENT_KEEP:
+                    _head = _buf[:len(_buf) - _SENT_KEEP]
+                    _scan_bytes = bytearray(_buf[len(_buf) - _SENT_KEEP:])
+                    _emit(_head)
+                    _last_out_byte[0] = _head[-1:]
+                    if output_buffer is not None:
+                        output_buffer.append(
+                            _safe(_head.decode('utf-8', 'replace').replace('\r\n', '\n')))
+                return False, None
+
+            # ── 空闲 / 活性判定参数 ──
+            _POLL_T = 0.25          # 空闲轮询（省 CPU）
+            _POLL_T_PENDING = 0.01  # 扫描缓冲还有待放字节时的轮询（低延迟）
+            _IDLE_PROBE_AFTER = 1.5   # shell 空闲超过它且无哨兵 → 判定哨兵失效
+            _MAX_HEAL = 3
+            _last_activity = time.time()
+            _heal_count = 0
+            _shell_pgid = self.pid
+            _hard_deadline = None
+            try:
+                _tmo_env = float(os.environ.get('ONYX_CMD_TIMEOUT', '0') or 0)
+            except (TypeError, ValueError):
+                _tmo_env = 0.0
+            if _tmo_env > 0:
+                _hard_deadline = time.time() + _tmo_env
+
             while True:
                 if not is_windows and self.master_fd is not None:
                     try:
@@ -853,7 +1002,9 @@ class PersistentShell:
                         _watch_fds = [self.master_fd]
                         if _is_main_thread:
                             _watch_fds.append(fd_stdin)
-                        rlist, _, _ = select.select(_watch_fds, [], [])
+                        rlist, _, _ = select.select(
+                            _watch_fds, [], [],
+                            _POLL_T_PENDING if _scan_bytes else _POLL_T)
                     except (select.error, OSError):
                         continue
                     data = None
@@ -892,63 +1043,59 @@ class PersistentShell:
                         text = data.decode('latin-1', errors='replace')
 
                     full_raw_output += text
+                    _last_activity = time.time()
 
-                    # 跳过 shell 回显的命令文本（仅匹配首部，不吞 TUI 输出）
-                    _echo_was_active = _echo_pending
+                    # 跳过 shell 回显的命令文本（仅匹配首部，不吞 TUI 输出）。
+                    # 全程用 bytes 比较，避免编解码往返损坏跨块的多字节字符。
+                    _emit_bytes = data
                     if _echo_pending:
                         # TUI 程序可能长时间输出无 \n 字节（如全屏控制码），
                         # 超时 200ms 则视为已过 echo 阶段，直接转发全部累积数据
-                        if _echo_buf and time.time() - _echo_start_time > 0.2:
-                            text = _echo_buf
+                        if _echo_buf and time.time() - _echo_start_time > _ECHO_SKIP_TIMEOUT:
+                            _emit_bytes = _echo_buf + data
+                            _echo_buf = b""
                             _echo_pending = False
                         else:
-                            _echo_buf += text
-                            _max_echo_len = len(cmd) + 64  # 命令回显不可能超过 cmd 太多
-                            cmd_echo_end = _echo_buf.find('\n')
-                            if cmd_echo_end != -1 and cmd_echo_end < _max_echo_len:
-                                echo_line = _echo_buf[:cmd_echo_end].strip()
-                                if echo_line == cmd.strip() or cmd.strip().startswith(echo_line):
-                                    text = _echo_buf[cmd_echo_end + 1:]
+                            _echo_buf += data
+                            _max_echo_len = len(cmd.encode('utf-8', 'replace')) + 64
+                            _nl = _echo_buf.find(b'\n')
+                            _cmd_b = cmd.strip().encode('utf-8', 'replace')
+                            if _nl != -1 and _nl < _max_echo_len:
+                                _echo_line = _ANSI_RE.sub(b'', _echo_buf[:_nl]).strip()
+                                if _echo_line == _cmd_b or _cmd_b.startswith(_echo_line):
+                                    _emit_bytes = _echo_buf[_nl + 1:]
+                                    _echo_buf = b""
                                     _echo_pending = False
-                                    if not text:
+                                    if not _emit_bytes:
                                         continue
                                 else:
-                                    text = _echo_buf
+                                    _emit_bytes = _echo_buf
+                                    _echo_buf = b""
                                     _echo_pending = False
                             elif len(_echo_buf) > _max_echo_len:
                                 # 超过命令长度还没 \n → 不是命令回显（TUI 程序），全部放过
-                                text = _echo_buf
+                                _emit_bytes = _echo_buf
+                                _echo_buf = b""
                                 _echo_pending = False
                             else:
                                 continue
 
-                    # 检测 shell 提示词中的完成 marker（PS1 的一部分，SIGINT 后仍会打印）
-                    if _done_marker:
-                        done_pattern = re.escape(_done_marker) + r":(-?\d+)"
-                        done_match = re.search(done_pattern, text)
-                        if done_match:
-                            return_code = int(done_match.group(1))
-                            debug_log(f"PS1 done marker, exit={return_code}")
-                            before_marker = text[:done_match.start()]
-                            if before_marker:
-                                _emit(before_marker.encode('utf-8', errors='surrogateescape'))
-                                if output_buffer is not None:
-                                    output_buffer.append(_safe(before_marker.replace('\r\n', '\n')))
-                            break
+                    # ── 哨兵检测（累积缓冲 + 行锚定）──
+                    # 命中 __DONE_x:<code>（bash 的 PROMPT_COMMAND 主哨兵）或
+                    # 裸 __DONE_x（cmd 无退出码哨兵）即视为命令结束。
+                    _found, _code = _scan_feed(_emit_bytes)
+                    if _found:
+                        return_code = _code if _code is not None else 0
+                        _sentinel_seen = True
+                        debug_log(f"Sentinel hit, exit={return_code}")
+                        break
 
                     # ── 不再使用 fallback prompt pattern 检测 ──
                     # 2026-07-22: 移除了通用 prompt 正则（$ > # %）和 _prompt_patterns 匹配。
                     # 这些会误抓交互式程序（如 c.py 的 "🔢 >"）自身的提示符，导致 passthrough
-                    # 提前退出。交互式程序不产生 PS1 __DONE__ marker，必须保持 passthrough
+                    # 提前退出。交互式程序不产生哨兵，必须保持 passthrough
                     # 直通直到用户 Ctrl+C 或程序自己退出（产生 PTY EOF）。
-                    # 只有 shell 的 PS1（__DONE__:exit_code）才是命令完成的可靠信号。
-
-                    # Real-time output forwarding —— 原样写原始字节：
-                    # 不改写 CRLF（改写依赖终端 ONLCR，OPOST 关闭时换行不回车 → TUI 形变），
-                    # 也不做 decode/encode 往返（避免跨 4096 边界截断的多字节 UTF-8 被破坏）。
-                    _emit(text.encode('utf-8', errors='surrogateescape') if _echo_was_active else data)
-                    if output_buffer is not None:
-                        output_buffer.append(_safe(text.replace('\r\n', '\n')))
+                    # 只有 shell 的哨兵才是命令完成的可靠信号。
 
                 # --- Forward stdin to PTY (for TUI programs) ---
                 if stdin_data is not None and len(stdin_data) > 0:
@@ -956,6 +1103,64 @@ class PersistentShell:
                         self._write_to_master(stdin_data)
                     except OSError:
                         pass
+                    _last_activity = time.time()
+
+                # --- 空闲判定 / 硬超时兜底（绝不永久阻塞）---
+                _now = time.time()
+                # 静默 15ms → 扫描缓冲全部放出：TUI 首屏（nano/vim）不能被
+                # 「等哨兵」的保留区扣住，否则要等用户按键才渲染。
+                # （配合上面的 _POLL_T_PENDING，最坏延迟 ≈ 15ms。）
+                if _scan_bytes and _now - _last_activity > 0.015:
+                    _b = bytes(_scan_bytes)
+                    _emit(_b)
+                    _last_out_byte[0] = _b[-1:]
+                    if output_buffer is not None:
+                        output_buffer.append(
+                            _safe(_b.decode('utf-8', 'replace').replace('\r\n', '\n')))
+                    _scan_bytes = bytearray()
+                if _hard_deadline is not None and _now > _hard_deadline:
+                    debug_log(f"Passthrough hard timeout after {_tmo_env:.0f}s", 'error')
+                    if output_buffer is not None:
+                        output_buffer.append(
+                            f"[命令超过 ONYX_CMD_TIMEOUT={_tmo_env:.0f}s，已中止]")
+                    _hard_timed_out = True
+                    if _scan_bytes:  # flush 尾部，避免丢最后 KEEP 字节
+                        _emit(bytes(_scan_bytes))
+                        _scan_bytes = bytearray()
+                    break
+                if _now - _last_activity > _IDLE_PROBE_AFTER:
+                    _fg = None
+                    if not is_windows and self.master_fd is not None:
+                        try:
+                            _fg = os.tcgetpgrp(self.master_fd)
+                        except Exception:
+                            _fg = None
+                    if _fg is not None and _shell_pgid is not None and _fg != _shell_pgid:
+                        # 有子进程（TUI / 子 shell / sleep…）占前台 → 正常等待，不干预
+                        _last_activity = _now
+                    else:
+                        # shell 自己在等输入却没有哨兵 → PS1/hook 被改写 → 自愈
+                        _heal_count += 1
+                        debug_log(f"Sentinel missing while shell idle; healing "
+                                  f"(attempt {_heal_count})", 'error')
+                        _ok, _leftover = self._ensure_sentinel()
+                        _last_activity = _now
+                        if _leftover:
+                            # 探测期间读到的字节（可能已含恢复后的哨兵）喂回扫描器
+                            _f2, _c2 = _scan_feed(_leftover)
+                            if _f2:
+                                return_code = _c2 if _c2 is not None else 0
+                                _sentinel_seen = True
+                                break
+                        if _heal_count >= _MAX_HEAL + 2:
+                            if output_buffer is not None:
+                                output_buffer.append(
+                                    "[无法恢复命令完成标记（提示符被改写），已中止本命令]")
+                            _sentinel_lost = True
+                            if _scan_bytes:
+                                _emit(bytes(_scan_bytes))
+                                _scan_bytes = bytearray()
+                            break
 
         except Exception as e:
             debug_log(f"Passthrough exception: {e}", 'error')
@@ -1003,7 +1208,12 @@ class PersistentShell:
         elif self.master_fd is not None:
             # 循环写满：os.write 可能部分写（PTY 缓冲满），单次写会静默丢字节
             mv = memoryview(data)
+            # 总超时兜底：shell 被 SIGSTOP / 卡死时不至于把调用方永久挂住
+            _wdeadline = time.time() + _WRITE_TOTAL_TIMEOUT
             while mv:
+                if time.time() > _wdeadline:
+                    debug_log(f"write_to_master timeout, {len(mv)} bytes dropped", 'error')
+                    break
                 try:
                     n = os.write(self.master_fd, mv)
                 except InterruptedError:
@@ -1011,7 +1221,7 @@ class PersistentShell:
                 except BlockingIOError:
                     # 非阻塞 fd 且缓冲满 → 等可写再重试，绝不丢字节
                     try:
-                        select.select([], [self.master_fd], [], 0.5)
+                        select.select([], [self.master_fd], [], 0.1)
                     except Exception:
                         time.sleep(0.01)
                     continue
@@ -1082,6 +1292,33 @@ class PersistentShell:
             self._init_shell_windows()
         else:
             self._init_shell_unix()
+        self._record_start_ticks()
+
+    def _read_proc_stat(self):
+        """读 /proc/<pid>/stat，返回 (state_char, starttime) 或 None。
+
+        comm 字段可能含空格/括号 → 用最后一个 ')' 切分。
+        starttime 是第 22 字段，在 ')' 之后是第 20 个。
+        """
+        if not self.pid:
+            return None
+        try:
+            with open(f"/proc/{self.pid}/stat", "rb") as _f:
+                _raw = _f.read()
+            _r = _raw.rfind(b')')
+            if _r < 0:
+                return None
+            _rest = _raw[_r + 2:].split()
+            _state = _rest[0].decode('ascii', 'replace')
+            _start = int(_rest[19]) if len(_rest) > 19 else 0
+            return _state, _start
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def _record_start_ticks(self) -> None:
+        """记录 shell 进程的 starttime（用于 is_alive 防 PID 复用）。"""
+        _st = self._read_proc_stat()
+        self._start_ticks = _st[1] if _st else 0
 
     def _init_shell_windows(self):
         """Initialize shell on Windows using winpty + reader thread."""
@@ -1098,8 +1335,14 @@ class PersistentShell:
                 if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', var_name):
                     env[var_name] = str(var_value)
 
-        # Set PS1 to empty to avoid prompt display
-        env['PS1'] = ''
+        # 注入哨兵（与 Unix 路径一致；若把 PS1 置空则 bash 类 shell 无哨兵 → 永久阻塞）
+        for _k in ('PS1', 'PROMPT_COMMAND', 'PROMPT'):
+            env.pop(_k, None)
+        env['PS1'] = f'{self._done_marker}:$?\\n'
+        if self.shell_name == 'bash':
+            env['PROMPT_COMMAND'] = (
+                'printf "\\n' + self._done_marker + ':%s\\n" "$?"'
+            )
 
         # Build shell command line based on shell type
         if self.shell_name in ('pwsh', 'powershell'):
@@ -1209,8 +1452,18 @@ class PersistentShell:
                 # _extra_vars 也会把它们重新塞回去（旧代码只在注释里"声明"不导出）。
                 env.pop('LINES', None)
                 env.pop('COLUMNS', None)
-                env['PS1'] = f'{self._done_marker}:$?\\n'
+                if self.shell_name == 'bash':
+                    # bash 有 PROMPT_COMMAND → PS1 保持干净（空），
+                    # 避免提示符本身把 __DONE_x:0 显示在用户终端上。
+                    env['PS1'] = ''
+                else:
+                    env['PS1'] = f'{self._done_marker}:$?\\n'
                 env['PROMPT'] = '$P$G'
+                # 主哨兵：bash 用 PROMPT_COMMAND（每次提示符前必执行，抗 PS1 改写）
+                if self.shell_name == 'bash':
+                    env['PROMPT_COMMAND'] = (
+                        'printf "\\n' + self._done_marker + ':%s\\n" "$?"'
+                    )
                 # For zsh compatibility: disable prompt and other features
                 env['ZDOTDIR'] = '/dev/null'
                 env['HISTFILE'] = '/dev/null'
@@ -1260,6 +1513,9 @@ class PersistentShell:
             
             # Wait for shell initialization to complete (silently, no output leakage)
             self._wait_for_shell_ready_silent()
+            # 再清一次残留：shell 初始化末次提示符（含哨兵）可能晚于 ready 探测到达，
+            # 残留在 PTY 缓冲里会在下一屏被转发 → 用户看到凭空一行 __DONE_x:0。
+            self._drain_output(max_iterations=20, quiet_timeout=0.03)
 
     def _wait_for_shell_ready_silent(self):
         """Silently wait for shell initialization, discarding all output"""
@@ -1280,7 +1536,7 @@ class PersistentShell:
         try:
             self._write_to_master(test_cmd.encode('utf-8'))
             start_time = time.time()
-            while time.time() - start_time < 5.0:
+            while time.time() - start_time < _SHELL_READY_TIMEOUT:
                 data = self._read_from_master(timeout=5.0)
                 if data:
                     text = data.decode('utf-8', errors='replace')
@@ -1302,23 +1558,37 @@ class PersistentShell:
         if self.master_fd is None and self._winpty_handle is None:
             return
 
-        # PS1 已在 fork 时通过 env 传入 bash/sh/dash，跳过重复写入
+        # bash/sh/dash 的哨兵已在 fork 时经 env 传入；这里再幂等下发一次，
+        # 防止 /etc/bash.bashrc、系统 rc 等把 PS1/PROMPT_COMMAND 覆盖掉
+        # （覆盖后哨兵丢失 → 首条命令要等 1.5s 自愈，或干脆卡住）。
         if self.shell_name in ('bash', 'sh', 'dash'):
-            debug_log(f"Skip prompt setup for {self.shell_name}: PS1 already set via env")
+            try:
+                self._write_to_master(
+                    self._sentinel_commands(self.shell_name).encode('utf-8'))
+                self._drain_output()
+            except OSError as e:
+                debug_log(f"Failed to (re)set sentinel for {self.shell_name}: {e}", 'error')
             return
 
         debug_log(f"Setting up prompt for shell: {self.shell_name}, done_marker={self._done_marker}")
 
         if self.shell_name == 'fish':
+            # fish：单引号内不做插值，必须用 printf 的 %s + 参数传 $status。
             setup_cmd = (
-                f"function fish_prompt; printf '{self._done_marker}:$status\\n'; end\n"
+                f"function fish_prompt; printf '\\n{self._done_marker}:%s\\n' $status; end\n"
                 "function fish_right_prompt; printf ''; end\n"
             )
         elif self.shell_name == 'zsh':
+            # zsh：哨兵放 precmd_functions（**追加**，不覆盖用户已有 precmd）。
+            # 单引号内不插值 → 用 %s + 参数传 $?。
+            # （旧代码写 '$?' 在单引号里 → 哨兵恒为字面 "$?"，正则匹配不到
+            #   → zsh 下命令永不返回，这是必须修掉的旧 bug。）
             setup_cmd = (
                 "unsetopt PROMPT_CR 2>/dev/null\n"
                 "unsetopt PROMPT_SP 2>/dev/null\n"
-                f"precmd() {{ printf '{self._done_marker}:$?\\n'; }}\n"
+                f"__onyx_sentinel() {{ printf '\\n{self._done_marker}:%s\\n' $?; }}\n"
+                "typeset -ga precmd_functions\n"
+                "precmd_functions+=(__onyx_sentinel)\n"
                 "PROMPT=''\n"
                 "RPROMPT=''\n"
             )
@@ -1327,8 +1597,10 @@ class PersistentShell:
                 f"function prompt {{ \"{self._done_marker}:$LASTEXITCODE`n\" }}\n"
             )
         elif self.shell_name == 'cmd':
-            # CMD prompt can't embed exit code; keep minimal prompt
-            setup_cmd = "prompt $G\n@echo off\n"
+            # cmd 的 prompt 无法动态取退出码（%ERRORLEVEL% 只在设置 prompt 时
+            # 展开一次），因此只放「无退出码哨兵」—— 检测器接受裸哨兵
+            # （退出码视为未知），保证 cmd 下命令能正常结束而不是永久阻塞。
+            setup_cmd = f"prompt {self._done_marker}$G\n@echo off\n"
         else:
             # bash and other sh-compatible shells
             setup_cmd = f"PROMPT_COMMAND=''\nPS1='{self._done_marker}:$?\\n'\n"
@@ -1340,7 +1612,100 @@ class PersistentShell:
             debug_log(f"Failed to setup prompt: {e}", 'error')
             pass
 
-    def _drain_output(self, max_iterations: int = 8, quiet_timeout: float = 0.002):
+    def _detect_live_shell_name(self) -> str:
+        """探测 shell 进程**当前**实际是什么 shell。
+
+        `exec zsh` 会直接替换掉 shell 进程 → self.shell_name 过期。
+        Linux/Android 用 /proc/<pid>/comm 读取；失败回退 self.shell_name。
+        """
+        if self.pid:
+            try:
+                with open(f"/proc/{self.pid}/comm", "r") as _f:
+                    _n = _f.read().strip().lower()
+                if _n:
+                    return os.path.basename(_n)
+            except (OSError, IOError):
+                pass
+        return self.shell_name
+
+    def _sentinel_commands(self, shell_name: str) -> str:
+        """按 shell 类型生成「(重)设哨兵」的脚本文本。
+
+        bash 用 PROMPT_COMMAND（每次提示符前必执行 → 抗 PS1 改写）；
+        zsh 用 precmd_functions 追加；fish 用 fish_prompt；
+        pwsh 用 prompt 函数；cmd 用无退出码 prompt；其余用 PS1。
+        """
+        m = self._done_marker
+        if shell_name == 'fish':
+            return (
+                f"function fish_prompt; printf '\\n{m}:%s\\n' $status; end\n"
+                "function fish_right_prompt; printf ''; end\n"
+            )
+        if shell_name == 'zsh':
+            return (
+                "unsetopt PROMPT_CR 2>/dev/null\n"
+                "unsetopt PROMPT_SP 2>/dev/null\n"
+                f"__onyx_sentinel() {{ printf '\\n{m}:%s\\n' $?; }}\n"
+                "typeset -ga precmd_functions\n"
+                "precmd_functions+=(__onyx_sentinel)\n"
+                "PROMPT=''\nRPROMPT=''\n"
+            )
+        if shell_name in ('pwsh', 'powershell'):
+            return f"function prompt {{ \"{m}:$LASTEXITCODE`n\" }}\n"
+        if shell_name == 'cmd':
+            return f"prompt {m}$G\n@echo off\n"
+        if shell_name == 'bash':
+            # PS1 保持为空：哨兵只由 PROMPT_COMMAND 打印（提示符干净，
+            # 不会把 __DONE_x:0 显示给用户）。
+            return (
+                'PROMPT_COMMAND=\'printf "\\n' + m + ':%s\\n" "$?"\'\n'
+                "PS1=''\n"
+            )
+        # sh / dash / ksh 等：只有 PS1 可用
+        return f"PS1='{m}:$?\\n'\n"
+
+    def _ensure_sentinel(self):
+        """确保 shell 仍在输出哨兵；失效则重新下发并探测。
+
+        返回 (ok, leftover_bytes)：leftover 是探测期间从 PTY 读到的原始字节，
+        调用方应把它喂给扫描器（其中可能就含恢复后的哨兵）。
+
+        触发场景：用户/AI 执行 `PS1=...`、`unset PROMPT_COMMAND`、
+        `exec zsh`（换 shell）等，导致命令完成标记消失 → 若不修复，
+        命令将永远等不到结束信号（旧实现无超时 → 永久阻塞）。
+        """
+        leftover = b""
+        if self.master_fd is None and self._winpty_handle is None:
+            return False, leftover
+        try:
+            live = self._detect_live_shell_name()
+            if live and live != self.shell_name:
+                debug_log(f"Shell replaced: {self.shell_name} -> {live}")
+                self.shell_name = live
+            self._write_to_master(self._sentinel_commands(live).encode('utf-8'))
+            self._drain_output()
+            # 空行触发一次提示符（PROMPT_COMMAND / precmd 会打印哨兵）
+            self._write_to_master(b"\n")
+            deadline = time.time() + 1.0
+            pat = re.compile(
+                rb'(?:^|\n)' + re.escape(self._done_marker.encode('utf-8'))
+                + rb'(?::(-?\d+))?'
+            )
+            while time.time() < deadline:
+                chunk = self._read_from_master(timeout=0.1)
+                if not chunk:
+                    continue
+                leftover += chunk
+                if pat.search(leftover):
+                    debug_log("Sentinel restored")
+                    return True, leftover
+            debug_log("Sentinel restore probe failed", 'error')
+            return False, leftover
+        except Exception as e:
+            debug_log(f"_ensure_sentinel failed: {e}", 'error')
+            return False, leftover
+
+    def _drain_output(self, max_iterations: int = 8, quiet_timeout: float = 0.01):
         """Consume all pending output (non-blocking).
 
         quiet_timeout: 单次读取等待时长。默认 2ms（够快，用于常规收尾）；
@@ -1677,27 +2042,37 @@ class PersistentShell:
                 except Exception:
                     pass
             else:
-                try:
-                    os.killpg(self.pid, signal.SIGTERM)
-                except OSError:
-                    pass
-                try:
-                    os.kill(self.pid, signal.SIGTERM)
-                    for _ in range(5):
-                        try:
-                            pid_result, status = os.waitpid(self.pid, os.WNOHANG)
-                            if pid_result:
-                                break
-                        except OSError:
-                            break
-                        
+                # 先确认这个 PID 仍属于我们的 shell（防 PID 复用 → 误杀无关进程）
+                _st = self._read_proc_stat()
+                if (_st is not None and self._start_ticks
+                        and _st[1] and _st[1] != self._start_ticks):
+                    debug_log(f"PID {self.pid} reused; skip killing", 'error')
                     try:
-                        os.kill(self.pid, signal.SIGKILL)
-                        os.waitpid(self.pid, 0)
+                        os.waitpid(self.pid, os.WNOHANG)
                     except OSError:
                         pass
-                except OSError:
-                    pass
+                else:
+                    try:
+                        os.killpg(self.pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                    try:
+                        os.kill(self.pid, signal.SIGTERM)
+                        for _ in range(5):
+                            try:
+                                pid_result, status = os.waitpid(self.pid, os.WNOHANG)
+                                if pid_result:
+                                    break
+                            except OSError:
+                                break
+
+                        try:
+                            os.kill(self.pid, signal.SIGKILL)
+                            os.waitpid(self.pid, 0)
+                        except OSError:
+                            pass
+                    except OSError:
+                        pass
             self.pid = None
 
         if self.master_fd is not None and platform.system() != "Windows":
@@ -1722,21 +2097,36 @@ class PersistentShell:
 
     def is_alive(self) -> bool:
         """Check if shell is alive.
-        
-        优先检查 /proc/<pid>（Android/Linux 上 os.kill 可能因 SELinux 失败），
+
+        优先检查 /proc/<pid>/stat（Android/Linux 上 os.kill 可能因 SELinux 失败），
         回退到 os.kill(pid, 0)。
+
+        加固点（旧实现只用 os.path.isdir('/proc/<pid>')，有两个误判来源）：
+          - **僵尸进程**：进程已退出但未被 wait() 回收时 /proc/<pid> 依然存在
+            → 旧实现永远返回 True，shell 已死却被当成活着；
+          - **PID 复用**：原进程已消失、PID 被别的进程占用 → /proc/<pid> 存在
+            → 误判为「还活着」，后续写入落到无关进程的终端。
+        现在：读 stat 判断 state（'Z' = 僵尸 → 判死），并与创建时记录的
+        starttime 比对（不一致 → PID 被复用 → 判死）。
         """
         if self._dead or self.pid is None:
             return False
         if platform.system() == "Windows":
             return self._winpty_handle is not None and self._winpty_handle.isalive()
-        # 优先用 /proc/<pid> 检查（不受 SELinux 限制）
-        try:
-            if os.path.isdir(f"/proc/{self.pid}"):
-                return True
-        except OSError:
-            pass
-        # 回退到 os.kill
+        _st = self._read_proc_stat()
+        if _st is not None:
+            _state, _start = _st
+            if _state == 'Z':
+                debug_log(f"Shell pid {self.pid} is a zombie", 'error')
+                self._dead = True
+                return False
+            if self._start_ticks and _start and _start != self._start_ticks:
+                debug_log(f"Shell pid {self.pid} reused "
+                          f"(starttime {_start} != {self._start_ticks})", 'error')
+                self._dead = True
+                return False
+            return True
+        # /proc 不可用（macOS / 非 Linux）→ 回退 os.kill
         try:
             os.kill(self.pid, 0)
             return True
@@ -1745,7 +2135,12 @@ class PersistentShell:
             return False
 
     def __del__(self):
-        self.cleanup()
+        # __del__ 可能在解释器退出/GC 期间被调用，此时模块全局（os/platform…）
+        # 可能已被置空，且异常无法向上传播（只会打印 "Exception ignored"）。
+        try:
+            self.cleanup()
+        except Exception:
+            pass
 
 
 # ======================================================================
@@ -1831,8 +2226,10 @@ def is_shell_alive() -> bool:
 
 # 需要 TTY 的交互式命令（subprocess 无 TTY 会挂死/报错）
 _AI_INTERACTIVE_TOKENS = frozenset({
-    "vim", "vi", "nano", "top", "htop", "less", "more", "watch",
-    "ssh", "telnet", "ftp", "sftp", "mc", "ranger",
+    "vim", "vi", "nvim", "nano", "emacs", "top", "htop", "btop", "less",
+    "more", "watch", "man", "ssh", "telnet", "ftp", "sftp", "mc", "ranger",
+    "screen", "tmux", "fzf", "psql", "mysql", "sqlite3", "redis-cli",
+    "gdb", "lldb", "dialog", "whiptail",
 })
 
 
@@ -1896,6 +2293,10 @@ def _exec_ai_subprocess(cmd: str, output_buffer: List[str],
         _err = (_err_b or "").rstrip()
     except _sp.TimeoutExpired:
         _kill_cmd_process()
+        try:
+            _proc.wait(timeout=5)      # 回收，避免僵尸
+        except Exception:
+            pass
         output_buffer.append("[AI 命令执行超时（>600s），已终止]")
         return 124
     except KeyboardInterrupt:
@@ -2193,24 +2594,86 @@ def get_debug_session_info() -> Optional[Dict[str, str]]:
 # Terminal attribute save/restore
 # ======================================================================
 _saved_term_attrs = None
+_term_guard_installed = False
 
 
 def save_terminal_attrs():
     """保存当前终端属性，供 restore_terminal_attrs() 恢复。
-    由 main_loop 在进入 raw 模式前调用。"""
+    由 main_loop 在进入 raw 模式前调用。
+
+    保存成功后顺带安装「终端兜底恢复」信号处理（幂等，只装一次）。
+    """
     global _saved_term_attrs
     try:
         import termios as _t
         fd = sys.stdin.fileno()
         if os.isatty(fd):
             _saved_term_attrs = _t.tcgetattr(fd)
+            install_terminal_guard()
     except (ImportError, OSError):
         _saved_term_attrs = None
 
 
+def install_terminal_guard() -> None:
+    """安装终端兜底恢复：收到 SIGTERM/SIGHUP/SIGQUIT 时先把终端恢复为 cooked。
+
+    会**链式保留**已有 handler（Onyx/Main 已装 SIGINT/SIGTERM 逻辑）：
+    先恢复终端，再调用原 handler；原 handler 为默认行为时按默认行为退出。
+    幂等：重复调用只生效一次；非主线程调用静默跳过。
+    """
+    global _term_guard_installed
+    if _term_guard_installed or not HAVE_FCNTL_TERMIOS:
+        return
+    _prev_map = {}
+    for _name in ('SIGTERM', 'SIGHUP', 'SIGQUIT'):
+        _sig = getattr(signal, _name, None)
+        if _sig is None:
+            continue
+        try:
+            _prev_map[_sig] = signal.getsignal(_sig)
+        except (ValueError, OSError):
+            return          # 非主线程无法读写 handler → 放弃安装
+    if not _prev_map:
+        return
+
+    def _guard(signum, frame):
+        try:
+            restore_terminal_attrs()
+        except Exception:
+            pass
+        _prev = _prev_map.get(signum, signal.SIG_DFL)
+        try:
+            if callable(_prev):
+                _prev(signum, frame)
+                return
+            if _prev == signal.SIG_IGN:
+                return
+        except Exception:
+            pass
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+        except Exception:
+            pass
+
+    try:
+        for _sig in list(_prev_map.keys()):
+            signal.signal(_sig, _guard)
+        _term_guard_installed = True
+    except (ValueError, OSError, TypeError):
+        pass
+
+
 def restore_terminal_attrs():
     """恢复终端属性到 save_terminal_attrs() 保存的状态。
-    由 graceful_shutdown / crash handler 调用，确保终端回到 cooked 模式。"""
+
+    由 graceful_shutdown / crash handler / 信号兜底 / atexit 调用，
+    确保终端回到 cooked 模式。
+
+    注意：**不**清空 _saved_term_attrs —— 恢复动作可能被多次触发
+    （正常退出、崩溃兜底、atexit、信号），清空会让后续路径失效；
+    而保存的是 cooked 基线，重复恢复幂等、无害。
+    """
     global _saved_term_attrs
     if _saved_term_attrs is None:
         return
@@ -2219,8 +2682,24 @@ def restore_terminal_attrs():
         fd = sys.stdin.fileno()
         if os.isatty(fd):
             _t.tcsetattr(fd, _t.TCSANOW, _saved_term_attrs)
-            _saved_term_attrs = None
     except (ImportError, OSError):
+        pass
+
+
+def print_terminal_recovery_hint() -> None:
+    """终端可能仍处于 raw 模式时，打印手动恢复提示（被强杀/崩溃兜底）。"""
+    if not HAVE_FCNTL_TERMIOS:
+        return
+    try:
+        import termios as _t
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return
+        _cur = _t.tcgetattr(fd)
+        if not (_cur[3] & _t.ICANON) or not (_cur[3] & _t.ECHO):
+            print("\n\033[33m[提示] 终端可能仍处于 raw 模式，"
+                  "如输入无回显请执行: stty sane\033[0m")
+    except (ImportError, OSError, IndexError):
         pass
 
 
@@ -2230,5 +2709,11 @@ def restore_terminal_attrs():
 @atexit.register
 def _atexit_cleanup():
     """Clean up shell and restore terminal when Python process exits"""
-    restore_terminal_attrs()
-    cleanup_shell()
+    try:
+        restore_terminal_attrs()
+    except Exception:
+        pass
+    try:
+        cleanup_shell()
+    except Exception:
+        pass

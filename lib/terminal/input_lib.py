@@ -46,6 +46,25 @@
 新增（命令树专项）：
 - _get_context 返回值扩展为 5 元组，追加 Optional[CommandNode]，
   供树驱动补全使用；ctx_type 新增 "tree" 分支
+
+新增（动态命令补全专项 · 脚本式扩展）：
+- SmartCompleter 构造时自动发现 cmd_com/*.py 与 ~/.cmd_com/*.py
+  等目录下的用户 Python 脚本，为任意命令注册动态补全器
+- 动态补全与 JSON 静态配置共存：动态优先、静态兜底、结果去重
+- 构造完成后打印一行动态补全统计（命令数 / 脚本数 / 失败数）
+
+修复（历史保真专项 · P0）：
+- 历史多行编码改为「\x01 前缀 + JSON」，单行条目原样存储、原样读回，
+  绝不再对单行命令做 ^J / \n / \r 的反转义（旧版兼容分支曾把
+  `echo ^J done` 读成 `echo n done`、把字面 JSON 命令吞掉外壳）
+- _clean_display_text 彻底停做「^J → 换行 / \\n → 换行」的替换，
+  只清 ANSI 控制序列；多行显示完全依赖从 JSON 块还原的真实换行符
+- _decode_multiline_from_storage 只解码「明确标记过」的多行条目
+  (\x01 前缀 或 \x00 旧分隔符)，其它一律原样返回
+
+修复（多行续行累积 · P2）：
+- _process_multiline_input 中把每行 append 到 state.lines，
+  使未闭合引号 / 行中未闭合括号等续行检查能看到完整上下文
 """
 
 import os
@@ -166,8 +185,10 @@ _HISTORY_FILE_NAME = ".onyx_history.txt"
 _HISTORY_MAX_MEMORY = 1000          # 内存中保留条数
 _HISTORY_MAX_FILE = 50000           # 文件保留最大行数（后台整理）
 
-# 历史文件中多行命令的分隔符
-_HISTORY_MULTILINE_SEPARATOR = "\x00"  # 使用 null 字符作为多行命令分隔符（在历史文件中不可见）
+# 历史文件中多行命令的分隔符（旧版只读兼容）
+_HISTORY_MULTILINE_SEPARATOR = "\x00"
+# 新版多行条目在文件中的行首标记（SOH，正常命令里不会出现）
+_MULTILINE_MARKER = "\x01"
 
 # 异步写入队列和线程
 _history_write_queue = queue.Queue()
@@ -308,48 +329,47 @@ def _start_history_writer():
 
 
 def _encode_multiline_for_storage(cmd: str) -> str:
-    """
-    将多行命令编码为单行 JSON 块存储：
-      {"multiline": true, "cmd": "..."}
-    JSON 字符串天然转义换行（\\n），文件仍是纯文本单行，
-    不再使用 \x00 空字符替代（传统 txt 行文件无法表示真实换行）。
-    单行命令保持原样存储（文件可读、兼容旧工具）。
+    """把命令编码为历史文件中的一行。
+
+    多行命令：以 \\x01 打头，后接 JSON（{"cmd": "..."}）。JSON 会把真实换行
+    转义成 \\n，文件仍是纯文本、单行可读；解码时严格凭 \\x01 前缀还原。
+    单行命令：原样存储 —— 用户敲进什么，文件里就是什么。
     """
     if '\n' in cmd:
-        return json.dumps({"multiline": True, "cmd": cmd}, ensure_ascii=False)
+        return _MULTILINE_MARKER + json.dumps({"cmd": cmd}, ensure_ascii=False)
     return cmd
 
 
 def _decode_multiline_from_storage(line: str) -> str:
-    """
-    将从文件读取的单行解码，恢复多行命令。
-    支持多种格式：
-    1. 新版 JSON 块：{"multiline": true, "cmd": "..."}（带标记，避免误伤 { 开头命令）
-    2. 旧版 \x00 空字符格式
-    3. 旧版 ^J 转义格式（字面字符串 ^J）
-    4. 旧版 \n 转义格式（反斜杠+n）
+    """把历史文件中的一行解码。
+
+    只认两种「明确标记过」的多行条目：
+        1. \\x01 前缀 + JSON（新版）
+        2. \\x00 分隔符（旧版，该字节不会出现在正常单行命令中）
+
+    其它一律原样返回 —— 用户命令里的字面 ^J、\\n、
+    {"multiline": true, ...} 必须逐字符保留，绝不能被反转义。
     """
     if not line:
         return line
 
-    # 新版：JSON 块存储（必须带 multiline 标记才解码）
-    if line.startswith('{'):
+    # 新版：\x01 + JSON
+    if line.startswith(_MULTILINE_MARKER):
+        payload = line[len(_MULTILINE_MARKER):]
         try:
-            data = json.loads(line)
-            if isinstance(data, dict) and data.get("multiline") is True and isinstance(data.get("cmd"), str):
+            data = json.loads(payload)
+            if isinstance(data, dict) and isinstance(data.get("cmd"), str):
                 return data["cmd"]
         except (json.JSONDecodeError, ValueError):
             pass
+        # JSON 损坏 → 去掉前缀原样返回，至少不丢内容
+        return payload
 
-    if '^J' in line:
-        line = line.replace('^J', '\n')
-
-    if '\\n' in line:
-        line = line.replace('\\n', '\n')
-
+    # 旧版：\x00 分隔符
     if _HISTORY_MULTILINE_SEPARATOR in line:
-        line = line.replace(_HISTORY_MULTILINE_SEPARATOR, '\n')
+        return line.replace(_HISTORY_MULTILINE_SEPARATOR, '\n')
 
+    # 单行条目：原样返回
     return line
 
 
@@ -362,36 +382,18 @@ _ANSI_ESCAPE_RE = re.compile(
 
 
 def _clean_display_text(cmd: str, decode_escapes: bool = True) -> str:
-    """
-    清理显示文本，确保转义字符被正确处理。
-    decode_escapes=True（历史条目）：将 ^J、\\n 等字面转义解码为真实控制字符。
-    decode_escapes=False（用户输入）：不解析字面 \\n/\\r/\\t（避免破坏 printf 等命令），
-    仅清理 ANSI 转义序列与 ^[ 残留。
-    同时调用 MultiLineFormatter 进行格式化解码。
+    """只清理 ANSI 控制序列，不再对命令内容做任何改写。
+
+    历史多行显示完全依赖 _decode_multiline_from_storage 从 JSON 块还原出的
+    真实换行符；这里不再做 ^J / \\n / \\r / \\t 的替换，避免把用户命令
+    （如 `echo ^J done` 或 `printf "a\\nb"`）静默改写成另一条命令。
+
+    decode_escapes 参数保留仅为兼容旧调用点，实际不再生效。
     """
     if not cmd:
         return cmd
-
-    # 先通过 MultiLineFormatter 解码（处理历史文件中的 null 分隔符等）
-    result = MultiLineFormatter.decode_history_command(cmd)
-
-    if decode_escapes:
-        replacements = [
-            ('^J', '\n'),
-            ('^M', '\r'),
-            ('^I', '\t'),
-            ('\\n', '\n'),
-            ('\\r', '\r'),
-            ('\\t', '\t'),
-        ]
-        for old, new in replacements:
-            if old in result:
-                result = result.replace(old, new)
-
-    # 清理 ANSI 转义序列（真实 ESC 字符）与 ^[ 字面残留
-    result = _ANSI_ESCAPE_RE.sub('', result)
+    result = _ANSI_ESCAPE_RE.sub('', cmd)
     result = result.replace('^[', '')
-
     return result
 
 
@@ -485,7 +487,7 @@ def _trim_history_file():
 
 
 def _load_history_buffer() -> List[str]:
-    """加载历史记录，正确解码多行命令"""
+    """加载历史记录，正确解码多行命令，单行条目原样保留。"""
     file_path = _get_history_file_path()
     old_json_path = os.path.join(os.path.dirname(file_path), ".prompt_onyx_cmd_history.json")
 
@@ -518,11 +520,12 @@ def _load_history_buffer() -> List[str]:
 
         result = []
         for line in reversed(all_lines):
-            line = line.strip()
-            if line:
-                decoded = _decode_multiline_from_storage(line)
-                cleaned = _clean_display_text(decoded)
-                result.append(cleaned)
+            line = line.rstrip('\n').rstrip('\r')
+            if not line:
+                continue
+            decoded = _decode_multiline_from_storage(line)
+            cleaned = _clean_display_text(decoded)
+            result.append(cleaned)
 
         return result
     except Exception:
@@ -600,11 +603,9 @@ def init_history_navigation() -> None:
         # ⚠️ 必须「就地」写入：SmartCompleter 持有 _HISTORY_BUFFER 的引用，
         # 一旦重新绑定（= 换成新 list），被缓存 PromptSession 里的补全器就永远
         # 停在旧对象上 —— 表现为「虚影只认历史文件里的旧命令，当前会话新命令补不出来」。
+        # _load_history_buffer 已按新格式严格解码并只清 ANSI，这里不再二次处理。
         _loaded = _load_history_buffer()
-        _HISTORY_BUFFER[:] = [
-            _clean_display_text(cmd) if any(x in cmd for x in ['^J', '\\n', '^M', '\\r']) else cmd
-            for cmd in _loaded
-        ]
+        _HISTORY_BUFFER[:] = _loaded
 
     _CURRENT_HISTORY_INDEX = -1
     _NAVIGATION_START_INPUT = ""
@@ -623,15 +624,16 @@ def init_history_navigation() -> None:
 
 
 def add_to_history(cmd: str) -> bool:
-    """添加命令到历史记录"""
+    """添加命令到历史记录。
+
+    修复：不再对用户输入做 ^J / \\n 的“兼容”替换。历史多行存储走
+    _encode_multiline_for_storage 的 \\x01 + JSON 路径，这里必须原样保存，
+    否则用户敲 `echo ^J done` 会被改写成另一条命令。
+    """
     global _HISTORY_BUFFER
     cmd_stripped = cmd.strip()
     if not cmd_stripped:
         return False
-
-    # 仅兼容旧格式的 ^J 显示转义；不把字面 \n（如 printf "a\nb"）误转为换行
-    if '^J' in cmd_stripped:
-        cmd_stripped = cmd_stripped.replace('^J', '\n')
 
     if _HISTORY_BUFFER and _HISTORY_BUFFER[0] == cmd_stripped:
         return False
@@ -710,7 +712,7 @@ def _format_history_for_display(cmd: str) -> str:
     多行命令直接保留真实换行：ptk 会把含 \\n 的缓冲区按多行渲染，
     不再压成一行 —— 用户能直观看到多行结构；同时缓冲区内容与历史原始
     命令完全一致，回车后原样提交执行，不会出现“只识别第一行”的内容丢失。
-    这里只负责解码历史遗留转义（^J / ANSI / 字面 \\n 等）。
+    这里只负责清理 ANSI 残留，不再做任何内容改写。
     """
     if not cmd:
         return cmd
@@ -1253,8 +1255,18 @@ def _process_multiline_input(
     修复：heredoc 中 #语法 切换在终止检查之前执行。
     修复：终止符优先级高于语法切换，防止 EOF 被 continue 跳过。
     修复：使用 SmartSyntaxDetector 重新评估语法，提升准确性。
-    修复（AST 语法检查专项）：多行模式无条件使用 ml_input.kb，
-    避免无 Pygments 环境下按 Enter 直接提交续行、破坏多行输入。
+    修复（AST 语法检查专项）：多行模式不再依赖 Pygments，
+    统一由外层状态机判定 Enter 语义。
+    修复（多行续行累积 · P2）：把每行 append 到 state.lines，
+    使 unclosed_quote / bracket_open 等终止检查能看到完整上下文。
+    修复（Enter 语义专项 · P3）：
+    - 不再把 ml_input.kb 传给 prompt()。MultiLineInput 自带的 kb 把 Enter
+      绑定为「插入换行 + 缩进」，那是给「单 buffer 多行编辑」场景的；
+      而本函数是「每次 prompt() 取一行 → 外层累积 → 状态机判终止」，
+      Enter 必须保持默认语义（提交本行），否则：
+        1) EOF 永远不会作为独立一行被提交 → heredoc 无法终止
+        2) 提示符只画第一行，后续行变成 buffer 内容 → 看起来不刷新
+        3) buffer 卡在同一个 prompt 里 → Tab 补全/取消都退不出去
     """
     global _MULTILINE_STATE, _MULTILINE_BUFFER, _MULTILINE_ACTIVE, _MULTILINE_ABORTED
 
@@ -1298,6 +1310,8 @@ def _process_multiline_input(
     _MULTILINE_ACTIVE = True
     _MULTILINE_STATE = state
     _MULTILINE_BUFFER = [user_input]
+    # P2 修复：让 state.lines 从第一行起就参与累积，供续行检测使用
+    state.lines = [user_input]
 
     ml_input = MultiLineInput(
         syntax=state.syntax,
@@ -1313,13 +1327,15 @@ def _process_multiline_input(
 
     while _MULTILINE_ACTIVE:
         try:
-            # 修复：Enter 换行语义与 Pygments 无关，始终使用 ml_input.kb；
-            # 否则无 Pygments 环境下按 Enter 会直接提交续行，破坏多行输入。
+            # ── P3 修复：不再传 key_bindings=ml_input.kb ──
+            # ml_input.kb 的 Enter 是「插入换行 + 缩进」，会让 prompt() 永远
+            # 不返回，导致 heredoc 的 EOF 无法被单独提交、提示符不再刷新、
+            # buffer 卡死退不出去。这里用 ptk 默认绑定：
+            #   Enter → 提交本行；Ctrl+C → KeyboardInterrupt；Ctrl+D → EOFError
             line = prompt(
                 prompt_text,
                 lexer=current_lexer,
                 style=comp_style,
-                key_bindings=ml_input.kb,
                 auto_suggest=auto_suggest,
                 completer=use_completer,
                 complete_while_typing=(use_completer is not None),
@@ -1344,6 +1360,7 @@ def _process_multiline_input(
                 # 1. 先检查是否是终止行（EOF 等），优先级最高
                 if MultiLineDetector.is_terminated(state, line):
                     _MULTILINE_BUFFER.append(line)
+                    state.lines.append(line)
                     _MULTILINE_ACTIVE = False
                     _MULTILINE_STATE = None
                     result = '\n'.join(_MULTILINE_BUFFER)
@@ -1370,6 +1387,7 @@ def _process_multiline_input(
 
                 # 3. 普通 heredoc 行
                 _MULTILINE_BUFFER.append(line)
+                state.lines.append(line)
                 prompt_text = ml_input._get_prompt_text(state)
                 continue
             # ===== heredoc 处理结束 =====
@@ -1379,6 +1397,7 @@ def _process_multiline_input(
 
             if is_comment_line:
                 _MULTILINE_BUFFER.append(line)
+                state.lines.append(line)
                 prompt_text = ml_input._get_prompt_text(state)
                 continue
 
@@ -1400,6 +1419,9 @@ def _process_multiline_input(
             # 使用 ml_input 的深度栈更新逻辑
             terminated, new_state = ml_input.process_line(line, state)
             _MULTILINE_BUFFER.append(line)
+            # P2 修复：累积当前行到 state.lines，让 unclosed_quote / bracket_open
+            # 等基于「全文累积」的终止检查能看到完整的已输入内容
+            state.lines.append(line)
 
             if terminated:
                 # 多行输入结束
@@ -1411,6 +1433,8 @@ def _process_multiline_input(
             elif new_state is not None:
                 # 嵌套新的多行结构
                 state = new_state
+                # 保持 lines 引用：new_state 里可能复制了旧 lines，统一同步一份最新累积
+                state.lines = _MULTILINE_BUFFER.copy()
                 ml_input.current_syntax = state.syntax
                 ml_input.lexer = ml_input._get_pygments_lexer(state.syntax)
                 ml_input.completer.syntax = state.syntax
@@ -1482,6 +1506,7 @@ def _process_cmd_multiline_input(
         syntax='bash',  # CMD 没有专门的 Pygments lexer，用 bash 近似
         start_line=user_input,
     )
+    _MULTILINE_STATE.lines = [user_input]
 
     ml_input = MultiLineInput(
         syntax='bash',
@@ -1516,6 +1541,8 @@ def _process_cmd_multiline_input(
                 return None
 
             _MULTILINE_BUFFER.append(line)
+            if _MULTILINE_STATE is not None:
+                _MULTILINE_STATE.lines.append(line)
 
             # 检查括号是否闭合
             if _is_cmd_block_terminated([user_input], '\n'.join(_MULTILINE_BUFFER[1:])):
@@ -1603,15 +1630,14 @@ def universal_input(
     Style: Any = None,
     language: str = "chinese",
     virtual_root: str = "",
-    cmd_config_path: str = "",          # 外部传入的 JSON 补全详情路径
-    com_cmd_config_path: str = "",      # 另一个 JSON 补全详情路径
+    cmd_config_path: str = "",
+    com_cmd_config_path: str = "",
     other_terminal_cmd_path: str = "",
 ) -> str:
     """主输入函数"""
     global _HISTORY_INITIALIZED, _CURRENT_LANG, _VIRTUAL_ROOT, META_TEXTS, _VALID_COMMANDS, _USER_HOME_DIR, _TERMINAL_TYPE
     global _HISTORY_BUFFER, _NAVIGATION_RAW_COMMAND, _PENDING_MULTILINE_RECALL, _MULTILINE_ABORTED
 
-    # 日志回调兜底：未注入时静默，避免对调用方产生额外依赖
     _log_info = log_info_func if callable(log_info_func) else (lambda *a, **k: None)
     _log_error = log_error_func if callable(log_error_func) else (lambda *a, **k: None)
 
@@ -1622,20 +1648,16 @@ def universal_input(
     _USER_HOME_DIR = user_home_dir
     set_user_home_dir(user_home_dir)
 
-    # 确保 ptk 配置已加载（内部有 mtime 缓存）
     _ensure_ptk_config()
 
-    # 新增：检测终端类型
     _TERMINAL_TYPE = detect_and_set_terminal_type()
 
-    # 设置 com_cmd.json 路径（优先使用 virtual_root 推导）
     if com_cmd_config_path:
         set_com_cmd_config_path(com_cmd_config_path)
     elif virtual_root:
         default_com_cmd_path = os.path.join(virtual_root, "onyx", "etc", "com_cmd.json")
         set_com_cmd_config_path(default_com_cmd_path)
 
-    # 设置 other_terminal_cmd.json 路径
     if other_terminal_cmd_path:
         set_other_terminal_cmds_path(other_terminal_cmd_path)
     elif virtual_root:
@@ -1664,7 +1686,6 @@ def universal_input(
 
         completion_items.update(alias_cache.keys())
 
-        # ----- 自动加载 cmd_mapping.msgpack 获取基础命令列表 -----
         msgpack_path = os.path.join(
             user_home_dir, ".cache", "onyx", "onyx", "cmd_mapping.msgpack"
         ) if user_home_dir else ""
@@ -1675,7 +1696,6 @@ def universal_input(
             except Exception:
                 pass
 
-        # ----- 如果外部传入了 JSON 补全详情，也将其中的命令加入候选 -----
         if cmd_config_path and os.path.exists(cmd_config_path):
             try:
                 json_cmds = CommandConfigLoader.get_commands(cmd_config_path)
@@ -1683,7 +1703,6 @@ def universal_input(
             except Exception:
                 pass
 
-        # ----- 同样处理 com_cmd_config_path（内部推导或显式传入的 JSON） -----
         actual_com_cmd_path = com_cmd_config_path
         if not actual_com_cmd_path and virtual_root:
             actual_com_cmd_path = os.path.join(virtual_root, "onyx", "etc", "com_cmd.json")
@@ -1694,25 +1713,21 @@ def universal_input(
             except Exception:
                 pass
 
-        # 新增：加载终端专属命令
         terminal_commands = _get_terminal_specific_commands()
         if terminal_commands:
             completion_items.update(terminal_commands)
 
-        # 确保 sudo 和 sado 在补全列表中
         completion_items.add('sudo')
         completion_items.add('sado')
 
         set_valid_commands(completion_items)
 
-        # ── 计算 PromptSession 缓存键 ──
         try:
             _vc = _VALID_COMMANDS
             _vhash = hash(frozenset(_vc.keys() if isinstance(_vc, dict) else _vc))
         except Exception:
             _vhash = -1
 
-        # ptk.json 的 mtime 参与 key：用户改配置后自动重建 session
         _ptk_mtime = 0.0
         try:
             _cfg_path = os.path.expanduser(PTK_CONFIG_PATH)
@@ -1733,7 +1748,6 @@ def universal_input(
             _use_dropdown,
         )
 
-        # ── 缓存命中：整包复用（不重建 completer/lexer/kb/style）──
         _bundle = _SESSION_CACHE.get("bundle")
         if _SESSION_CACHE.get("key") == _cache_key and _bundle is not None:
             session, completer, lexer, kb, auto_suggest, comp_style = _bundle
@@ -1742,7 +1756,6 @@ def universal_input(
                 session_id,
             )
         else:
-            # ── 缓存未命中：真正构建 ──
             completer = SmartCompleter(
                 list(completion_items),
                 show_hidden=True,
@@ -1753,6 +1766,32 @@ def universal_input(
                 history_buffer=_HISTORY_BUFFER,
             )
 
+            # ── 新增：动态命令补全加载统计（脚本式扩展）──
+            # SmartCompleter 构造时会自动发现并加载 cmd_com/*.py 与 ~/.cmd_com/*.py，
+            # 这里把结果汇总成一行日志，方便排查「为什么某个命令没动态补全」。
+            try:
+                _dyn_stats = completer.dynamic_manager.stats()
+                _dyn_cmds = _dyn_stats.get("commands", []) or []
+                _dyn_scripts = _dyn_stats.get("scripts_loaded", []) or []
+                _dyn_failed = _dyn_stats.get("failed", []) or []
+                _shell_cmds = _dyn_stats.get("shell_commands", []) or []
+                _shell_on = _dyn_stats.get("shell_enabled", False)
+                _msg = (
+                    f"动态补全：Python {len(_dyn_cmds)} 命令 "
+                    f"({', '.join(_dyn_cmds[:8])}{'...' if len(_dyn_cmds) > 8 else ''})"
+                    f" · 已加载脚本 {len(_dyn_scripts)}"
+                    f" · Shell 登记 {len(_shell_cmds)}"
+                    f"{'（已启用执行）' if _shell_on else '（仅探测）'}"
+                )
+                if _dyn_failed:
+                    _msg += f" · 失败 {len(_dyn_failed)}"
+                _log_info(_msg, session_id)
+                if _dyn_failed:
+                    for _p, _err in _dyn_failed[:3]:
+                        _log_error(f"动态脚本加载失败: {_p} → {_err}", session_id)
+            except Exception:
+                pass
+
             if virtual_root and os.path.isdir(virtual_root):
                 cache = get_path_cache()
                 warm_paths = [virtual_root]
@@ -1762,11 +1801,9 @@ def universal_input(
 
             lexer = CommandLexer(valid_commands=_VALID_COMMANDS, virtual_root=virtual_root)
 
-            # 使用智能虚影补全（基于频率的完整命令建议）
             from .com import SmartAutoSuggest
             auto_suggest = SmartAutoSuggest(completer)
 
-            # 应用 ptk 颜色配置
             ptk_colors = _ptk_config.get("colors", {})
             default_comp_style = {
                 "completion-menu": "bg:#2d2d30 #cccccc",
@@ -1783,7 +1820,6 @@ def universal_input(
                     default_comp_style[key] = value
             comp_style = PromptStyle.from_dict(default_comp_style)
 
-            # 应用 ptk 键位配置，获取自定义键绑定（含 use_dropdown_menu 开关）
             kb = create_key_bindings(
                 sys_type=sys_type,
                 terminal_type=get_terminal_type(),
@@ -1791,15 +1827,12 @@ def universal_input(
                 use_dropdown_menu=_use_dropdown,
             )
 
-            # 补全自动触发过滤器：受 ESC+Space 全局开关控制
             from .kb import is_completion_locked
 
             @Condition
             def completion_typing_filter():
                 return not is_completion_locked()
 
-            # Ctrl+X Ctrl+E 外部编辑器：ptk 的内置回退表硬编码 /usr/bin/*，
-            # Termux/Android 下不存在，需显式通过 $EDITOR 告知一个真实路径。
             _editor = _detect_editor()
             if _editor and not (os.environ.get("VISUAL") or os.environ.get("EDITOR")):
                 os.environ["EDITOR"] = _editor
@@ -1810,15 +1843,11 @@ def universal_input(
                 complete_while_typing=completion_typing_filter if _use_dropdown else False,
                 style=comp_style,
                 key_bindings=kb,
-                # mouse_support 已移除，避免鼠标接管终端滚动
                 complete_in_thread=True,
                 reserve_space_for_menu=_reserve_space,
                 auto_suggest=auto_suggest,
-                # Ctrl+R 反查覆盖【跨会话】历史（此前未传 history，只覆盖本次运行）
                 history=_PTK_HISTORY,
-                # Ctrl+R 搜索始终忽略大小写（更符合 shell 习惯）
                 search_ignore_case=True,
-                # Ctrl+X Ctrl+E 打开外部编辑器
                 enable_open_in_editor=bool(_editor),
             )
 
@@ -1831,11 +1860,9 @@ def universal_input(
                 session_id,
             )
 
-        # prompt 文本每次现取（可能包含当前目录/用户名等动态内容）
         prompt_text = prompt_func()
         user_input = session.prompt(prompt_text)
 
-        # ── Alt+Enter：进入独立全屏多行编辑区（可滚动回看、能改任意行）──
         if user_input == MULTILINE_EDITOR_SENTINEL:
             try:
                 from .mul_line import MultiLineEditor
@@ -1847,14 +1874,11 @@ def universal_input(
                 _edited = None
             if _edited is None:
                 reset_history_index()
-                return ""                      # 取消 → 当作空输入
+                return ""
             user_input = _edited
 
-        # ── 虚影补全接受的多行命令：以多行形式重放，不进入单行缓冲区 ──
         user_input = _consume_pending_multiline_recall(user_input, virtual_root)
 
-        # 历史导航：缓冲区直接回填原始命令（多行命令含真实换行，ptk 按多行渲染），
-        # 未编辑时原样提交；仅在显示形式与原始命令不一致（历史兼容）时恢复原始命令。
         if _NAVIGATION_RAW_COMMAND is not None:
             display_form = _format_history_for_display(_NAVIGATION_RAW_COMMAND)
             if user_input == display_form:
@@ -1863,14 +1887,9 @@ def universal_input(
 
         user_input_stripped = user_input.strip()
 
-        # 2026-09 修复（增强）：过滤终端控制序列泄漏。
-        # 即使 PROMPT_TOOLKIT_NO_CPR 已设置，CPR 应答残余（";1R" / "1;1R" / "\x1b[1;1R"）、
-        # 鼠标上报、OSC 等仍可能落进输入缓冲。仅当整串由控制序列/控制字符构成时丢弃，
-        # 防止回车后作为命令提交给 bash（syntax error near `;'），同时不误伤正常命令。
         user_input_stripped = _strip_control_noise(user_input_stripped)
 
         if user_input_stripped:
-            # decode_escapes=False：不把字面 \n/\r/\t 拆成控制字符（避免破坏 printf 等命令）
             user_input_stripped = _clean_display_text(user_input_stripped, decode_escapes=False)
 
         if user_input_stripped:
@@ -1885,19 +1904,29 @@ def universal_input(
             )
 
             if multiline_result is not None:
+                # 多行输入正常完成
                 user_input_stripped = multiline_result.strip()
-
                 user_input_stripped = _clean_display_text(user_input_stripped, decode_escapes=False)
-
                 if user_input_stripped:
                     add_to_history(user_input_stripped)
                     reset_history_index()
                     return user_input_stripped
+            elif _MULTILINE_ABORTED:
+                # ── 修复（取消后重复触发 heredoc 专项 · P3）──
+                # 多行输入被取消（Ctrl+C / Ctrl+D / 显式 __CANCEL__）时，
+                # 首行残片（如 `cat > a.sh << EOF`）绝不能交给主程序。
+                # 此前会落到函数底部 `return user_input_stripped`，把原始
+                # 首行原样返回 → 主程序再检测一次 heredoc → 出现第二次
+                # 「📥 等待Here Document输入」提示，用户必须再取消一次。
+                reset_history_index()
+                return ""
             elif _MULTILINE_ACTIVE:
                 reset_history_index()
                 return ""
 
-        # 多行输入被取消/中断时，首行残片（如 heredoc 起始行）不得污染历史记录
+        # 走到这里只有两种情况：
+        #   1. 普通单行命令（_process_multiline_input 返回 None 且未进多行）
+        #   2. 多行结果为空
         if user_input_stripped and not _MULTILINE_ABORTED:
             add_to_history(user_input_stripped)
 
@@ -1921,7 +1950,6 @@ def universal_input(
         sys.exit(0)
         return ""
     except Exception as e:
-        # 不再静默吞掉：记录完整堆栈便于定位（此前仅打印一行并返回空串）
         try:
             _log_error(f"输入处理异常: {type(e).__name__}: {e}\n{traceback.format_exc()}", session_id)
         except Exception:

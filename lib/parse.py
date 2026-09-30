@@ -810,80 +810,102 @@ def resolve_token_path(token: str, resolve_path_func=None) -> str:
     if resolve_path_func is None:
         return token
     
-    # 保留引号，只对引号内的内容进行解析
-    stripped = token.strip('\'"')
-    if stripped == token:
-        # 没有引号，直接解析
-        try:
-            resolved = resolve_path_func(token)
-            if resolved and resolved != token:
-                return resolved
-        except Exception:
-            pass
-    else:
-        # 有引号，解析引号内的内容，然后重新加回引号
-        try:
-            resolved = resolve_path_func(stripped)
-            if resolved and resolved != stripped:
-                # 保持原始引号类型
-                quote_char = token[0]
-                return f"{quote_char}{resolved}{quote_char}"
-        except Exception:
-            pass
-    
+    # 保留引号，只对引号内的内容进行解析。
+    #
+    # ⚠️ 判定必须是「首尾同一种引号」才叫带引号（如 `"./a.sh"`）。
+    # 旧实现用 token.strip('\'"') == token 判断，strip 是两端独立剥离的：
+    # `./a.sh"`（`"source ./a.sh"` 被按空格切开后的右半截）只有尾部有引号，
+    # 却也被判成「带引号」，随后 quote_char = token[0] 取到路径首字符 '.'，
+    # 结果返回 `.<绝对路径>.` —— 既污染了路径，又把收尾的 '"' 顶替成 '.'
+    # → 命令引号不闭合，bash 进 PS2 续行提示符挂死。
+    quote_char = token[0] if token else ""
+    is_quoted = (len(token) > 1 and quote_char in ('"', "'") and token[-1] == quote_char)
+
+    if is_quoted:
+        # 带引号：解析引号内的内容，然后原样加回引号
+        stripped = token[1:-1]
+        if stripped:
+            try:
+                resolved = resolve_path_func(stripped)
+                if resolved and resolved != stripped:
+                    return f"{quote_char}{resolved}{quote_char}"
+            except Exception:
+                pass
+        return token
+
+    # 无引号（含只有单边引号的残缺 token）：整体直接解析
+    try:
+        resolved = resolve_path_func(token)
+        if resolved and resolved != token:
+            return resolved
+    except Exception:
+        pass
+
     return token
+
+
+# 引号感知的词法片段：整段双引号 / 整段单引号 / 引号外裸词
+_PATH_SEGMENT_RE = re.compile(r'"[^"]*"|\'[^\']*\'|[^\s"\']+')
+# 引号内以空白分隔的「词」（只解析这些词，引号与内部空白原样保留）
+_QUOTED_WORD_RE = re.compile(r'[^\s]+')
+
+
+def _resolve_quoted_segment(segment: str, resolve_path_func) -> str:
+    """处理 `"..."` / `'...'` 片段：只解析内部的路径词，引号与空白原样保留。"""
+    inner = segment[1:-1]
+    if not inner:
+        return segment
+    return (segment[0]
+            + _QUOTED_WORD_RE.sub(
+                lambda m: resolve_token_path(m.group(0), resolve_path_func), inner)
+            + segment[-1])
+
+
+def _resolve_line_paths(line: str, resolve_path_func) -> str:
+    """单行引号感知的路径解析：只替换匹配到的片段，其余字符（含空白）原样保留。"""
+    def _sub(match):
+        seg = match.group(0)
+        if len(seg) >= 2 and seg[0] in ('"', "'") and seg[-1] == seg[0]:
+            return _resolve_quoted_segment(seg, resolve_path_func)
+        return resolve_token_path(seg, resolve_path_func)
+
+    return _PATH_SEGMENT_RE.sub(_sub, line)
 
 
 def resolve_paths_in_multiline_text(text: str, resolve_path_func=None) -> str:
     """
-    在多行文本中，对每个以空格分隔的单位进行虚拟路径转换
-    
+    在多行文本中做虚拟路径转换（**引号感知**）
+
     规则：
-    - 跳过长度为 0 或 1 的单位（除 / 外）
-    - 跳过纯特殊符号单位
-    - 跳过以 - 开头的选项参数
-    - 其他单位尝试进行路径解析
-    
+    - 引号外的裸词：整体交给 resolve_token_path 解析
+    - 引号内（`"..."` / `'...'`）的内容：按空白切成词，只解析其中的路径词，
+      引号与引号内的空白**原样保留**
+    - 未被匹配的字符（连续空格、未闭合的引号、元字符等）一律原样保留
+
+    ⚠️ 旧实现用 `line.split(' ')` 分词、再 `' '.join()` 拼回，完全不认引号：
+    `-c "source ./a.sh"` 会被撕成 `'"source'` 和 `'./a.sh"'` 两个 token，
+    右半截被 resolve_token_path 误判为「带引号」而把收尾的 '"' 顶替掉，
+    导致命令引号不闭合、bash 进 PS2 续行提示符挂死。故改为就地替换。
+
     Args:
         text: 多行文本
         resolve_path_func: 路径解析函数
-    
+
     Returns:
         处理后的文本
     """
     if not text or not resolve_path_func:
         return text
-    
+
     # 快速路径：不含路径相关字符的文本无需解析
     # /  ~  ..  .  都可能是路径
     if '/' not in text and '~' not in text and '..' not in text:
         return text
-    
-    lines = text.split('\n')
-    processed_lines = []
-    
-    for line in lines:
-        if not line.strip():
-            processed_lines.append(line)
-            continue
-        
-        # 处理每一行中的 token
-        tokens = line.split(' ')
-        processed_tokens = []
-        
-        for token in tokens:
-            # 保留空字符串（连续空格的情况）
-            if not token:
-                processed_tokens.append(token)
-                continue
-            
-            # 尝试解析路径
-            resolved = resolve_token_path(token, resolve_path_func)
-            processed_tokens.append(resolved)
-        
-        processed_lines.append(' '.join(processed_tokens))
-    
-    return '\n'.join(processed_lines)
+
+    return '\n'.join(
+        _resolve_line_paths(line, resolve_path_func) if line.strip() else line
+        for line in text.split('\n')
+    )
 
 
 # ── shebang 处理：脚本自带 shebang 就交给系统执行，不再改写成 Onyx 自执行 ──

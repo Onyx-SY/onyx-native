@@ -41,6 +41,33 @@
 - python → 只补文件；cd → 只补目录
 新增（配置专项）：
 - DEFAULT_PTK_CONFIG.completion.use_dropdown_menu：是否使用下拉菜单
+新增（列表补全专项）：
+- 补全列表第一项 = 虚影对应的下一项（从历史里最近匹配命令中提取）
+- 保证用户按 Tab 默认接受的补全与虚影一致
+- 路径补全时若虚影对应的路径在目标目录不存在，则丢弃虚影并走实际列表第一项
+
+新增（动态命令补全专项 · 脚本式扩展）：
+- SmartCompleter 构造时自动发现 cmd_com/*.py 与 ~/.cmd_com/*.py 等目录下的
+  用户 Python 脚本，为任意命令注册动态补全器（DynamicCommandManager）
+- 新增 "dynamic" 上下文类型；node 传静态树供脚本主动取用
+
+修复（动态能力完全交给脚本专项 · P1）：
+- com.py 里 _complete_dynamic 简化为「纯路由」——
+  调用脚本 → 原样透传结果。不判断空、不合并静态树、不做路径回退。
+- 兜底/合并策略全部下沉到脚本层：
+    · @static_fallback 装饰器  → 空结果时自动回退静态树
+    · @merge_static 装饰器     → 动态 + 静态合并（动态优先）
+    · ctx.static_candidates()  → 手工取静态树候选
+- CompletionContext 注入 static_node + _static_provider，脚本按需取用
+- 修复：此前「动态空 → 无条件回退 _complete_path」导致
+    git checkout etc/   → 补出目录树（git 参数是 ref，不是路径）
+  现在 com.py 不再自作主张，git 脚本返回空就是空，绝无误补。
+
+修复（沙箱边界专项 · P1）：
+- PathResolver.expand_path / normalize 的 virtual_root 分支加 commonpath
+  边界钳制：/../etc/passwd 之类逃逸路径会被钳回虚拟根，不再越过边界
+- 此前仅做 os.path.join(virtual_root, rel_path) + normpath，可被
+  '/../' 前缀一路穿透到虚拟根之外（补全 sub/../../ 能列上级目录）
 """
 
 import os
@@ -57,6 +84,14 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion, AutoSuggestFromHistory
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.document import Document
+
+# ── 动态命令补全引擎（脚本式扩展）──
+from .dynamic_cmd import (
+    DynamicCommandManager,
+    CompletionContext,
+    CompletionItem as _DynCompletionItem,
+    default_script_dirs,
+)
 
 # 尝试导入 msgpack
 try:
@@ -668,6 +703,30 @@ def get_path_cache() -> PathCache:
 # ===================== 路径解析器 =====================
 class PathResolver:
     @staticmethod
+    def _clamp_to_root(resolved: str, virtual_root: str) -> str:
+        """把 resolved 钳制在 virtual_root 之内。
+
+        修复（沙箱边界 · P1）：
+        此前 expand_path / normalize 只做 os.path.join + normpath，
+        '/../etc/passwd' 这类前缀能一路穿透到虚拟根之外。这里用
+        commonpath 校验：越界就退回虚拟根本身，绝不返回根之外的路径。
+
+        - 非绝对路径或空根，直接返回原值（调用方已处理过）
+        - commonpath 在不同盘符（Windows）会抛 ValueError → 判为越界
+        """
+        if not virtual_root:
+            return resolved
+        try:
+            root = os.path.normpath(virtual_root)
+            resolved_n = os.path.normpath(resolved)
+            common = os.path.commonpath([resolved_n, root])
+        except (ValueError, OSError):
+            return root
+        if common != root:
+            return root
+        return resolved_n
+
+    @staticmethod
     def expand_path(path: str, virtual_root: str = "") -> str:
         if not path:
             return ""
@@ -678,10 +737,10 @@ class PathResolver:
                 return virtual_root
             rel_path = path[1:]
             if rel_path:
-                resolved = os.path.join(virtual_root, rel_path)
-                if os.path.exists(os.path.dirname(resolved)) or resolved.endswith(os.sep):
-                    return resolved
-            return os.path.join(virtual_root, rel_path) if rel_path else virtual_root
+                resolved = os.path.normpath(os.path.join(virtual_root, rel_path))
+                # ── P1 修复：边界钳制，阻止 /../ 逃逸 ──
+                return PathResolver._clamp_to_root(resolved, virtual_root)
+            return virtual_root
 
         if path.startswith('~'):
             if len(path) == 1 or path[1] in ('/', '\\'):
@@ -720,7 +779,9 @@ class PathResolver:
         if virtual_root and path.startswith('/'):
             if not os.path.isabs(expanded):
                 expanded = os.path.join(virtual_root, expanded.lstrip('/'))
-            return os.path.normpath(expanded)
+            resolved = os.path.normpath(expanded)
+            # ── P1 修复：边界钳制 ──
+            return PathResolver._clamp_to_root(resolved, virtual_root)
 
         if not os.path.isabs(expanded) and not expanded.startswith(('./', '../')):
             expanded = os.path.join(os.getcwd(), expanded)
@@ -840,7 +901,6 @@ class PathResolver:
         return os.access(path, os.X_OK)
 
 
-# ===================== 路径补全引擎 =====================
 # ===================== 路径补全引擎 =====================
 class PathCompleterEngine:
     def __init__(self, show_hidden: bool = True, follow_symlinks: bool = True, use_cache: bool = True, virtual_root: str = ""):
@@ -2270,6 +2330,24 @@ class SmartCompleter(Completer):
         self.permission_commands = {'sudo', 'sado'}
         self._multiline_completer = None
 
+        # ── 动态命令补全（脚本式扩展）──
+        # 独立于 JSON 静态配置；两者可共存，动态优先。
+        # 脚本发现路径（优先级从高到低）：
+        #   1. <cwd>/cmd_com/*.py
+        #   2. <virtual_root>/cmd_com/*.py
+        #   3. ~/.cmd_com/*.py
+        #   4. <lib/terminal>/cmd_com/*.py  （内置兜底，永远可用）
+        #   5. <pkg_root>/cmd_com/*.py      （兼容：项目根下的用户脚本）
+        self.dynamic_manager = DynamicCommandManager()
+        try:
+            _script_dirs = default_script_dirs(
+                virtual_root=virtual_root,
+                user_home_dir=user_home_dir,
+            )
+            self.dynamic_manager.discover(_script_dirs)
+        except Exception:
+            pass
+
     def set_multiline_completer(self, ml_completer: Any):
         self._multiline_completer = ml_completer
 
@@ -2359,8 +2437,9 @@ class SmartCompleter(Completer):
     def _get_context(self, document: Document) -> Tuple[str, str, int, str, Optional[CommandNode]]:
         """返回 (ctx_type, current_word, start_pos, cmd, node)。
 
-        ctx_type ∈ {empty, command, permission_cmd, option, tree, path, variable, code, other}
-        node 仅当 ctx_type ∈ {option, tree} 时非 None。
+        ctx_type ∈ {empty, command, permission_cmd, option, tree, dynamic,
+                    path, variable, code, other}
+        node 仅当 ctx_type ∈ {option, tree, dynamic} 时可能非 None。
         """
         segment_text, _ = self._get_last_command_segment(document)
         if not segment_text:
@@ -2411,12 +2490,19 @@ class SmartCompleter(Completer):
         cmd = completed[cmd_index]
         tree_parts = completed[cmd_index:]
 
-        # 代码解释器 → 多行补全
+        # 代码解释器 → 多行补全（保留原语义：python/node/... 的专属行为，
+        # 即便用户给 python 注册了动态补全器，也不影响多行上下文识别）
         if cmd in self.CODE_SHELLS and self._multiline_completer and not current_word:
             return "code", current_word, start_pos, cmd, None
 
-        # 树查找
+        # 树查找（节点作为静态兜底数据源传给动态脚本）
         node = self.command_tree.lookup(tree_parts)
+
+        # ── 动态注册表优先 ──
+        # 若该命令注册了动态补全器，返回 "dynamic" 上下文；
+        # node 传给 ctx.static_node 供脚本主动取用（合并/兜底由脚本决定）。
+        if self.dynamic_manager.has(cmd):
+            return "dynamic", current_word, start_pos, cmd, node
 
         if node is None:
             # 不在树里 → 退回路径/其他
@@ -2448,6 +2534,9 @@ class SmartCompleter(Completer):
 
         recent_full_command = self._get_most_recent_full_command(prefix)
         if recent_full_command and recent_full_command != prefix:
+            # 需求二：路径命令的续写必须是当前目录下真实存在的路径，否则丢弃虚影
+            if self._path_suggestion_invalid(prefix, recent_full_command):
+                return None
             return recent_full_command[len(prefix):]
 
         if prefix and not prefix.endswith(' '):
@@ -2468,11 +2557,178 @@ class SmartCompleter(Completer):
 
         return None
 
+    # ── 需求二：路径虚影有效性校验 ──
+    def _path_suggestion_invalid(self, prefix: str, full_command: str) -> bool:
+        """判断路径命令的虚影建议是否应该被丢弃（对应路径不存在）。
+
+        只在「base 里已完成的部分不含路径分隔符」时才做检查 —— 即
+        `cd abc`、`cd ../abc`、`cd /tmp/abc` 这种整词简单情形，
+        避免把 `cd /tmp/te` 之类的相对前缀误判。
+
+        修复（虚影吞命令专项 · P3）：
+        - 抽出 token 后先判断是否以 `-` 开头（选项参数）→ 是则直接返回
+          False，不做路径存在性检查。
+        - 此前 `ls -la`、`grep -n`、`find -type` 这类带选项的历史命令，
+          其虚影 token 是 `-la` / `-n` / `-type`，会被误判为「路径不存在」
+          → 虚影整体被丢弃 → 用户感觉「本次会话新命令的虚影不显示」。
+        - 只对看起来像路径的 token（含 `/` 或 `\\`、或以 `.` / `~` 开头）
+          才真正查存在性。
+        """
+        stripped = prefix.lstrip()
+        if not stripped:
+            return False
+        parts = stripped.split()
+        if not parts:
+            return False
+        cmd = parts[0]
+        if cmd not in self.PATH_COMMANDS:
+            return False
+
+        # 拆出 base（光标前已完成部分）
+        if prefix.endswith((' ', '\t')):
+            base = prefix
+        else:
+            i = len(prefix) - 1
+            while i >= 0 and not prefix[i].isspace():
+                i -= 1
+            base = prefix[:i + 1]
+
+        # base 里除命令名外，如已有带路径分隔符的前一个参数，则不做检查
+        base_parts = base.split()
+        if len(base_parts) >= 2:
+            prev_arg = base_parts[-1]
+            if '/' in prev_arg or '\\' in prev_arg:
+                return False
+
+        if not full_command.startswith(base):
+            return False
+        rest = full_command[len(base):].lstrip()
+        if not rest:
+            return False
+        m = re.match(r'\S+', rest)
+        if not m:
+            return False
+        token = m.group(0)
+
+        # 修复：选项参数（-x / --xxx）不是路径，不做存在性检查
+        if token.startswith('-'):
+            return False
+
+        # 修复：只有看起来像路径的 token 才真正查存在性
+        # （避免把 `ls foo` 里的普通单词 "foo" 也当路径误判）
+        looks_like_path = (
+            '/' in token
+            or '\\' in token
+            or token.startswith(('.', '~'))
+        )
+        if not looks_like_path:
+            return False
+
+        return not self._path_exists(token)
+
+    def _path_exists(self, token: str) -> bool:
+        """判断 token 对应的路径是否存在（含 ~ 展开与绝对路径）。"""
+        try:
+            if token.startswith('~'):
+                expanded = os.path.expanduser(token)
+            else:
+                expanded = token
+            if os.path.isabs(expanded):
+                return os.path.exists(expanded)
+            return os.path.exists(os.path.join(os.getcwd(), expanded))
+        except Exception:
+            return False
+
+    # ── 需求一：历史下一项提取 ──
+    def _get_history_next_token(self, segment_text: str, current_word: str) -> Optional[str]:
+        """从历史缓冲里找最近以 segment_text 前缀匹配的完整命令，
+        提取光标处对应的完整 token（= 虚影对应的下一项）。
+
+        segment_text 是当前命令段（可能带前导空白），
+        current_word 是正在输入但未完成的词（可能为空）。
+        """
+        if not self.history_buffer or not segment_text:
+            return None
+
+        seg = segment_text.lstrip()
+        if not seg:
+            return None
+
+        if current_word and seg.endswith(current_word):
+            base = seg[:-len(current_word)]
+        else:
+            base = seg
+
+        if not base or not base[-1].isspace():
+            return None  # 命令词还没敲完，不做历史下一项推断
+
+        for cmd in self.history_buffer:
+            if not cmd or '\n' in cmd:
+                continue
+            if not cmd.startswith(base):
+                continue
+            rest = cmd[len(base):].lstrip()
+            if not rest:
+                continue
+            m = re.match(r'\S+', rest)
+            if not m:
+                continue
+            token = m.group(0)
+            if current_word and not token.startswith(current_word):
+                continue
+            return token
+        return None
+
+    def _promote_history_next(self, candidates: list,
+                              segment_text: str, current_word: str,
+                              strip_trailing_sep: bool = False) -> None:
+        """把历史下一项在候选列表中提升到第一项（就地修改 candidates）。
+
+        candidates 的元素形态由调用方决定：
+          - tree/option 分支:  (text, meta, style)
+          - path 分支:         (text, meta, color, rel_start)
+        strip_trailing_sep=True 时比较会忽略尾部 '/' 与 '\\'（用于路径补全）。
+        """
+        if not candidates or not segment_text:
+            return
+        history_next = self._get_history_next_token(segment_text, current_word)
+        if not history_next:
+            return
+
+        def _norm(s: str) -> str:
+            return s.rstrip('/\\') if strip_trailing_sep else s
+
+        target = _norm(history_next)
+        # 先尝试精确匹配
+        for i, item in enumerate(candidates):
+            if _norm(item[0]) == target:
+                if i > 0:
+                    candidates.insert(0, candidates.pop(i))
+                return
+        # 退一步：允许互为前缀（例如历史下一项是 'add'，候选中只有 'add/'）
+        for i, item in enumerate(candidates):
+            a = _norm(item[0])
+            if a.startswith(target) or target.startswith(a):
+                if i > 0:
+                    candidates.insert(0, candidates.pop(i))
+                return
+
     def _get_most_recent_full_command(self, prefix: str) -> Optional[str]:
+        """从历史缓冲里找最近的、以 prefix 开头且【比 prefix 更长】的完整命令。
+
+        修复（虚影吞命令专项 · P3）：
+        - 跳过 `cmd == prefix` 的完全匹配。此前如果历史最新项就是
+          用户刚敲的 prefix 本身，会立刻 return 它，外层判断
+          `recent_full_command != prefix` 为 False → 跳过虚影分支，
+          连带后面找「更长的完整命令」也一并跳过 → 虚影为空。
+        - 现在会继续往下找，命中第一个「更长」的完整命令作为虚影。
+        """
         if not self.history_buffer:
             return None
         for cmd in self.history_buffer:
-            if '\n' not in cmd and cmd.startswith(prefix):
+            if '\n' in cmd:
+                continue
+            if cmd.startswith(prefix) and cmd != prefix:
                 return cmd
         return None
 
@@ -2539,17 +2795,29 @@ class SmartCompleter(Completer):
     def get_completions(self, document: Document, complete_event):
         self._update_cmd_list_order()
         ctx_type, current_word, start_pos, cmd, node = self._get_context(document)
+        segment_text, _ = self._get_last_command_segment(document)
 
         if ctx_type == "command":
-            yield from self._complete_command(current_word, start_pos)
+            yield from self._complete_command(current_word, start_pos,
+                                              segment_text=segment_text)
         elif ctx_type == "permission_cmd":
-            yield from self._complete_command(current_word, start_pos, meta_type="permission")
+            yield from self._complete_command(current_word, start_pos,
+                                              meta_type="permission",
+                                              segment_text=segment_text)
         elif ctx_type == "option" and node is not None:
-            yield from self._complete_option(node, current_word, start_pos)
+            yield from self._complete_option(node, current_word, start_pos,
+                                             segment_text=segment_text)
         elif ctx_type == "tree" and node is not None:
-            yield from self._complete_tree(node, current_word, start_pos, cmd)
+            yield from self._complete_tree(node, current_word, start_pos, cmd,
+                                           segment_text=segment_text)
+        elif ctx_type == "dynamic":
+            yield from self._complete_dynamic(
+                cmd, current_word, start_pos, document,
+                segment_text, node,
+            )
         elif ctx_type == "path":
-            yield from self._complete_path(current_word, start_pos)
+            yield from self._complete_path(current_word, start_pos,
+                                           segment_text=segment_text)
         elif ctx_type == "variable":
             yield from self._complete_variable(current_word, start_pos)
         elif ctx_type == "code" and self._multiline_completer:
@@ -2557,7 +2825,8 @@ class SmartCompleter(Completer):
         # empty / other → 不产出
 
     # ── 命令名补全 ──
-    def _complete_command(self, current_word: str, start_pos: int, meta_type: str = "command"):
+    def _complete_command(self, current_word: str, start_pos: int,
+                          meta_type: str = "command", segment_text: str = ""):
         if meta_type == "permission":
             display_meta = "perm"
             style = "ansiyellow bold"
@@ -2613,86 +2882,199 @@ class SmartCompleter(Completer):
                     )
 
     # ── 树补全 ──
-    def _complete_tree(self, node: CommandNode, current_word: str, start_pos: int, cmd: str):
+    def _complete_tree(self, node: CommandNode, current_word: str, start_pos: int,
+                       cmd: str, segment_text: str = ""):
+        candidates: List[Tuple[str, str, str]] = []  # (text, meta, style)
+
         # 选项优先（- 开头时已在 _get_context 判过，这里再兜一次）
         if current_word.startswith('-') and node.options:
             for opt in node.options:
                 if _prefix_match(current_word, opt):
-                    yield Completion(
-                        opt,
-                        start_position=start_pos,
-                        display_meta=META_TEXTS_EN.get('option', 'option'),
-                        style=META_COLORS.get('option', 'ansired'),
-                    )
-            return
-
-        # 1) 子命令（下一级）
-        if node.subcommands:
+                    candidates.append((opt,
+                                       META_TEXTS_EN.get('option', 'option'),
+                                       META_COLORS.get('option', 'ansired')))
+        elif node.subcommands:
+            # 1) 子命令（下一级）
             for name in sorted(node.subcommands.keys()):
                 if _prefix_match(current_word, name):
-                    yield Completion(
-                        name,
-                        start_position=start_pos,
-                        display_meta=META_TEXTS_EN.get('subcommand', 'subcmd'),
-                        style=META_COLORS.get('subcommand', 'ansiyellow'),
-                    )
+                    candidates.append((name,
+                                       META_TEXTS_EN.get('subcommand', 'subcmd'),
+                                       META_COLORS.get('subcommand', 'ansiyellow')))
             # 选项也一并给出（不少命令 subcommand/option 混用）
             for opt in node.options:
                 if _prefix_match(current_word, opt):
-                    yield Completion(
-                        opt,
-                        start_position=start_pos,
-                        display_meta=META_TEXTS_EN.get('option', 'option'),
-                        style=META_COLORS.get('option', 'ansired'),
-                    )
-            return
-
-        # 2) 固定参数值
-        if node.arguments:
+                    candidates.append((opt,
+                                       META_TEXTS_EN.get('option', 'option'),
+                                       META_COLORS.get('option', 'ansired')))
+        elif node.arguments:
+            # 2) 固定参数值
             for val in node.arguments:
                 if _prefix_match(current_word, val):
-                    yield Completion(
-                        val,
-                        start_position=start_pos,
-                        display_meta=META_TEXTS_EN.get('argument', 'arg'),
-                        style=META_COLORS.get('argument', 'ansimagenta'),
-                    )
+                    candidates.append((val,
+                                       META_TEXTS_EN.get('argument', 'arg'),
+                                       META_COLORS.get('argument', 'ansimagenta')))
             for opt in node.options:
                 if _prefix_match(current_word, opt):
-                    yield Completion(
-                        opt,
-                        start_position=start_pos,
-                        display_meta=META_TEXTS_EN.get('option', 'option'),
-                        style=META_COLORS.get('option', 'ansired'),
-                    )
+                    candidates.append((opt,
+                                       META_TEXTS_EN.get('option', 'option'),
+                                       META_COLORS.get('option', 'ansired')))
+        elif node.argument_type == "dir":
+            # 3) 类型化参数 → 目录路径
+            yield from self._complete_path_filtered(current_word, start_pos, "dir",
+                                                    segment_text=segment_text)
             return
-
-        # 3) 类型化参数 → 路径
-        if node.argument_type == "dir":
-            yield from self._complete_path_filtered(current_word, start_pos, "dir")
+        elif node.argument_type == "file":
+            yield from self._complete_path_filtered(current_word, start_pos, "file",
+                                                    segment_text=segment_text)
             return
-        if node.argument_type == "file":
-            yield from self._complete_path_filtered(current_word, start_pos, "file")
-            return
-        if node.argument_type in ("value",):
+        elif node.argument_type in ("value",):
             return  # 自由文本
+        else:
+            # 4) 兜底路径
+            yield from self._complete_path(current_word, start_pos,
+                                           segment_text=segment_text)
+            return
 
-        # 4) 兜底路径
-        yield from self._complete_path(current_word, start_pos)
+        # 需求一：把「历史里最近匹配命令的下一个 token」提到第一项
+        self._promote_history_next(candidates, segment_text, current_word,
+                                   strip_trailing_sep=False)
 
-    def _complete_option(self, node: CommandNode, current_word: str, start_pos: int):
+        for text, meta, style in candidates:
+            yield Completion(text, start_position=start_pos,
+                             display_meta=meta, style=style)
+
+    def _complete_option(self, node: CommandNode, current_word: str, start_pos: int,
+                         segment_text: str = ""):
+        candidates: List[Tuple[str, str, str]] = []
         for opt in node.options:
             if _prefix_match(current_word, opt):
-                yield Completion(
-                    opt,
-                    start_position=start_pos,
-                    display_meta=META_TEXTS_EN.get('option', 'option'),
-                    style=META_COLORS.get('option', 'ansired'),
-                )
+                candidates.append((opt,
+                                   META_TEXTS_EN.get('option', 'option'),
+                                   META_COLORS.get('option', 'ansired')))
+        self._promote_history_next(candidates, segment_text, current_word,
+                                   strip_trailing_sep=False)
+        for text, meta, style in candidates:
+            yield Completion(text, start_position=start_pos,
+                             display_meta=meta, style=style)
+
+    # ── 动态补全（脚本式扩展 · 纯路由）──
+    def _build_dynamic_context(self, cmd: str, current_word: str,
+                               segment_text: str,
+                               static_node: Optional[CommandNode] = None
+                               ) -> CompletionContext:
+        """从当前命令段构造 CompletionContext，并把静态树作为数据源注入。
+
+        静态数据源（static_node + _static_provider）让脚本可以：
+          - 用 ctx.static_candidates() 主动取静态树候选
+          - 用 @static_fallback / @merge_static 装饰器自动使用
+          - 完全无视（动态完全接管）
+        """
+        parts = self._split_command(segment_text)
+        try:
+            cmd_idx = parts.index(cmd)
+        except ValueError:
+            cmd_idx = 0
+        args_done = parts[cmd_idx + 1:]
+        # 当前词还没敲完，从 args 里剔除（它由 ctx.current 表达）
+        if current_word and args_done and args_done[-1] == current_word:
+            args_done = args_done[:-1]
+        try:
+            cwd = os.getcwd()
+        except Exception:
+            cwd = ""
+        return CompletionContext(
+            cmd=cmd,
+            args=list(args_done),
+            current=current_word,
+            raw=segment_text,
+            cwd=cwd,
+            virtual_root=self.virtual_root,
+            static_node=static_node,
+            _static_provider=lambda n, c: self._collect_tree_tuples(n, c),
+        )
+
+    def _collect_tree_tuples(self, node: Optional[CommandNode],
+                             current_word: str) -> List[Tuple[str, str, str]]:
+        """静态树的候选展开，供 CompletionContext.static_candidates() 使用。
+
+        与 _complete_tree 的候选逻辑一致，但只返回 (text, meta, style) 元组，
+        不做路径展开（路径类节点由脚本自行决定是否补充）。
+        """
+        result: List[Tuple[str, str, str]] = []
+        if node is None:
+            return result
+
+        if current_word.startswith('-') and node.options:
+            for opt in node.options:
+                if _prefix_match(current_word, opt):
+                    result.append((opt,
+                                   META_TEXTS_EN.get('option', 'option'),
+                                   META_COLORS.get('option', 'ansired')))
+            return result
+
+        if node.subcommands:
+            for name in sorted(node.subcommands.keys()):
+                if _prefix_match(current_word, name):
+                    result.append((name,
+                                   META_TEXTS_EN.get('subcommand', 'subcmd'),
+                                   META_COLORS.get('subcommand', 'ansiyellow')))
+            for opt in node.options:
+                if _prefix_match(current_word, opt):
+                    result.append((opt,
+                                   META_TEXTS_EN.get('option', 'option'),
+                                   META_COLORS.get('option', 'ansired')))
+        elif node.arguments:
+            for val in node.arguments:
+                if _prefix_match(current_word, val):
+                    result.append((val,
+                                   META_TEXTS_EN.get('argument', 'arg'),
+                                   META_COLORS.get('argument', 'ansimagenta')))
+            for opt in node.options:
+                if _prefix_match(current_word, opt):
+                    result.append((opt,
+                                   META_TEXTS_EN.get('option', 'option'),
+                                   META_COLORS.get('option', 'ansired')))
+        return result
+
+    def _complete_dynamic(self, cmd: str, current_word: str, start_pos: int,
+                          document: Document, segment_text: str,
+                          node: Optional[CommandNode]):
+        """完全交给脚本。
+
+        ── 抽象原则 ──
+        com.py 只负责「调用脚本、原样透传结果」。不判断空、不合并静态树、
+        不做路径回退。要不要兜底、要不要合并、要不要补路径，全部由脚本
+        通过装饰器（static_fallback / merge_static）或直接调用
+        ctx.static_candidates() 自行决定。
+
+        这样以后新增任何命令语义（git ref / docker 容器 / 自定义协议），
+        只需写脚本，com.py 永远不动。
+        """
+        try:
+            ctx = self._build_dynamic_context(cmd, current_word,
+                                              segment_text, node)
+            items = self.dynamic_manager.complete(ctx)
+        except Exception:
+            return
+
+        for item in items:
+            t = item.text
+            if not t:
+                continue
+            sp = item.start_position if item.start_position is not None else start_pos
+            yield Completion(
+                t,
+                start_position=sp,
+                display_meta=item.meta or "",
+                style=item.style or "",
+            )
 
     # ── 路径补全 ──
-    def _complete_path(self, current_word: str, start_pos: int):
-        for comp_text, display_meta, color, rel_start in self.engine.get_completions(current_word, start_pos):
+    def _complete_path(self, current_word: str, start_pos: int, segment_text: str = ""):
+        comps = list(self.engine.get_completions(current_word, start_pos))
+        self._promote_history_next(comps, segment_text, current_word,
+                                   strip_trailing_sep=True)
+        for comp_text, display_meta, color, rel_start in comps:
             yield Completion(
                 comp_text,
                 start_position=rel_start,
@@ -2700,14 +3082,23 @@ class SmartCompleter(Completer):
                 style=color.split()[0] if color else "",
             )
 
-    def _complete_path_filtered(self, current_word: str, start_pos: int, kind: str):
+    def _complete_path_filtered(self, current_word: str, start_pos: int, kind: str,
+                                segment_text: str = ""):
         """kind: 'file' | 'dir'"""
-        for comp_text, display_meta, color, rel_start in self.engine.get_completions(current_word, start_pos):
+        comps = list(self.engine.get_completions(current_word, start_pos))
+        filtered: List[Tuple[str, str, str, int]] = []
+        for comp in comps:
+            comp_text = comp[0]
             is_dir = comp_text.endswith(os.sep) or comp_text.endswith('/')
             if kind == "dir" and not is_dir:
                 continue
             if kind == "file" and is_dir:
                 continue
+            filtered.append(comp)
+
+        self._promote_history_next(filtered, segment_text, current_word,
+                                   strip_trailing_sep=True)
+        for comp_text, display_meta, color, rel_start in filtered:
             yield Completion(
                 comp_text,
                 start_position=rel_start,

@@ -9,6 +9,15 @@
 修复：default_keys 补齐（此前 completion_menu_up/down、completion_trigger、
       completion_lock、multiline_editor 等键从未注册，导致 Alt+Enter、
       ESC+Space、Ctrl+Space 全部无效）
+
+修复（坏配置自愈专项 · P1）：
+- 新增 _BUILTIN_DEFAULTS：内置默认键位快照，独立于用户 ptk.json
+- _add() 统一走「用户配置 → 内置默认 → no-op」三级回退，
+  此前 8 处直接 @kb.add(default_keys[...]) 的绑定在用户配错键名时
+  会抛 ValueError，被 universal_input 顶层 except 吞成返回空串，
+  现象是「输入框再也不接受任何输入」，用户完全无法自救
+- 现在即使 ptk.json 写了 "history_up": "!!!bad"，也能照常使用
+  内置的 up 键，输入层保持可用
 """
 
 from prompt_toolkit.key_binding import KeyBindings
@@ -23,9 +32,41 @@ from typing import Dict, Any
 _completion_locked = False
 
 
+# ═══════════════════════════════════════════════════════════
+# 内置默认键位快照（不随用户 ptk.json 变化）
+# ═══════════════════════════════════════════════════════════
+# _add() 在用户配置无效时会回退到这里的值。
+# 只要这里的键名是 prompt_toolkit 认识的，输入层就不会因为用户配错而瘫痪。
+_BUILTIN_DEFAULTS: Dict[str, str] = {
+    "history_up": "up",
+    "history_down": "down",
+    "prefix_history_up": "escape, up",
+    "prefix_history_down": "escape, down",
+    "completion_next": "tab",
+    "completion_prev": "s-tab",
+    "clear_screen": "c-l",
+    "completion_page_up": "pageup",
+    "completion_page_down": "pagedown",
+    "completion_menu_up": "c-up",
+    "completion_menu_down": "c-down",
+    "completion_trigger": "c-space",
+    "completion_alt_next": "c-n",
+    "completion_alt_prev": "c-p",
+    "completion_lock": "escape, space",
+    "multiline_editor": "escape, enter",
+}
+
+
 def is_completion_locked() -> bool:
     """返回当前补全是否被全局锁定"""
     return _completion_locked
+
+
+def _split_keys(raw: str):
+    """把 'escape, up' 切成 ['escape', 'up']；空串返回 []。"""
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split(",") if p.strip()]
 
 
 def create_key_bindings(
@@ -48,46 +89,44 @@ def create_key_bindings(
 
     kb = KeyBindings()
 
-    # ── 完整的默认键位（与 com.DEFAULT_PTK_CONFIG["key_bindings"] 对齐）──
-    default_keys = {
-        "history_up": "up",
-        "history_down": "down",
-        "prefix_history_up": "escape, up",
-        "prefix_history_down": "escape, down",
-        "completion_next": "tab",
-        "completion_prev": "s-tab",
-        "clear_screen": "c-l",
-        "completion_page_up": "pageup",
-        "completion_page_down": "pagedown",
-        # 以下是此前漏掉、实际未注册的键
-        "completion_menu_up": "c-up",
-        "completion_menu_down": "c-down",
-        "completion_trigger": "c-space",
-        "completion_alt_next": "c-n",
-        "completion_alt_prev": "c-p",
-        "completion_lock": "escape, space",
-        "multiline_editor": "escape, enter",
-    }
-
-    # 从 ptk_config 中覆盖键位（只覆盖非空值，避免把默认键覆盖成 None）
+    # ── default_keys：在内置默认基础上，用用户配置覆盖（仅覆盖非空值）──
+    default_keys = dict(_BUILTIN_DEFAULTS)
     if ptk_config and "key_bindings" in ptk_config:
         for key, value in ptk_config["key_bindings"].items():
             if value:
                 default_keys[key] = value
 
     def _add(action_key: str):
-        """按 default_keys（来自 ptk.json）绑定 handler；支持 'escape, space' 多键序列。"""
+        """按配置绑定 handler；配置无效时回退内置默认；仍无效则跳过。
+
+        三级回退：
+          1. 用户 ptk.json 里的键名（default_keys）
+          2. 内置默认键名（_BUILTIN_DEFAULTS）
+          3. 无绑定（lambda f: f）—— 至少不让 create_key_bindings 抛异常
+
+        返回一个可当装饰器使用的函数，保证所有绑定路径统一走这里。
+        """
         raw = default_keys.get(action_key) or ""
-        parts = [p.strip() for p in raw.split(",") if p.strip()]
-        if not parts:
-            return lambda f: f
-        try:
-            return kb.add(*parts)
-        except Exception:
-            return lambda f: f
+        parts = _split_keys(raw)
+        if parts:
+            try:
+                return kb.add(*parts)
+            except Exception:
+                pass
+
+        # 回退内置默认
+        fallback_parts = _split_keys(_BUILTIN_DEFAULTS.get(action_key, ""))
+        if fallback_parts:
+            try:
+                return kb.add(*fallback_parts)
+            except Exception:
+                pass
+
+        # 最后兜底：什么都不绑，但也不抛异常
+        return lambda f: f
 
     # ── 普通上下键：永远遍历全部历史 ──
-    @kb.add(default_keys["history_up"])
+    @_add("history_up")
     def _(event):
         buffer = event.app.current_buffer
         new_text, new_pos = input_lib_module.handle_up_arrow_normal(buffer.text)
@@ -95,7 +134,7 @@ def create_key_bindings(
             buffer.text = new_text
             buffer.cursor_position = new_pos
 
-    @kb.add(default_keys["history_down"])
+    @_add("history_down")
     def _(event):
         buffer = event.app.current_buffer
         new_text, new_pos = input_lib_module.handle_down_arrow_normal(buffer.text)
@@ -104,6 +143,7 @@ def create_key_bindings(
             buffer.cursor_position = new_pos
 
     # ── Alt+上下键 / Shift+上下键：前缀历史导航 ──
+    # 这两个是硬编码的安全兜底键位，无论配置怎样都必须可用
     @kb.add('escape', 'up')
     @kb.add('s-up')
     def prefix_up(event):
@@ -126,30 +166,40 @@ def create_key_bindings(
             buffer.text = new_text
             buffer.cursor_position = new_pos
 
-    # 用户自定义了前缀导航键位时，额外绑定
+    # 用户自定义了前缀导航键位时，额外绑定一份（保留用户选择）
     prefix_up_keys = default_keys.get("prefix_history_up", "")
     if prefix_up_keys and prefix_up_keys not in ("escape, up", "s-up"):
-        @kb.add(*[p.strip() for p in prefix_up_keys.split(',') if p.strip()])
-        def custom_prefix_up(event):
-            buffer = event.app.current_buffer
-            if buffer.complete_state:
-                buffer.cancel_completion()
-            new_text, new_pos = input_lib_module.handle_up_arrow_with_prefix(buffer.text)
-            if new_text != buffer.text:
-                buffer.text = new_text
-                buffer.cursor_position = new_pos
+        _custom_prefix_up_parts = _split_keys(prefix_up_keys)
+        if _custom_prefix_up_parts:
+            try:
+                @kb.add(*_custom_prefix_up_parts)
+                def custom_prefix_up(event):
+                    buffer = event.app.current_buffer
+                    if buffer.complete_state:
+                        buffer.cancel_completion()
+                    new_text, new_pos = input_lib_module.handle_up_arrow_with_prefix(buffer.text)
+                    if new_text != buffer.text:
+                        buffer.text = new_text
+                        buffer.cursor_position = new_pos
+            except Exception:
+                pass
 
     prefix_down_keys = default_keys.get("prefix_history_down", "")
     if prefix_down_keys and prefix_down_keys not in ("escape, down", "s-down"):
-        @kb.add(*[p.strip() for p in prefix_down_keys.split(',') if p.strip()])
-        def custom_prefix_down(event):
-            buffer = event.app.current_buffer
-            if buffer.complete_state:
-                buffer.cancel_completion()
-            new_text, new_pos = input_lib_module.handle_down_arrow_with_prefix(buffer.text)
-            if new_text != buffer.text:
-                buffer.text = new_text
-                buffer.cursor_position = new_pos
+        _custom_prefix_down_parts = _split_keys(prefix_down_keys)
+        if _custom_prefix_down_parts:
+            try:
+                @kb.add(*_custom_prefix_down_parts)
+                def custom_prefix_down(event):
+                    buffer = event.app.current_buffer
+                    if buffer.complete_state:
+                        buffer.cancel_completion()
+                    new_text, new_pos = input_lib_module.handle_down_arrow_with_prefix(buffer.text)
+                    if new_text != buffer.text:
+                        buffer.text = new_text
+                        buffer.cursor_position = new_pos
+            except Exception:
+                pass
 
     # ── Ctrl+上下键：补全菜单选择 ──
     @_add("completion_menu_up")
@@ -169,13 +219,13 @@ def create_key_bindings(
             buffer.start_completion(select_first=False)
 
     # ── 补全翻页（PageUp/PageDown）──
-    @kb.add(default_keys["completion_page_up"])
+    @_add("completion_page_up")
     def _(event):
         buffer = event.app.current_buffer
         if buffer.complete_state:
             buffer.complete_previous_page()
 
-    @kb.add(default_keys["completion_page_down"])
+    @_add("completion_page_down")
     def _(event):
         buffer = event.app.current_buffer
         if buffer.complete_state:
@@ -183,7 +233,7 @@ def create_key_bindings(
 
     # ── Tab / Shift+Tab ──
     if use_dropdown_menu:
-        @kb.add(default_keys["completion_next"])
+        @_add("completion_next")
         def _(event):
             buffer = event.app.current_buffer
             # 清除 ghost suggestion，防止虚影残留与补全叠加导致文本损坏
@@ -193,7 +243,7 @@ def create_key_bindings(
             else:
                 buffer.start_completion(select_first=False)
     else:
-        @kb.add(default_keys["completion_next"])
+        @_add("completion_next")
         def _(event):
             """关闭下拉菜单：Tab 直接内联接受第一个补全。"""
             buffer = event.app.current_buffer
@@ -217,7 +267,7 @@ def create_key_bindings(
                 buffer.text = doc.text[:ins] + c.text + doc.text[doc.cursor_position:]
                 buffer.cursor_position = ins + len(c.text)
 
-    @kb.add(default_keys["completion_prev"])
+    @_add("completion_prev")
     def _(event):
         buffer = event.app.current_buffer
         if buffer.complete_state:
@@ -248,7 +298,7 @@ def create_key_bindings(
             buffer.start_completion(select_first=False)
 
     # ── 清屏 ──
-    @kb.add(default_keys["clear_screen"])
+    @_add("clear_screen")
     def _(event):
         if terminal_type in ("cmd", "powershell") or (sys_type == "Windows" and terminal_type in ("", "cmd")):
             os.system('cls')

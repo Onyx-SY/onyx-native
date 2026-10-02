@@ -2190,6 +2190,41 @@ def signal_handler(signum, frame):
     sys.exit(128 + signum)
 
 
+def _list_available_shells():
+    """返回本机可用 shell 列表 [(名字, 绝对路径)]（复用 lib.terminal.exe 的实现）。"""
+    try:
+        from lib.terminal.exe import list_available_shells
+        return list_available_shells()
+    except Exception:
+        return []
+
+
+def _print_available_shells() -> None:
+    items = _list_available_shells()
+    if not items:
+        print("  （未在本机找到任何已知 shell）")
+        return
+    print("本机可用 shell：")
+    for name, path in items:
+        print(f"  {name:<10} {path}")
+
+
+def _apply_shell_override(name_or_path: str):
+    """校验 --shell 的值并写入 ONYX_SHELL 环境变量。
+
+    返回解析后的绝对路径；无效（系统里不存在）返回 None。
+    """
+    try:
+        from lib.terminal.exe import set_shell_override
+        resolved = set_shell_override(name_or_path)
+    except Exception as e:
+        print(f"⚠️  无法加载 shell 覆盖模块: {e}")
+        return None
+    if resolved:
+        os.environ['ONYX_SHELL'] = resolved
+    return resolved
+
+
 def main() -> None:
     # 启动伊始清屏（清屏 + 清滚动缓冲区 + 光标归位）
     print('\033[3J\033[2J\033[H', end='', flush=True)
@@ -2255,8 +2290,35 @@ def main() -> None:
         action='store_true',
         help='Reset all performance statistics'
     )
+    parser.add_argument(
+        '-s', '--shell',
+        type=str,
+        metavar='NAME|PATH',
+        help='Override the underlying shell used by Onyx '
+             '(e.g. bash, zsh, fish, /bin/sh). Ignored if not found on this system.'
+    )
+    parser.add_argument(
+        '--list-shells',
+        action='store_true',
+        help='List available shells on this system and exit'
+    )
     
     args = parser.parse_args()
+
+    # ── 底层 shell 覆盖（--shell / --list-shells）──
+    # 必须在任何启动路径之前处理：jump_to_main_immediately 与
+    # subprocess 兜底启动都会继承 os.environ，故写入 ONYX_SHELL 即全局生效。
+    if args.list_shells:
+        _print_available_shells()
+        sys.exit(0)
+
+    if args.shell:
+        _resolved = _apply_shell_override(args.shell)
+        if _resolved:
+            print(f"✅ 底层 shell 已设为: {_resolved}")
+        else:
+            print(f"❌ 找不到 shell: {args.shell}（已回退自动检测）")
+            _print_available_shells()
     
     # 处理性能汇总请求
     if args.perf_summary:

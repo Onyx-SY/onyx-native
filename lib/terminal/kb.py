@@ -18,12 +18,21 @@
   现象是「输入框再也不接受任何输入」，用户完全无法自救
 - 现在即使 ptk.json 写了 "history_up": "!!!bad"，也能照常使用
   内置的 up 键，输入层保持可用
+
+修复（跨平台清屏专项 · P2）：
+- Windows 下清屏不再调用 os.system('cls')：
+  · Windows Terminal / PowerShell 7+ / ConPTY 走 ANSI 转义 (\x1b[2J\x1b[H)，
+    不闪烁、不开新窗口、保留回滚缓冲；
+  · 只在极端环境（老 conhost）下才回退到 os.system('cls')。
+- POSIX（macOS/Linux）保持 clear 命令，保留回滚缓冲。
+- 顶部补 import sys，供 ANSI 分支写 stdout 使用。
 """
 
+import os
+import sys
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.application import get_app
-import os
 from typing import Dict, Any
 
 # 全局补全锁定状态：ESC+Space 切换
@@ -297,13 +306,35 @@ def create_key_bindings(
         else:
             buffer.start_completion(select_first=False)
 
-    # ── 清屏 ──
+    # ── 清屏（跨平台 · 避免 Windows 下闪烁 / 开新窗口）──
     @_add("clear_screen")
     def _(event):
-        if terminal_type in ("cmd", "powershell") or (sys_type == "Windows" and terminal_type in ("", "cmd")):
-            os.system('cls')
+        """
+        Windows：
+          - Windows Terminal / PowerShell 7+ / ConPTY 支持 ANSI 转义，
+            优先写 \\x1b[2J\\x1b[H —— 不闪烁、不开新窗口、保留回滚缓冲。
+          - 只在老 conhost（ANSI 不生效）下才回退 os.system('cls')。
+        POSIX（macOS / Linux）：
+          - 调用 clear 命令，保留回滚缓冲。
+        """
+        if terminal_type in ("cmd", "powershell") or sys_type == "Windows":
+            try:
+                sys.stdout.write("\x1b[2J\x1b[H")
+                sys.stdout.flush()
+            except Exception:
+                try:
+                    os.system('cls')
+                except Exception:
+                    pass
         else:
-            os.system('clear')
+            try:
+                os.system('clear')
+            except Exception:
+                try:
+                    sys.stdout.write("\x1b[2J\x1b[H")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
         event.app.renderer.reset()
 
     # ── 回车：路径补全时接受目录并级联继续补全 ──

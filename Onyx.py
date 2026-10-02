@@ -753,8 +753,42 @@ def get_real_current_dir() -> str:
     
     
 # c库，只传话
+_SYSTEM_BIN_PREFIXES = None
+
+
+def _is_system_bin_path(p: str) -> bool:
+    """判断是否是「系统可执行目录」下的路径（shebang 解释器 / 系统命令）。
+
+    这些路径不属于虚拟根，若交给虚拟路径解析会被判为越界并替换成
+    「You cannot cross root dir. Onyx has intercepted.」，从而让
+    `./script.sh`（带 shebang）报 "…: command not found"。
+    """
+    global _SYSTEM_BIN_PREFIXES
+    if _SYSTEM_BIN_PREFIXES is None:
+        _pfx = []
+        for _d in (os.environ.get('PREFIX', ''), '/usr', '/bin', '/sbin',
+                   '/opt', '/system', '/apex',
+                   # 内核/运行时伪文件系统：脚本里的 /proc、/dev 等不该被
+                   # 虚拟路径解析拦截（否则 os.listdir("/proc") 会变成
+                   # "You cannot cross root dir. Onyx has intercepted."）。
+                   '/proc', '/sys', '/dev', '/run', '/var/run'):
+            if _d:
+                _pfx.append(_d.rstrip('/'))
+        _SYSTEM_BIN_PREFIXES = tuple(_pfx)
+    # 完全相等（如 "/proc" 本身）或位于其下（如 "/proc/net/tcp"）都放行
+    return any(p == _d or p.startswith(_d + '/') for _d in _SYSTEM_BIN_PREFIXES)
+
+
 def resolve_path(path: str) -> str:
     """路径解析接口：根据 _SANDBOX_ENABLED 动态决定根目录（若未启用沙箱则使用 /）"""
+    # ── 系统可执行目录下的路径不做虚拟路径映射 ──
+    # shebang 解释器（/usr/bin/env、$PREFIX/bin/bash …）与系统命令不属于
+    # 虚拟根；硬解析会被判越界并替换成拦截提示 → 脚本执行报 command not found。
+    try:
+        if path and os.path.isabs(path) and _is_system_bin_path(path):
+            return path
+    except Exception:
+        pass
     # 获取沙箱启用状态
     sandbox_enabled = _SANDBOX_ENABLED
     effective_root = ROOT_DIR if sandbox_enabled else "/"
@@ -3666,9 +3700,12 @@ def main_loop() -> None:
             pass
 
         # 恢复终端属性（崩溃时也确保终端回到 cooked 模式）
+        # 恢复后若仍检测到 raw（例如终端 fd 已失效），打印 stty sane 提示。
         try:
-            from lib.terminal.exe import restore_terminal_attrs
+            from lib.terminal.exe import (
+                restore_terminal_attrs, print_terminal_recovery_hint)
             restore_terminal_attrs()
+            print_terminal_recovery_hint()
         except Exception:
             pass
 

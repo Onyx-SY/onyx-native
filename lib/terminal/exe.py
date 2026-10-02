@@ -461,6 +461,36 @@ def _resolve_shell_candidate(name_or_path: Optional[str]) -> Optional[str]:
     return found or None
 
 
+_SUBPROC_SHELL_CACHE = None
+
+
+def _subprocess_shell() -> str:
+    """AI 模式 shell=True 用的解释器（POSIX）。
+
+    subprocess 的 shell=True 默认用 /bin/sh（dash）—— 它**不支持 source**，
+    也没有 [[ ]] / 数组 / $'...' 等 bash 扩展，于是 `source xxx.sh` 会报
+    "source: not found"、`[[ ... ]]` 会语法错误。这里优先选 bash，其次 zsh，
+    再退到用户 shell（仅 POSIX 系），最后 /bin/sh。
+    """
+    global _SUBPROC_SHELL_CACHE
+    if _SUBPROC_SHELL_CACHE:
+        return _SUBPROC_SHELL_CACHE
+    for _name in ('bash', 'zsh'):
+        _p = shutil.which(_name)
+        if _p:
+            _SUBPROC_SHELL_CACHE = _p
+            return _p
+    try:
+        _s = get_shell()
+        if _s and os.path.basename(_s).lower() in ('sh', 'dash', 'ksh', 'ash'):
+            _SUBPROC_SHELL_CACHE = _s
+            return _s
+    except Exception:
+        pass
+    _SUBPROC_SHELL_CACHE = '/bin/sh'
+    return _SUBPROC_SHELL_CACHE
+
+
 def list_available_shells() -> List[Tuple[str, str]]:
     """列出本机可用的已知 shell：[(名字, 绝对路径), ...]（去重、保序）。
 
@@ -506,6 +536,22 @@ def get_shell() -> str:
             debug_log(f"Using shell override: {resolved}")
             return resolved
         debug_log(f"Shell override {override!r} not found, falling back to auto-detect", 'error')
+
+    # ── 1. 持久化配置 etc/onyx/shell（`manage shell <name>` 写入）──
+    # 与 lib/parse.normalize_shell_type() 共用同一来源，保证「输入模块」
+    # 与「底层 PTY」用的是同一种 shell。
+    try:
+        with open(os.path.join(os.path.expanduser('~'), '.onyx', 'shell'),
+                  encoding='utf-8') as _f:
+            _cfg_shell = _f.read().strip()
+    except Exception:
+        _cfg_shell = ''
+    if _cfg_shell:
+        _r = _resolve_shell_candidate(_cfg_shell)
+        if _r:
+            _shell_cache = _r
+            debug_log(f"Using configured shell: {_r}")
+            return _r
     
     if TERMINAL_TYPE_AVAILABLE:
         _shell_cache = get_shell_from_type()
@@ -955,7 +1001,10 @@ class PersistentShell:
                         _cut -= 1          # 哨兵的 CR 也切掉，避免多一个空行
                     _head = _buf[:_cut]
                     if _head:
-                        if not _head.endswith(b'\n'):
+                        # 末尾是 \r 时不补：那是 shell 控制序列的尾巴
+                        # （如 \x1b[?2004l\r），补了会凭空多一个空行 ——
+                        # cd 这类「无输出」命令最常见。
+                        if not _head.endswith((b'\n', b'\r')):
                             _head += b'\n'   # 输出未以换行结束 → 补一个
                     elif _last_out_byte[0] not in (None, b'\n'):
                         _head = b'\n'        # 上次输出没换行结尾 → 补一个，避免粘连
@@ -1349,6 +1398,8 @@ class PersistentShell:
             shell_args = [self.shell, '-NoLogo', '-NoProfile', '-NonInteractive']
         elif self.shell_name == 'cmd':
             shell_args = [self.shell]
+        elif self.shell_name == 'zsh':
+            shell_args = [self.shell, '--no-rcs', '--no-globalrcs', '-f']
         else:
             # For WSL/bash on Windows
             shell_args = [self.shell, '--norc', '--noprofile']
@@ -1481,9 +1532,10 @@ class PersistentShell:
 
                 # Proper shell initialization for different shells
                 if self.shell_name == 'zsh':
+                    # 注意：zsh 没有 --norc（那是 bash 的选项）——传了会
+                    # "no such option: norc" 直接退出。只用 zsh 自己的开关。
                     os.execvpe(self.shell, [
                         self.shell,
-                        '--norc',
                         '--no-rcs',
                         '--no-globalrcs',
                         '-f'  # no startup files
@@ -2284,6 +2336,10 @@ def _exec_ai_subprocess(cmd: str, output_buffer: List[str],
     try:
         _proc = _sp.Popen(
             cmd, shell=True, stdout=_sp.PIPE, stderr=_sp.PIPE,
+            # 显式指定解释器：默认 /bin/sh（dash）不支持 source / [[ ]] 等
+            # bash 扩展 → 用 bash（Windows 上传 None，走系统默认）。
+            executable=(None if platform.system() == "Windows"
+                        else _subprocess_shell()),
             text=True, errors="replace", cwd=cwd,
             start_new_session=True,  # 独立进程组：终端 Ctrl+C 不直接打到命令
         )

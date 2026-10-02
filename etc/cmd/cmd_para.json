@@ -24,7 +24,8 @@
       "opts": [],
       "params": [
         "set",
-        "clean"
+        "clean",
+        "shell"
       ],
       "type": "string"
     },

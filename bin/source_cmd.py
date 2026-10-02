@@ -97,6 +97,8 @@ def _source_onyx_script(script_path: str, request_id: str) -> None:
         in_here_doc = False         # here-doc <<EOF
         here_doc_end = ""           # here-doc 结束符
         struct_stack = []           # 结构栈 if/for/while/case
+        brace_depth = 0             # 花括号块深度 { }
+        paren_depth = 0             # 子 shell 深度 ( )
 
         # 关键字判断
         start_keywords = {"if", "for", "while", "until", "case"}
@@ -128,7 +130,11 @@ def _source_onyx_script(script_path: str, request_id: str) -> None:
                     if right and not right.startswith(">"):
                         # 进入 here-doc
                         in_here_doc = True
-                        here_doc_end = right.split()[0]
+                        # 去掉定界符的引号/转义：<<'PY' / <<"PY" / <<\PY → PY
+                    # （否则结束行永远匹配不上，heredoc 会吞掉后面所有行）
+                    here_doc_end = right.split()[0].strip("'\"\\")
+                    if here_doc_end.startswith('-'):
+                        here_doc_end = here_doc_end[1:]   # <<-EOF
                         block_buffer.append(line)
                         continue
 
@@ -149,6 +155,24 @@ def _source_onyx_script(script_path: str, request_id: str) -> None:
                 in_continuation = False
                 if not stripped:
                     continue
+
+            # ============= 花括号块 / 子 shell { } ( ) =============
+            # 此前未识别 → `{ ... }` 块与 `foo() { ... }` 函数定义被逐行
+            # 拆开送给底层 shell，bash 报 "unexpected end of file from '{'"
+            # 并卡在续行提示符（用户只能一直敲到 EOF）。
+            _br = stripped.count('{') - stripped.count('}')
+            _pa = stripped.count('(') - stripped.count(')')
+            if brace_depth or paren_depth or _br > 0 or _pa > 0:
+                brace_depth += _br
+                paren_depth += _pa
+                block_buffer.append(line)
+                if brace_depth <= 0 and paren_depth <= 0:
+                    brace_depth = 0
+                    paren_depth = 0
+                    full_cmd = "\n".join(block_buffer)
+                    parse_and_execute(full_cmd, is_recursive=True)
+                    block_buffer = []
+                continue
 
             # ============= 结构化命令 if/for/while/case =============
             first_word = stripped.split()[0] if stripped else ""

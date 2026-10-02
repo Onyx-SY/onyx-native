@@ -80,6 +80,8 @@ Onyx never replaces your shell: it owns the input layer and lets a real `bash`/`
 | `manage set debug-times true` | Show per-command execution time |
 | `manage set debug-parsecmd true` | Enable command-parsing debug output |
 | `manage set clean-log-time <days>` | Set the log auto-clean interval |
+| `manage shell <name>` | Set the shell used by **both** the input layer and the underlying PTY (bash/zsh/fish/sh/pwsh/cmd, or a path) |
+| `manage shell` | Show the current shell |
 
 ### `activite` — security mode
 
@@ -301,6 +303,8 @@ Onyx 不替换你的 shell：它接管输入层，把真正的执行交给 `bash
 | `manage set debug-times true` | 显示每条命令的耗时 |
 | `manage set debug-parsecmd true` | 启用命令解析调试输出 |
 | `manage set clean-log-time <days>` | 设置日志自动清理天数 |
+| `manage shell <name>` | 设定**输入模块与底层 PTY 共用**的 shell（bash/zsh/fish/sh/pwsh/cmd 或路径） |
+| `manage shell` | 查看当前 shell |
 
 ### `activite` — 安全模式
 

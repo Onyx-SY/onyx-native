@@ -298,18 +298,48 @@ def get_terminal_type() -> str:
 
 
 def _get_terminal_specific_commands() -> List[str]:
-    """从 other_terminal_cmd.json 获取当前终端的内置命令"""
+    """从 other_terminal_cmd.json 获取当前终端的内置命令。
+
+    跨平台策略：
+    - 基础：把当前 terminal_type 对应的节全部纳入
+    - PowerShell：额外并入 'cmd' 节（dir/type/where/findstr/cls 等
+      在 PowerShell 里也能用，且用户从 cmd 过渡过来时常敲）
+    - 若运行在 macOS（sys.platform == 'darwin'）：额外并入 'macos' 节
+      （open / pbcopy / pbpaste / brew / defaults / say 等）
+    - 'common' 节永远纳入
+    - 结果去重保序，避免重复候选浪费补全列表空间
+    """
+    import sys as _sys
+
     terminal_type = get_terminal_type()
     all_cmds = get_other_terminal_cmds()
 
-    commands = []
+    commands: List[str] = []
+
+    # 当前终端专属
     if terminal_type in all_cmds:
         commands.extend(all_cmds[terminal_type])
 
+    # PowerShell：并入 cmd 一节的常用命令
+    if terminal_type == 'powershell' and 'cmd' in all_cmds:
+        commands.extend(all_cmds['cmd'])
+
+    # macOS：并入 macos 一节
+    if _sys.platform == 'darwin' and 'macos' in all_cmds:
+        commands.extend(all_cmds['macos'])
+
+    # 通用
     if 'common' in all_cmds:
         commands.extend(all_cmds['common'])
 
-    return commands
+    # 去重保序
+    seen = set()
+    result: List[str] = []
+    for c in commands:
+        if c and c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
 
 
 # ===================== 异步历史持久化系统 =====================

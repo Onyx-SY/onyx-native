@@ -4,9 +4,15 @@
 跨平台手册页扫描器 —— 纯异步后台扫描模式
 支持增量更新：一次性建立 man 页索引 + 节流批量落盘，不阻塞主程序
 
-新增（com_cmd.json 协同）：
-- 用户在 com_cmd.json 里已经定义过的命令，不再进行 man 扫描
-- 内置 ARG_TYPE_HINTS：常见系统命令自动带上 arguments.type
+本次跨平台优化（macOS + Windows）：
+- _detect_system：macOS 覆盖 Intel Homebrew (/usr/local/share/man)、
+  Apple Silicon Homebrew (/opt/homebrew/share/man)、MacPorts (/opt/local/share/man)，
+  并新增 /opt/homebrew/opt 与 /usr/local/opt 展开目录
+- _build_man_index：识别 macOS Homebrew 的 opt/<pkg>/share/man 结构
+- get_all_commands：Windows 按 PATHEXT 扫描可执行文件（.exe/.cmd/.bat/.ps1），
+  并提取基础名作为命令名；POSIX 仍按 X_OK
+- com_cmd.json 协同：用户在 com_cmd.json 里已定义的命令跳过 man 扫描
+- ARG_TYPE_HINTS：常见系统命令自动带上 arguments.type
 
 修复（结构化 JSON 保全）：
 - 合并两个 JSON 时不再用 set() 展开 subcommands，
@@ -59,18 +65,6 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════
 # 结构化 JSON 递归合并
 # ═══════════════════════════════════════════════════════════
-#
-# 背景：cmd.json 用新格式（subcommands 是 dict，可嵌套），
-# command.json 里可能混有旧格式（subcommands 是 list）。
-# 合并时必须保留 dict 结构，不能 set() 展平。
-#
-# 合并规则：
-#   options      → 数组并集（去重）
-#   arguments    → a 有则用 a，没有则从 b 拿
-#   type         → 同上
-#   multiple     → 只要任一方为真则为真
-#   subcommands  → 见 _merge_subcommands
-# ═══════════════════════════════════════════════════════════
 
 def _merge_subcommands(a: Any, b: Any) -> Any:
     """递归合并两个 subcommands 结构，保留 dict 语义。
@@ -105,7 +99,6 @@ def _merge_subcommands(a: Any, b: Any) -> Any:
                 seen.append(x)
         return seen
 
-    # 类型冲突 → 优先 dict
     if b_is_dict and not a_is_dict:
         return dict(b)
     if a_is_dict and not b_is_dict:
@@ -127,7 +120,6 @@ def _merge_node(a: Any, b: Any) -> Dict[str, Any]:
 
     result: Dict[str, Any] = dict(a)
 
-    # options：数组并集，保序去重
     opts: List[str] = []
     for o in result.get("options", []) or []:
         if isinstance(o, str) and o not in opts:
@@ -138,22 +130,18 @@ def _merge_node(a: Any, b: Any) -> Dict[str, Any]:
     if opts:
         result["options"] = opts
 
-    # subcommands：递归合并
     if "subcommands" in a or "subcommands" in b:
         result["subcommands"] = _merge_subcommands(
             a.get("subcommands", []),
             b.get("subcommands", []),
         )
 
-    # arguments：a 有则保留 a，否则用 b
     if "arguments" not in result and "arguments" in b:
         result["arguments"] = b["arguments"]
 
-    # type：同上
     if "type" not in result and "type" in b:
         result["type"] = b["type"]
 
-    # multiple：任一为真即真
     if b.get("multiple") or a.get("multiple"):
         result["multiple"] = True
 
@@ -161,17 +149,7 @@ def _merge_node(a: Any, b: Any) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════
-# com_cmd.json 协同：用户已处理过的命令跳过扫描
-# ═══════════════════════════════════════════════════════════
-#
-# ⚠️ Python 3.14 死锁规避：
-# 本模块运行在【后台扫描线程】里。此前 _resolve_com_cmd_path() 里写了
-#   from lib.terminal.com import get_com_cmd_config_path
-# 而 com.py 顶部硬编码导入整个 prompt_toolkit。当主线程同时在
-# input_lib.py 里首次导入 prompt_toolkit 时，两边会在
-# _ModuleLock('prompt_toolkit.lexers') 上互等，3.14 直接抛
-# _DeadlockError。修复：后台线程不再主动导入 com，
-# 只读取 sys.modules 里【已被主线程加载过】的实例。
+# com_cmd.json 协同
 # ═══════════════════════════════════════════════════════════
 
 _COM_CMD_JSON_PATH: Optional[str] = None
@@ -196,13 +174,10 @@ def _resolve_com_cmd_path() -> Optional[str]:
     if env_path:
         candidates.append(env_path)
 
-    # ── 关键修复：绝不主动 import lib.terminal.com ──
+    # ── 关键：绝不主动 import lib.terminal.com ──
     # 只在它【已经被主线程加载过】时才去读取它登记的路径。
-    # 若尚未加载，本线程直接跳过 —— 宁可少一个候选路径，
-    # 也不能触发 com.py 首次导入，把 prompt_toolkit 拖进后台线程。
     com_mod = sys.modules.get("lib.terminal.com")
     if com_mod is None:
-        # 兜底：尝试已在 sys.modules 里的其它可能包名
         com_mod = sys.modules.get("onyx.lib.terminal.com")
     if com_mod is not None:
         try:
@@ -289,6 +264,26 @@ class AsyncManScanner:
 
         "find":    "dir",
         "grep":    "file",
+
+        # macOS 常用
+        "open":    "file", "pbcopy":  "file", "pbpaste": "file",
+        "mdfind":  "file", "mdls":    "file",
+        "diskutil": "dir", "hdiutil": "file",
+        "say":     "file", "afplay":  "file", "screencapture": "file",
+        "defaults": "file", "launchctl": "file",
+
+        # PowerShell / Windows 常见
+        "Get-Content":    "file", "Set-Content":    "file",
+        "Get-ChildItem":  "dir",  "Set-Location":  "dir",
+        "Copy-Item":      "file", "Move-Item":     "file",
+        "Remove-Item":    "file", "New-Item":      "file",
+        "Test-Path":      "file", "Get-Item":      "file",
+        "Select-String":  "file", "Out-File":      "file",
+        "Add-Content":    "file", "Clear-Content": "file",
+        "Join-Path":      "file", "Split-Path":    "file",
+        "Resolve-Path":   "file", "Convert-Path":  "file",
+        "type":           "file", "dir":           "dir",
+        "findstr":        "file", "where":         "file",
     }
 
     def __init__(self):
@@ -299,6 +294,18 @@ class AsyncManScanner:
         self._man_index: Optional[Dict[str, List[Path]]] = None
 
     def _detect_system(self) -> SystemConfig:
+        """跨平台检测系统并给出 man 目录列表。
+
+        macOS：
+          - /usr/share/man             系统自带
+          - /usr/local/share/man       Intel Homebrew
+          - /usr/local/opt             Intel Homebrew opt 展开
+          - /opt/homebrew/share/man    Apple Silicon Homebrew
+          - /opt/homebrew/opt          Apple Silicon Homebrew opt 展开
+          - /opt/local/share/man       MacPorts
+
+        Windows：无 man，走 PATH + PATHEXT 扫描
+        """
         config = SystemConfig(platform='unknown')
         try:
             if os.path.exists("/data/data/com.termux") or "termux" in sys.prefix.lower():
@@ -310,11 +317,21 @@ class AsyncManScanner:
 
             if sys.platform == "darwin":
                 config.platform = 'macos'
-                config.man_dirs = ["/usr/share/man", "/opt/local/share/man", "/usr/local/share/man"]
+                config.man_dirs = [
+                    "/usr/share/man",
+                    "/usr/local/share/man",
+                    "/usr/local/opt",
+                    "/opt/homebrew/share/man",
+                    "/opt/homebrew/opt",
+                    "/opt/local/share/man",
+                ]
+                config.use_man_command = True
+                config.use_apropos = True
                 return config
 
             if sys.platform.startswith("win32") or sys.platform == "cygwin":
                 config.platform = 'windows'
+                config.man_dirs = []
                 config.use_man_command = False
                 config.use_apropos = False
                 return config
@@ -354,18 +371,14 @@ class AsyncManScanner:
         """加载已存在的命令数据。
 
         优先级：cmd.json（内置，新格式，作为基础）> command.json（缓存，旧格式兼容）
-
-        合并时用 _merge_node 递归合并，保留 subcommands 的 dict 嵌套结构，
-        不会再出现「dict 被 set() 压成 list」的问题。
+        合并时用 _merge_node 递归合并，保留 subcommands 的 dict 嵌套结构。
         """
-        # 1. 以 cmd.json 为基础
         try:
             commands = self._load_builtin_commands()
         except Exception as e:
             logger.debug(f"加载内置命令失败: {e}")
             commands = {}
 
-        # 2. 把 command.json 的增量合并进来
         if os.path.exists(COMMAND_JSON_PATH):
             try:
                 with open(COMMAND_JSON_PATH, 'r', encoding='utf-8') as f:
@@ -379,14 +392,10 @@ class AsyncManScanner:
                     if not isinstance(cmd, str):
                         continue
                     if cmd in commands:
-                        # 递归合并：cmd.json 里已有的结构优先保留，
-                        # command.json 只贡献新增的 options / 类型提示
                         commands[cmd] = _merge_node(commands[cmd], info)
                     else:
-                        # 只存在于缓存里的命令（man 页扫出来的），原样保留
                         commands[cmd] = info
         else:
-            # 首次运行：把内置命令写入缓存
             if commands:
                 try:
                     self._save_commands(commands)
@@ -410,30 +419,45 @@ class AsyncManScanner:
                     pass
 
     def _build_man_index(self) -> Dict[str, List[Path]]:
+        """建立 man 页索引，支持 macOS Homebrew 的 opt/<pkg>/share/man 结构。"""
         index: Dict[str, List[Path]] = {}
         seen: Set[Tuple[str, str]] = set()
+
+        def _add_man_dir(man_dir: str):
+            if not os.path.exists(man_dir):
+                return
+            for section in self.config.man_sections:
+                man_section_dir = os.path.join(man_dir, f"man{section}")
+                if not os.path.exists(man_section_dir):
+                    continue
+                try:
+                    for file in os.listdir(man_section_dir):
+                        if '.' not in file:
+                            continue
+                        base = file.split('.', 1)[0]
+                        if not base:
+                            continue
+                        key = (base, man_section_dir)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        index.setdefault(base, []).append(Path(man_section_dir) / file)
+                except (PermissionError, OSError):
+                    continue
+
         try:
             for man_dir in self.config.man_dirs:
-                if not os.path.exists(man_dir):
-                    continue
-                for section in self.config.man_sections:
-                    man_section_dir = os.path.join(man_dir, f"man{section}")
-                    if not os.path.exists(man_section_dir):
-                        continue
+                # macOS Homebrew：展开 /opt/homebrew/opt/*/share/man 与 /usr/local/opt/*/share/man
+                if man_dir.endswith('/opt') and os.path.isdir(man_dir):
                     try:
-                        for file in os.listdir(man_section_dir):
-                            if '.' not in file:
-                                continue
-                            base = file.split('.', 1)[0]
-                            if not base:
-                                continue
-                            key = (base, man_section_dir)
-                            if key in seen:
-                                continue
-                            seen.add(key)
-                            index.setdefault(base, []).append(Path(man_section_dir) / file)
+                        for pkg in os.listdir(man_dir):
+                            pkg_man = os.path.join(man_dir, pkg, "share", "man")
+                            if os.path.isdir(pkg_man):
+                                _add_man_dir(pkg_man)
                     except (PermissionError, OSError):
-                        continue
+                        pass
+                else:
+                    _add_man_dir(man_dir)
         except Exception as e:
             logger.debug(f"建立手册页索引失败: {e}")
         return index
@@ -511,23 +535,50 @@ class AsyncManScanner:
         return sorted(options)
 
     def get_all_commands(self) -> List[str]:
+        """扫描所有可用命令。
+
+        POSIX：PATH 里具有 X_OK 的文件 + man 目录里的命令
+        Windows：PATH 里按 PATHEXT 匹配的可执行文件（去掉扩展名作为命令名）
+        macOS：额外扫描 /opt/homebrew/bin 与 /usr/local/bin（PATH 未覆盖时）
+        """
         commands = set()
         try:
             path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+
+            if os.name == 'nt':
+                pathext = os.environ.get(
+                    "PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.PS1"
+                ).split(";")
+                pathext_upper = {e.upper() for e in pathext if e}
+            else:
+                pathext_upper = set()
+
             for path_dir in path_dirs:
-                if not os.path.exists(path_dir):
+                if not path_dir or not os.path.exists(path_dir):
                     continue
                 try:
                     for item in os.listdir(path_dir):
                         item_path = os.path.join(path_dir, item)
-                        if os.path.isfile(item_path) and os.access(item_path, os.X_OK):
-                            if item and (item[0].islower() or item[0].isalpha()):
-                                commands.add(item)
+                        if not os.path.isfile(item_path):
+                            continue
+
+                        if os.name == 'nt':
+                            _, ext = os.path.splitext(item)
+                            if ext.upper() not in pathext_upper:
+                                continue
+                            base = os.path.splitext(item)[0]
+                            if base and (base[0].islower() or base[0].isalpha()):
+                                commands.add(base)
+                        else:
+                            if os.access(item_path, os.X_OK):
+                                if item and (item[0].islower() or item[0].isalpha()):
+                                    commands.add(item)
                 except (PermissionError, OSError):
                     continue
 
+            # man 目录（仅 POSIX 有；跳过 opt 展开目录）
             for man_dir in self.config.man_dirs:
-                if not os.path.exists(man_dir):
+                if man_dir.endswith('/opt') or not os.path.isdir(man_dir):
                     continue
                 for section in self.config.man_sections:
                     man_section_dir = os.path.join(man_dir, f"man{section}")
@@ -602,9 +653,7 @@ class AsyncManScanner:
                 try:
                     options = self.extract_options_quick(cmd)
 
-                    # ── 关键：不要碰 subcommands 结构 ──
                     if cmd not in existing:
-                        # 新命令：只放 options，不加 subcommands 字段
                         existing[cmd] = {"options": []}
 
                     node = existing[cmd]
@@ -617,7 +666,6 @@ class AsyncManScanner:
                         existing_opts.update(options)
                         node["options"] = sorted(existing_opts)
 
-                    # 补类型提示（只在没有 arguments/type 时）
                     self._apply_type_hint(node, cmd)
 
                 except Exception as e:
@@ -633,7 +681,6 @@ class AsyncManScanner:
                 if (i + 1) % 50 == 0:
                     time.sleep(0)
 
-            # 最终落盘
             self._current_progress["scanned"] = list(existing.keys())
             self._current_progress["last_index"] = len(to_scan)
             self._save_commands(existing)

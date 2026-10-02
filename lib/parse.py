@@ -59,12 +59,86 @@ def restore_paths_in_text(text: str) -> str:
 _FAST_SPLIT_SKIP_CHARS = frozenset({'"', "'", '\\', '|', '&', ';', '<', '>', '$', '(', ')', '{', '}', '`', '!'})
 
 
+# ── shell 类型归一化（输入模块与 PTY 共用同一来源）──
+import os as _os
+# 用户主目录（项目目录在 Linux 下可能只读 → 写配置会 Permission denied）
+_SHELL_TYPE_FILE = _os.path.join(
+    _os.path.expanduser("~"), ".onyx", "shell")
+_KNOWN_SHELL_TYPES = ("bash", "zsh", "fish", "sh", "dash", "ksh", "cmd",
+                      "powershell", "pwsh")
+# 历史遗留：调用方把 detect_system() 的结果当 shell 类型传进来
+_SYSTEM_TO_SHELL = {
+    "termux": "bash", "linux": "bash", "linux/macos": "bash",
+    "speciallinux": "bash", "macos": "bash", "windows": "cmd",
+}
+
+
+def _read_shell_config() -> str:
+    try:
+        with open(_SHELL_TYPE_FILE, "r", encoding="utf-8") as _f:
+            return _f.read().strip()
+    except Exception:
+        return ""
+
+
+def _canon(name: str) -> str:
+    n = _os.path.basename(str(name)).strip().lower()
+    if n.endswith(".exe"):
+        n = n[:-4]
+    return "powershell" if n == "pwsh" else n
+
+
+def get_configured_shell_type() -> str:
+    """当前生效的 shell 类型（bash/zsh/fish/...）。
+
+    优先级：ONYX_SHELL 环境变量 → etc/onyx/shell（`manage shell` 写入）
+    → 检测到的终端类型 → bash。与 exe.get_shell() 共用同一来源，
+    保证「输入模块」与「底层 PTY」用的是同一种 shell。
+    """
+    for _src in (_os.environ.get("ONYX_SHELL"), _read_shell_config()):
+        if not _src:
+            continue
+        _n = _canon(_src)
+        if _n in _KNOWN_SHELL_TYPES:
+            return _n
+    try:
+        from lib.get_terminal_type import get_terminal_type
+        _t = _canon(get_terminal_type() or "")
+        if _t in _KNOWN_SHELL_TYPES:
+            return _t
+    except Exception:
+        pass
+    return "bash"
+
+
+def normalize_shell_type(sys_type) -> str:
+    """把任意「系统类型 / 终端类型 / 空值」归一化为 shell 类型。
+
+    这是 `source` 解析错误的根：调用方长期把 detect_system() 的结果
+    （Termux / Linux/macOS / Windows …）当 shell 类型传进来，parse.py 里
+    所有 `sys_type == 'bash'` 分支都不命中 → bash 内置被当成未知语法。
+    """
+    if not sys_type:
+        return get_configured_shell_type()
+    t = _canon(sys_type)
+    if t in _KNOWN_SHELL_TYPES:
+        return t
+    if t in _SYSTEM_TO_SHELL:
+        return _SYSTEM_TO_SHELL[t]
+    if "termux" in t or "linux" in t or "macos" in t or "darwin" in t:
+        return get_configured_shell_type()
+    if "win" in t:
+        return "cmd"
+    return get_configured_shell_type()
+
+
 def smart_shlex_split(text: str, sys_type: str = 'bash') -> List[str]:
     """
     智能解析命令，正确处理嵌套引号、转义和命令替换 $()
     
     重要：管道符 | 和逻辑操作符 &、;、<、> 等元字符应该作为独立 token
     """
+    sys_type = normalize_shell_type(sys_type)
     if not text or not text.strip():
         return []
     
@@ -263,6 +337,7 @@ def check_quotes_balanced(text: str, sys_type: str = 'bash') -> Tuple[bool, str]
     - powershell: 单引号 ' 和双引号 "（单引号内不转义）
     - cmd: 只有双引号 "（cmd 没有单引号概念）
     """
+    sys_type = normalize_shell_type(sys_type)
     if not text:
         return True, ""
     
@@ -385,6 +460,7 @@ def expand_variables(text: str, os_environ: dict, globals_dict: dict,
     - cmd: %VAR% 格式保持不变
     - Unix/PowerShell: $VAR, ${VAR} 格式保持不变
     """
+    sys_type = normalize_shell_type(sys_type)
     if not text:
         return text
     
@@ -402,6 +478,7 @@ def expand_tilde(text: str, user_home_dir: str, sys_type: str = 'bash') -> str:
     - PowerShell 支持 ~ 但仅在路径上下文中
     - 跳过引号内的 ~
     """
+    sys_type = normalize_shell_type(sys_type)
     if not text or '~' not in text:
         return text
     
@@ -436,6 +513,7 @@ def expand_braces(text: str, sys_type: str = 'bash') -> str:
     - PowerShell 的 {} 用于脚本块，不是路径扩展
     - 跳过引号内的花括号
     """
+    sys_type = normalize_shell_type(sys_type)
     if not text or '{' not in text:
         return text
     
@@ -484,6 +562,7 @@ def expand_wildcards(text: str, get_virtual_path_func=None, sys_type: str = 'bas
     - PowerShell 的 [] 用于数组，但在路径上下文中仍是通配符
     - 带引号的通配符字符串不展开
     """
+    sys_type = normalize_shell_type(sys_type)
     if not text or ('*' not in text and '?' not in text and '[' not in text):
         return text
 
@@ -582,6 +661,7 @@ def remove_comments(text: str, sys_type: str = 'bash') -> str:
     
     注意：here-doc 内容中的 # 不应该被当作注释
     """
+    sys_type = normalize_shell_type(sys_type)
     if not text:
         return text
     
@@ -656,10 +736,14 @@ def remove_comments(text: str, sys_type: str = 'bash') -> str:
                     i += 1
                     continue
                 if ch == '#' and not in_single and not in_double:
-                    # 检查是否在 here-doc 中
-                    if not is_in_heredoc_content(text, i):
-                        # 遇到注释，直接结束这一行
-                        break
+                    # bash：`#` 只有在「词首」（行首或前面是空白）才是注释，
+                    # `a#b` 里的 # 是普通字符 → 必须看前一个已处理字符。
+                    _prev = new_line[-1] if new_line else ''
+                    if _prev == '' or _prev.isspace():
+                        # 检查是否在 here-doc 中
+                        if not is_in_heredoc_content(text, i):
+                            # 遇到注释，直接结束这一行
+                            break
                 new_line.append(ch)
                 i += 1
             line = ''.join(new_line).rstrip()
@@ -1028,7 +1112,16 @@ def handle_executable_path(command_token: str, resolve_path_func=None,
                     return _build_shebang_cmd(_shebang, resolved, has_quotes)
                 # ② 没有 shebang → 由 Onyx 自己执行（source 语义，走完整安全检查）
                 if virtual_root_dir:
-                    cmd_py_path = os.path.join(virtual_root_dir, 'onyx', 'cmd.py')
+                    # 虚拟根可能是项目根，也可能是项目根的父目录 →
+                    # 按存在性探测，避免拼出 <root>/onyx/onyx/cmd.py 这种错路径。
+                    cmd_py_path = None
+                    for _cand in (os.path.join(virtual_root_dir, 'cmd.py'),
+                                  os.path.join(virtual_root_dir, 'onyx', 'cmd.py')):
+                        if os.path.isfile(_cand):
+                            cmd_py_path = _cand
+                            break
+                    if cmd_py_path is None:
+                        cmd_py_path = os.path.join(virtual_root_dir, 'onyx', 'cmd.py')
                     if has_quotes:
                         return f"python {cmd_py_path} -c \"source {stripped_token}\""
                     else:
@@ -1046,6 +1139,7 @@ def handle_executable_path(command_token: str, resolve_path_func=None,
 
 def extract_all_argument_paths(cmd_str: str, resolve_path_func=None, sys_type: str = 'bash') -> List[str]:
     """从命令字符串中提取所有参数路径（非选项参数）"""
+    sys_type = normalize_shell_type(sys_type)
     paths = []
     
     if not cmd_str:
@@ -1090,6 +1184,7 @@ def has_pipeline(text: str, sys_type: str = 'bash') -> bool:
     - cmd: | 也是管道符
     - PowerShell: | 是管道符
     """
+    sys_type = normalize_shell_type(sys_type)
     if not text or '|' not in text:
         return False
     
@@ -1115,6 +1210,11 @@ def has_pipeline(text: str, sys_type: str = 'bash') -> bool:
         elif char == '"' and not in_single:
             in_double = not in_double
         elif char == '|' and not in_single and not in_double:
+            # `||` 是逻辑或，不是管道；`|&` 是管道+stderr，仍算管道。
+            if i + 1 < len(text) and text[i + 1] == '|':
+                continue
+            if i > 0 and text[i - 1] == '|':
+                continue
             return True
     
     return False
@@ -1129,6 +1229,7 @@ def has_logical_operators(text: str, sys_type: str = 'bash') -> bool:
     - cmd: &&, ||
     - PowerShell: -and, -or（不区分大小写），也兼容 &&, ||（PowerShell 7+）
     """
+    sys_type = normalize_shell_type(sys_type)
     if not text:
         return False
     
@@ -1185,6 +1286,7 @@ def is_shell_logic_structure(cmd_str: str, sys_type: str = 'bash') -> bool:
     Returns:
         是否为多行逻辑结构
     """
+    sys_type = normalize_shell_type(sys_type)
     if not cmd_str or not cmd_str.strip():
         return False
     
@@ -1206,6 +1308,10 @@ def is_shell_logic_structure(cmd_str: str, sys_type: str = 'bash') -> bool:
         if stripped.startswith('(') or stripped.startswith('{'):
             return True
         if '\n{' in stripped or '\n(' in stripped:
+            return True
+        # 多行函数定义 / 花括号块：`f() {` … `}`（`{` 在行尾且有配对 `}`）
+        # 注意排除 `echo {1..3}` 这类展开（`{` 不在行尾）。
+        if re.search(r'\{\s*$', cmd_str, re.M) and '}' in cmd_str:
             return True
         
     elif sys_type == 'cmd':
@@ -1284,6 +1390,7 @@ def _is_single_line_block(cmd_str: str, sys_type: str = 'bash') -> bool:
     Returns:
         如果是单行花括号块返回 True
     """
+    sys_type = normalize_shell_type(sys_type)
     if sys_type in ('cmd', 'powershell'):
         return False
     
@@ -1305,6 +1412,7 @@ def _is_subshell(cmd_str: str, sys_type: str = 'bash') -> bool:
     Returns:
         如果是子shell返回 True
     """
+    sys_type = normalize_shell_type(sys_type)
     if sys_type in ('cmd',):
         return False
     
@@ -1317,6 +1425,7 @@ def _is_subshell(cmd_str: str, sys_type: str = 'bash') -> bool:
 
 def extract_sub_commands_from_pipeline(cmd_str: str, sys_type: str = 'bash') -> List[str]:
     """从管道命令中提取子命令列表"""
+    sys_type = normalize_shell_type(sys_type)
     if not cmd_str:
         return []
     
@@ -1388,6 +1497,7 @@ def split_by_semicolon(cmd_str: str, sys_type: str = 'bash') -> List[str]:
     - cmd 中 ; 不是标准分隔符，但可以作为命令分隔符
     - PowerShell 中 ; 是语句分隔符
     """
+    sys_type = normalize_shell_type(sys_type)
     if not cmd_str:
         return []
     
@@ -1462,6 +1572,7 @@ def split_by_logical_operators(cmd_str: str, sys_type: str = 'bash') -> List[Tup
     返回 [(子命令, 操作符), ...]
     最后一项的操作符为空字符串
     """
+    sys_type = normalize_shell_type(sys_type)
     if not cmd_str:
         return []
     
@@ -1580,6 +1691,7 @@ def parse_redirects_from_command(cmd_str: str, sys_type: str = 'bash') -> Tuple[
     
     注意：不修改文件路径的引号，保持原样
     """
+    sys_type = normalize_shell_type(sys_type)
     redirect_config = {
         'stdout': None,
         'stderr': None,
@@ -1754,6 +1866,7 @@ def parse_redirects_from_command(cmd_str: str, sys_type: str = 'bash') -> Tuple[
 
 def extract_all_paths_from_pipeline(pipeline_cmd_str: str, resolve_path_func=None, sys_type: str = 'bash') -> List[str]:
     """从管道命令中提取所有子命令的所有路径"""
+    sys_type = normalize_shell_type(sys_type)
     all_paths = []
     
     sub_commands = extract_sub_commands_from_pipeline(pipeline_cmd_str, sys_type)
@@ -1779,6 +1892,7 @@ def resolve_alias_in_cmd(cmd_str: str, alias_cache: Dict, log_info_func=None, re
     
     修复：避免使用 shlex.join 转义管道符等 shell 元字符，改为直接拼接原始参数。
     """
+    sys_type = normalize_shell_type(sys_type)
     if not cmd_str or not alias_cache:
         return cmd_str
     
@@ -1818,6 +1932,7 @@ def has_redirect(cmd_str: str, sys_type: str = 'bash') -> bool:
     - cmd: >, >>, <
     - PowerShell: >, >>, <, 2>, 2>>, *>, 3>, 4>, 5>, 6>
     """
+    sys_type = normalize_shell_type(sys_type)
     if not cmd_str:
         return False
     
@@ -1862,6 +1977,7 @@ def has_here_doc(cmd_str: str, sys_type: str = 'bash') -> bool:
     
     注意：cmd 和 PowerShell 不支持 Here Document
     """
+    sys_type = normalize_shell_type(sys_type)
     if not cmd_str or '<<' not in cmd_str:
         return False
     
@@ -1903,6 +2019,7 @@ def check_advanced_syntax(cmd_str: str, redirect_config: Dict = None, sys_type: 
     检查命令是否使用了高级语法
     返回包含各种高级语法检测结果的字典
     """
+    sys_type = normalize_shell_type(sys_type)
     result = {
         'has_pipeline': has_pipeline(cmd_str, sys_type),
         'has_redirect': False,
@@ -1937,6 +2054,7 @@ def expand_command_with_path_tracking(cmd: str, get_virtual_path_func=None, sys_
     展开命令并追踪路径变化
     返回 (展开后的命令, 路径映射字典)
     """
+    sys_type = normalize_shell_type(sys_type)
     clear_path_mapping_cache()
     
     # 执行各种展开操作

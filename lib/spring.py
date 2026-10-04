@@ -2,9 +2,11 @@
 lib/spring.py — Onyx 启动问候引擎
 ====================================
 独立模块，负责：
-  1. 按时段 + 工作日/周末 随机选取问候语
+  1. 按时段 + 工作日/周末 + 节假日 随机选取问候语
   2. 凌晨交互式睡眠确认
   3. 软编码 spring.json 优先，缺失时回退内置话术
+  4. 国际通用节日：中/英场景均提示
+     中国特有节日：仅中文场景提示
 
 用法：
     from lib.spring import show_startup_greeting
@@ -14,6 +16,7 @@ lib/spring.py — Onyx 启动问候引擎
         sys.exit(0)
 
 无网络、无状态、纯本地。
+兼容 Python 3.5+。
 """
 
 import json
@@ -21,6 +24,7 @@ import os
 import random
 import sys
 from datetime import datetime
+from typing import Optional
 
 from lib.terminal.colors import Fore, Style
 
@@ -186,10 +190,14 @@ _NO_RESPONSE_EN = [
 ]
 
 
-
 # ── 内部工具函数 ──────────────────────────────────────
 
-def _get_slot(hour: int) -> str:
+def _fill_time(text, time_str):
+    """安全地替换话术里的 {time} 占位符。"""
+    return text.replace("{time}", time_str)
+
+
+def _get_slot(hour):
     """小时 → 时段 key"""
     if 0 <= hour < 6:
         return "night"
@@ -207,21 +215,66 @@ def _get_slot(hour: int) -> str:
         return "late_evening"
 
 
-def _is_weekend() -> bool:
+def _is_weekend():
     """True = 周六(5) 或 周日(6)"""
     return datetime.now().weekday() >= 5
 
 
-def _pick_greeting(pool: dict, slot: str, time_str: str, is_weekend: bool) -> str:
+def _today_md():
+    """返回当前日期的 'MM-DD' 字符串，用于节日匹配。"""
+    return datetime.now().strftime("%m-%d")
+
+
+def _pick_greeting(pool, slot, time_str, is_weekend):
     """
     从话术池中随机选取一条问候语。
     优先 weekend_{slot}，无对应 key 时回退到 slot。
     """
     if is_weekend:
-        weekend_key = f"weekend_{slot}"
+        weekend_key = "weekend_{}".format(slot)
         if weekend_key in pool and pool[weekend_key]:
-            return random.choice(pool[weekend_key]).format(time=time_str)
-    return random.choice(pool[slot]).format(time=time_str)
+            return _fill_time(random.choice(pool[weekend_key]), time_str)
+    return _fill_time(random.choice(pool[slot]), time_str)
+
+
+def _pick_holiday_greeting(spring, is_chinese, time_str):
+    """
+    若今天是节日，从 spring.json 的 holidays 段取话术。
+      - international : 中/英场景均提示
+      - chinese_only  : 仅中文场景提示（英文场景返回 None）
+
+    Returns:
+        话术字符串，或 None（今天不是节日 / json 未配置对应话术）
+    """
+    if not spring:
+        return None
+    holidays = spring.get("holidays")
+    if not isinstance(holidays, dict):
+        return None
+
+    today = _today_md()
+    lang_key = "chinese" if is_chinese else "english"
+
+    # 1) 国际通用节日（两种语言都提示）
+    intl = holidays.get("international")
+    if isinstance(intl, dict):
+        entry = intl.get(today)
+        if isinstance(entry, dict):
+            pool = entry.get(lang_key)
+            if isinstance(pool, list) and pool:
+                return _fill_time(random.choice(pool), time_str)
+
+    # 2) 中国特有节日（仅中文场景）
+    if is_chinese:
+        cn_only = holidays.get("chinese_only")
+        if isinstance(cn_only, dict):
+            entry = cn_only.get(today)
+            if isinstance(entry, dict):
+                pool = entry.get("chinese")
+                if isinstance(pool, list) and pool:
+                    return _fill_time(random.choice(pool), time_str)
+
+    return None
 
 
 # ── 配置加载（惰性缓存） ──────────────────────────────
@@ -230,7 +283,7 @@ _spring_cache = None
 _spring_loaded = False
 
 
-def _load_spring() -> dict | None:
+def _load_spring():
     """加载 spring.json，惰性缓存。失败返回 None。"""
     global _spring_cache, _spring_loaded
     if _spring_loaded:
@@ -247,7 +300,7 @@ def _load_spring() -> dict | None:
 
 # ── 主入口 ────────────────────────────────────────────
 
-def show_startup_greeting(language: str = "chinese") -> bool:
+def show_startup_greeting(language="chinese"):
     """
     显示启动时段问候 + 凌晨交互式睡眠确认。
 
@@ -258,12 +311,13 @@ def show_startup_greeting(language: str = "chinese") -> bool:
         True  → 用户选择睡觉，调用方应 sys.exit(0)
         False → 正常继续
     """
-    # 检查 spring-mode 开关（默认 true）
+    # spring-mode 开关（默认开启；文件内容为 false/0/no/off/disable 时禁用）
     if os.path.exists(_SPRING_MODE_PATH):
         try:
             with open(_SPRING_MODE_PATH, "r") as f:
-                if f.read().strip().lower() == "false":
-                    return False
+                mode_val = f.read().strip().lower()
+            if mode_val in ("false", "0", "no", "off", "disable", "disabled"):
+                return False
         except Exception:
             pass
 
@@ -272,30 +326,43 @@ def show_startup_greeting(language: str = "chinese") -> bool:
     time_str = now.strftime("%H:%M")
     slot = _get_slot(current_hour)
     weekend = _is_weekend()
-    is_chinese = language == "chinese"
+    is_chinese = (language == "chinese")
 
-    # ── 选消息 ──
     spring = _load_spring()
-    try:
-        if spring:
-            lang_key = "chinese" if is_chinese else "english"
-            greetings = spring.get("greetings", {}).get(lang_key, {})
-            if greetings and slot in greetings and greetings[slot]:
-                msg = _pick_greeting(greetings, slot, time_str, weekend)
+
+    # ── 选消息：节日话术优先，否则走时段话术 ──
+    msg = _pick_holiday_greeting(spring, is_chinese, time_str)
+
+    if msg is None:
+        try:
+            if spring:
+                lang_key = "chinese" if is_chinese else "english"
+                greetings = spring.get("greetings", {}).get(lang_key, {})
+                if greetings and slot in greetings and greetings[slot]:
+                    msg = _pick_greeting(greetings, slot, time_str, weekend)
+                else:
+                    raise ValueError(
+                        "spring.json missing greetings.{}.{}".format(lang_key, slot)
+                    )
             else:
-                raise ValueError(f"spring.json missing greetings.{lang_key}.{slot}")
-        else:
-            raise ValueError("spring.json not available")
-    except Exception:
-        fallback = _FALLBACK_CN if is_chinese else _FALLBACK_EN
-        msg = random.choice(fallback[slot]).format(time=time_str)
+                raise ValueError("spring.json not available")
+        except Exception:
+            fallback = _FALLBACK_CN if is_chinese else _FALLBACK_EN
+            msg = _fill_time(random.choice(fallback[slot]), time_str)
 
     print()
     print(Fore.YELLOW + msg + Style.RESET_ALL)
     print()
 
-    # ── 凌晨交互 ──
+    # ── 凌晨交互（仅 night 时段） ──
     if slot != "night":
+        return False
+
+    # 非交互终端（管道 / 重定向）不阻塞
+    try:
+        if not sys.stdin.isatty():
+            return False
+    except Exception:
         return False
 
     prompt = _SLEEP_PROMPT["chinese" if is_chinese else "english"]
@@ -330,10 +397,20 @@ if __name__ == "__main__":
     print("lib/spring.py 自测")
     print("=" * 50)
     now = datetime.now()
-    print(f"当前时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"时段: {_get_slot(now.hour)}")
-    print(f"周末: {_is_weekend()}")
-    print(f"spring.json 状态: {'已加载' if _load_spring() else '缺失，使用回退'}")
+    print("当前时间: {}".format(now.strftime("%Y-%m-%d %H:%M:%S")))
+    print("时段: {}".format(_get_slot(now.hour)))
+    print("周末: {}".format(_is_weekend()))
+    print("日期 key: {}".format(_today_md()))
+
+    spring = _load_spring()
+    print("spring.json 状态: {}".format("已加载" if spring else "缺失，使用回退"))
+
+    if spring:
+        _t = now.strftime("%H:%M")
+        msg_cn = _pick_holiday_greeting(spring, True, _t)
+        msg_en = _pick_holiday_greeting(spring, False, _t)
+        print("节日话术（中文场景）: {}".format(msg_cn if msg_cn else "（今天不是节日）"))
+        print("节日话术（英文场景）: {}".format(msg_en if msg_en else "（今天不是节日）"))
 
     print("\n── 中文问候 ──")
     show_startup_greeting("chinese")

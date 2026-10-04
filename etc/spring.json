@@ -1,5 +1,5 @@
 {
-    "_comment": "Onyx 启动问候语 — 按时段+周末随机选取。{time} 替换为当前时间。",
+    "_comment": "Onyx 启动问候语 — 按时段+周末随机选取，节日话术优先。{time} 替换为当前时间。",
     "greetings": {
         "chinese": {
             "night": [
@@ -45,20 +45,6 @@
                 "☀️ {time}。呼吸，微笑，然后开工。你已经准备好了。",
                 "☀️ 清晨 {time}，城市刚醒，你的可能性也刚刚打开。",
                 "☀️ {time}。生命中的每一天都是限量版，今天也不例外。",
-                "☀️ 早上好 {time}。不管昨天怎样，今天从头开始。"
-            ],
-            "morning": [
-                "☀️ 早上 {time}！喝杯水，伸个懒腰，今天会有好事发生。",
-                "☀️ 早安！{time}，太阳都起了——哦你也起来了，真棒！",
-                "☀️ {time} 的清晨，空气最新鲜。深呼吸，今天你做主。",
-                "☀️ 早上好！{time}，今天的 bug 已经在瑟瑟发抖了，冲！",
-                "☀️ 早安 {time}～ 每天都是重新开始的机会。",
-                "☀️ {time}，新的一天。先喝杯水再喝咖啡，身体会感谢你的。",
-                "☀️ 早晨 {time}，阳光从窗户洒进来——别辜负这么好的光。",
-                "☀️ 早安！{time}。今天先做最重要的一件事，其他都是赚的。",
-                "☀️ {time}。呼吸，微笑，然后开工。你已经准备好了。",
-                "☀️ 清晨 {time}，城市刚醒，你的可能性也刚刚打开。",
-                "☀️ {time}。生命中的每一天都是限量版，今天也不例外。",
                 "☀️ 早上好 {time}。不管昨天怎样，今天从头开始。",
                 "☀️ {time}。走到窗边看看天空——今天的颜色独一无二，像你。",
                 "☀️ 早安！{time}。闹钟响了，但梦想也响了。选后者。",
@@ -78,18 +64,6 @@
                 "☀️ 周末 {time}。被窝到沙发的距离，就是今天最远的通勤。",
                 "☀️ 早安 {time}。周末的意义：早餐可以吃到十点，没人催你。",
                 "☀️ {time} 了，还躺着？没关系，周末的早晨就是用来挥霍的。"
-            ],
-            "forenoon": [
-                "💼 上午 {time}，大脑最清醒的时段。先啃最硬的骨头。",
-                "💼 {time}，黄金两小时。关掉通知，进入心流。",
-                "💼 上午好！{time}。番茄钟走起？25 分钟专注 + 5 分钟休息。",
-                "💼 {time} — 别让早上的时间悄悄溜走，完成一件事就是胜利。",
-                "💼 上午 {time}，精力满格。做最难的事，趁现在。",
-                "💼 {time}，上午的每一分钟都是高利贷——投资好了，下午躺着收利息。",
-                "💼 上午 {time}。列三个 today's top 3，做完打勾。那种感觉你懂的。",
-                "💼 {time}。先吃掉那只最丑的青蛙，一天就顺了。",
-                "💼 上午好！{time}，外面的世界很吵，但你只需要专注 25 分钟。",
-                "💼 {time} — 趁大脑还新鲜，别让它被邮件和消息偷走。"
             ],
             "forenoon": [
                 "💼 上午 {time}，大脑最清醒的时段。先啃最硬的骨头。",
@@ -128,18 +102,6 @@
                 "🍜 {time}，吃饱不是目的，吃好才是。对自己好一点，从午饭开始。",
                 "🍜 午安～ {time}。下午的效率 = 午饭质量 × 午休质量。都别偷工减料。",
                 "🍜 {time}，站起来看看窗外。世界很大，不要只盯着屏幕。",
-                "🍜 中午 {time}。关掉屏幕十分钟专心吃饭——这叫正念，不叫偷懒。"
-            ],
-            "noon": [
-                "🍜 中午 {time}！放下键盘，离开屏幕。好好吃一顿。",
-                "🍜 {time} 午饭时间～ 别再用泡面糊弄自己了，你值得一顿正经饭。",
-                "🍜 午安！{time}，闭眼 15 分钟比硬撑两小时管用得多。试试？",
-                "🍜 中午 {time}，吃饱晒晒太阳，补充维生素 D，心情会好很多。",
-                "🍜 {time} — 半天过去了，起来走走。久坐比你想的更伤身体。",
-                "🍜 中午 {time}！离开椅子走五分钟。你的脊椎会感谢你的。",
-                "🍜 {time}，吃饱不是目的，吃好才是。对自己好一点，从午饭开始。",
-                "🍜 午安～ {time}。下午的效率 = 午饭质量 × 午休质量。都别偷工减料。",
-                "🍜 {time}，站起来看看窗外。世界很大，不要只盯着屏幕。",
                 "🍜 中午 {time}。关掉屏幕十分钟专心吃饭——这叫正念，不叫偷懒。",
                 "🍜 {time}。午饭的香气是最好的通知——该暂停了。",
                 "🍜 中午 {time}。记住：没有哪行代码比你的胃重要。先吃饭。",
@@ -156,18 +118,6 @@
                 "🍜 周末 {time}。午饭后来一杯手冲咖啡，慢慢品——这才叫生活。",
                 "🍜 {time}。周末中午的厨房是最好的 IDE，创造出来的都是美味。",
                 "🍜 午安 {time}。周末午饭不用赶，慢慢吃，然后慢慢睡个午觉。"
-            ],
-            "afternoon": [
-                "🍵 下午 {time}，咖啡因退潮的时候最容易犯困。站起来走一圈。",
-                "🍵 {time} 下午了，坚持住！你今天已经比昨天更厉害了。",
-                "🍵 下午好！{time}，还剩最后一段路。做完奖励自己一杯奶茶！",
-                "🍵 {time} — 午后低谷是正常的，别自责。小憩片刻，重新出发。",
-                "🍵 下午 {time}，听首喜欢的歌换换脑子，效率反而会回来。",
-                "🍵 {time}，下午的能量像手机电量——低于 20% 就该充电了。",
-                "🍵 下午 {time}，回头看，你已经比早上多走了很远了。",
-                "🍵 {time} — 脑子像浆糊就是该休息的信号。散步五分钟，效果惊人。",
-                "🍵 下午好！{time}。做完手头这件事，今天就功德圆满了。",
-                "🍵 {time}，日光开始变温柔了，你也是。下午加油，但别逼自己太紧。"
             ],
             "afternoon": [
                 "🍵 下午 {time}，咖啡因退潮的时候最容易犯困。站起来走一圈。",
@@ -206,18 +156,6 @@
                 "🌆 傍晚 {time}，天色渐暗，从打工人模式切换到我自己模式。",
                 "🌆 {time}。今天不管是顺是挫，都翻篇了。晚上是用来治愈的。",
                 "🌆 傍晚 {time}，一天辛苦了。记得抬头看天空——晚霞是免费的奖励。",
-                "🌆 {time}。最后检查一下：今天有没有对自己说一句做得好？"
-            ],
-            "evening": [
-                "🌆 傍晚 {time}，收工！今天的工作到此为止，剩下的明天再说。",
-                "🌆 {time}，天边的晚霞提醒你：工作不是全部，生活也是。",
-                "🌆 傍晚好！{time}，记得吃晚饭。不要一边看屏幕一边吃。",
-                "🌆 {time} — 一天结束了，想想今天做成了什么，哪怕很小也值得肯定。",
-                "🌆 傍晚 {time}，放下工作，陪陪家人或自己，这才是真正的生活。",
-                "🌆 {time}，下班！今天你已经做了你能做的事。给自己一点掌声。",
-                "🌆 傍晚 {time}，天色渐暗，从打工人模式切换到我自己模式。",
-                "🌆 {time}。今天不管是顺是挫，都翻篇了。晚上是用来治愈的。",
-                "🌆 傍晚 {time}，一天辛苦了。记得抬头看天空——晚霞是免费的奖励。",
                 "🌆 {time}。最后检查一下：今天有没有对自己说一句做得好？",
                 "🌆 {time}。关掉工作相关的所有通知。从现在起，你是自由的。",
                 "🌆 傍晚 {time}，路灯亮起来的时候，就是回家的信号。不管在哪。",
@@ -234,18 +172,6 @@
                 "🌆 周末 {time}。夕阳把天空染成橘子色，这是今天最后的礼物。",
                 "🌆 {time}。周末晚餐慢慢做慢慢吃，这是对一周辛苦的最高敬意。",
                 "🌆 傍晚好 {time}。周末夜晚的每一分钟都值得被浪费在美好的事情上。"
-            ],
-            "late_evening": [
-                "🌃 晚上 {time}，该收尾了。屏幕蓝光干扰褪黑素，提前放下手机吧。",
-                "🌃 {time}，安静的夜晚最适合复盘和阅读。一本书胜过刷一小时短视频。",
-                "🌃 {time}，洗个热水澡听点轻音乐，让身体知道该睡了。",
-                "🌃 晚上 {time} — 今天无论过得怎样，都翻篇了。明天是全新的。",
-                "🌃 {time}，睡前别想太多。你已经做得够好了，安心休息吧。",
-                "🌃 {time}。今晚给自己仪式感：放下手机，点个蜡烛，写三行日记。",
-                "🌃 晚上 {time}，世界安静下来了。别把安静浪费在焦虑上。深呼吸。",
-                "🌃 {time}，热水澡 + 一本书 = 最好的安眠药。真的有效。",
-                "🌃 {time} — 你今天的努力，已经超过了昨天的自己。安心睡吧。",
-                "🌃 晚上 {time}，脑子还在转就写下来。清空思绪才能睡个好觉。"
             ],
             "late_evening": [
                 "🌃 晚上 {time}，该收尾了。屏幕蓝光干扰褪黑素，提前放下手机吧。",
@@ -322,20 +248,6 @@
                 "☀️ Good morning! {time}. Pick your top 3. The rest is bonus.",
                 "☀️ {time} AM. The world is waking up, and so are you. Beautiful sync.",
                 "☀️ {time}. Every day is a limited edition. Today is no exception.",
-                "☀️ Morning at {time}. Whatever happened yesterday — today starts fresh."
-            ],
-            "morning": [
-                "☀️ Good morning! {time} — fresh day, fresh mind. Make one thing happen.",
-                "☀️ {time}! Grab water before coffee. Your body fasted for 8 hours.",
-                "☀️ Morning at {time}. The hardest part (getting up) is done. Smooth sailing!",
-                "☀️ Rise and shine! {time} — today's bugs don't stand a chance.",
-                "☀️ Good morning! {time}. Every sunrise is a second chance. Use it well.",
-                "☀️ {time} AM. Deep breath. You're here, you're ready. Let's do this.",
-                "☀️ Morning at {time} — the sun came up just to see you succeed.",
-                "☀️ {time}! Water first, coffee second. Trust the process.",
-                "☀️ Good morning! {time}. Pick your top 3. The rest is bonus.",
-                "☀️ {time} AM. The world is waking up, and so are you. Beautiful sync.",
-                "☀️ {time}. Every day is a limited edition. Today is no exception.",
                 "☀️ Morning at {time}. Whatever happened yesterday — today starts fresh.",
                 "☀️ {time}. Step outside for one minute. That morning air is nature's coffee.",
                 "☀️ Good morning! {time}. The birds are up. They're cheering for you.",
@@ -355,18 +267,6 @@
                 "☀️ Weekend {time}. The distance from bed to couch — today's only commute.",
                 "☀️ Morning {time}. Weekend breakfast can last till ten. No one's counting.",
                 "☀️ {time} — still in bed? Good. Weekend mornings are made for lingering."
-            ],
-            "forenoon": [
-                "💼 {time} — peak brain hours. Do the hardest thing on your list right now.",
-                "💼 {time} AM. Deep work time. Silence notifications, headphones on, go.",
-                "💼 Morning at {time} — your future self thanks you for the next 2 hours.",
-                "💼 {time}. Pick ONE thing. Finish it. That's already a win.",
-                "💼 {time} — the world is full of distractions. Be the one who focuses.",
-                "💼 {time}. Your brain is at 100%. Don't waste that on email.",
-                "💼 {time} AM. Eat the frog. You know the one. Do it now.",
-                "💼 Morning at {time} — 2 hours of deep work beats 6 hours of scattered effort.",
-                "💼 {time}. Put your phone in another room. See what happens.",
-                "💼 {time} — the morning is a blank page. Write something worth reading."
             ],
             "forenoon": [
                 "💼 {time} — peak brain hours. Do the hardest thing on your list right now.",
@@ -503,6 +403,204 @@
                 "🌃 {time}. The last cup of tea this weekend. A toast to days well spent. Good night.",
                 "🌃 Evening {time}. The weekend ends, but you're recharged. Monday — bring it on."
             ]
+        }
+    },
+    "holidays": {
+        "_comment": "国际通用节日：中英场景均提示。中国特有节日：仅中文场景提示。key 格式 MM-DD。农历节日（春节/中秋等）与浮动节日（感恩节/母亲节）暂未实现，如需使用可自行换算为 MM-DD 后加入。",
+
+        "international": {
+            "01-01": {
+                "chinese": [
+                    "🎉 元旦快乐！{time} —— 新年的第一缕阳光属于你。新年新目标，慢慢来。",
+                    "🎊 {time}，新的一年开始了。去年的遗憾翻篇，今年的故事刚写第一行。",
+                    "🎉 元旦到！{time} 打个卡——今年要对自己更好一点。",
+                    "🎆 {time}。愿新的一年，你所有的热爱都有回响。"
+                ],
+                "english": [
+                    "🎉 Happy New Year! {time} — the first sunrise of the year belongs to you.",
+                    "🎊 {time}. A new year, a blank page. Write something worth reading.",
+                    "🎉 New Year's Day, {time}. Here's to a better version of you.",
+                    "🎆 {time}. May every passion of yours be answered this year."
+                ]
+            },
+            "02-14": {
+                "chinese": [
+                    "💝 情人节快乐！{time} —— 有伴的抱紧，单身的也别气馁，爱自己才是终身的浪漫。",
+                    "💕 {time}。今天记得对喜欢的人说句话——或者，好好爱自己。",
+                    "💐 {time}，情人节。礼物不在贵，在有人想得到。"
+                ],
+                "english": [
+                    "💝 Happy Valentine's Day! {time} — send that text. You know who.",
+                    "💕 {time}. Love is in the air — or at least chocolate is. Either way, enjoy.",
+                    "💐 {time}. Valentine's Day. The best gift is being thought of."
+                ]
+            },
+            "03-08": {
+                "chinese": [
+                    "🌸 妇女节快乐！{time} —— 致敬所有女性开发者，你们让世界更好。",
+                    "🌷 {time}。今天是属于她的节日——妈妈、同事、朋友，或你自己。",
+                    "💐 {time}，国际妇女节。愿每一位女性都被世界温柔以待。"
+                ],
+                "english": [
+                    "🌸 Happy International Women's Day! {time} — here's to the women who build, lead, and code.",
+                    "🌷 {time}. Today belongs to her — mother, colleague, friend, or yourself.",
+                    "💐 {time} on International Women's Day. May every woman be treated with the kindness she deserves."
+                ]
+            },
+            "04-01": {
+                "chinese": [
+                    "🤡 愚人节快乐！{time} —— 今天说的话都别当真。除了这句。",
+                    "😂 {time}，愚人节。骗人可以，骗自己就算了。",
+                    "😜 {time}。今天 git log 里最好别出现 revert，不然真的分不清是不是愚人节了。"
+                ],
+                "english": [
+                    "🤡 April Fools'! {time} — don't believe anything today. Except this message.",
+                    "😂 {time} on April 1st. Trust nothing. Especially git log.",
+                    "😜 {time}. If you see a revert in git log today, you'll never know if it was a joke."
+                ]
+            },
+            "04-22": {
+                "chinese": [
+                    "🌍 世界地球日！{time} —— 今天少打印一张纸，多走一段路，也是对地球的温柔。",
+                    "🌱 {time}，地球日。为这颗蓝色星球做件小事吧，它一直在为我们做大事。",
+                    "♻️ {time}。地球不需要一天的保护，需要 365 天的温柔。"
+                ],
+                "english": [
+                    "🌍 Earth Day! {time} — one less print, one more walk. Small acts, big planet.",
+                    "🌱 {time}. Do one small thing for the blue planet. It's done big things for you.",
+                    "♻️ {time}. Earth doesn't need one day of care. It needs 365."
+                ]
+            },
+            "05-01": {
+                "chinese": [
+                    "🛠️ 劳动节快乐！{time} —— 今天你最大的劳动，是不劳动。",
+                    "🎈 {time}，劳动节。对自己说声辛苦了——今天该休息。",
+                    "🎊 {time}。劳动节真正的意义：为劳动者争取休息。所以，休息。"
+                ],
+                "english": [
+                    "🛠️ Happy Labour Day! {time} — the only task today is to rest.",
+                    "🎈 {time}. Labour Day. Your job today: do nothing. Properly.",
+                    "🎊 {time}. Labour Day means the worker gets a break. Take yours."
+                ]
+            },
+            "06-01": {
+                "chinese": [
+                    "🧸 儿童节快乐！{time} —— 内心那个小孩，今天可以出来玩了。",
+                    "🍭 {time}，儿童节。长大了也是曾经的小孩，买根冰棍不为过。",
+                    "🎈 {time}。儿童节的正确打开方式：做些幼稚但快乐的事。"
+                ],
+                "english": [
+                    "🧸 Happy Children's Day! {time} — let the kid inside come out to play.",
+                    "🍭 {time}. You were a kid once. Buy yourself something silly today.",
+                    "🎈 {time}. The right way to spend Children's Day: do something childish and joyful."
+                ]
+            },
+            "06-05": {
+                "chinese": [
+                    "🌱 世界环境日！{time} —— 少开一小时空调，多种一盆绿植，举手之劳。",
+                    "🌍 {time}，环境日。保护环境不是大词，是关灯、垃圾分类、少点外卖。",
+                    "♻️ {time}。给地球减负，也是给自己减负。"
+                ],
+                "english": [
+                    "🌱 World Environment Day! {time} — one less hour of AC, one more plant. Easy.",
+                    "🌍 {time}. Protecting the environment isn't a slogan — turn off the lights, sort the trash.",
+                    "♻️ {time}. Lighten the Earth's load, and your own too."
+                ]
+            },
+            "10-31": {
+                "chinese": [
+                    "🎃 万圣节！{time} —— trick or treat？不给糖，就调试你的代码。",
+                    "👻 {time}，万圣节。今晚最吓人的是什么？是你的 TODO 列表。",
+                    "🕷️ {time}。万圣夜，鬼怪横行，但你的 bug 才是真·恐怖片。"
+                ],
+                "english": [
+                    "🎃 Halloween! {time} — trick or treat? Don't make me debug your code.",
+                    "👻 {time} on Halloween. The scariest thing tonight? Your TODO list.",
+                    "🕷️ {time}. Ghosts and goblins are out — but your bugs are the real horror show."
+                ]
+            },
+            "12-24": {
+                "chinese": [
+                    "🎄 平安夜！{time} —— 今晚的苹果很甜，你的未来也是。",
+                    "🕯️ {time}。平安夜，愿平安不只今夜，而是余生。",
+                    "🎁 {time}。平安夜快乐——今夜的祝福，请签收。"
+                ],
+                "english": [
+                    "🎄 Christmas Eve! {time} — cozy night, warm drinks, good company.",
+                    "🕯️ {time}. Silent Night. May peace be with you — not just tonight, but always.",
+                    "🎁 {time}. Christmas Eve. Your wish has been delivered. Please sign here."
+                ]
+            },
+            "12-25": {
+                "chinese": [
+                    "🎁 圣诞快乐！{time} —— 愿你收到的不只是礼物，还有一整年的好运。",
+                    "🎄 {time}，圣诞节！圣诞老人的礼物不看愿望大小，只等你开口。",
+                    "⭐ {time}。圣诞快乐——愿你被爱，也懂得爱自己。"
+                ],
+                "english": [
+                    "🎁 Merry Christmas! {time} — may your day be warm, your cocoa hot.",
+                    "🎄 {time}. Merry Christmas. Santa doesn't check your GitHub, so relax.",
+                    "⭐ {time}. Merry Christmas — may you be loved, and love yourself well."
+                ]
+            },
+            "12-31": {
+                "chinese": [
+                    "🥂 跨年夜！{time} —— 今年辛苦了，明年也要好好爱自己。",
+                    "🎆 {time}，年末最后一天。回头看，你走了很远。",
+                    "🌟 {time}。今夜过后，一切归零，也一切重新开始。"
+                ],
+                "english": [
+                    "🥂 New Year's Eve! {time} — this year was hard. Next one, be kind to yourself.",
+                    "🎆 {time}. Here's to closing one chapter and opening the next.",
+                    "🌟 {time}. After tonight, everything resets — and everything begins again."
+                ]
+            }
+        },
+
+        "chinese_only": {
+            "03-12": {
+                "chinese": [
+                    "🌳 植树节！{time} —— 没能种树也没关系，办公桌上养盆多肉也是绿化。",
+                    "🌲 {time}，植树节。今天为地球做件小事，或者去公园看一棵大树。",
+                    "🌱 {time}。种一棵树最好的时间是十年前，其次是现在。"
+                ]
+            },
+            "05-04": {
+                "chinese": [
+                    "🚀 青年节快乐！{time} —— 年龄是数字，热血是态度。今天属于你。",
+                    "✊ {time}，五四青年节。愿你我永远年轻，永远热泪盈眶。",
+                    "🔥 {time}。青春不是一段岁月，是一种状态——今天你正年轻。"
+                ]
+            },
+            "07-01": {
+                "chinese": [
+                    "🚩 建党节！{time} —— 今天属于所有为理想奋斗的人。",
+                    "🎖️ {time}，七一建党节。别忘了今天的安心来之不易。",
+                    "🌟 {time}。历史书上的一页，是他们的一生。"
+                ]
+            },
+            "08-01": {
+                "chinese": [
+                    "🎖️ 建军节！{time} —— 致敬所有守护和平的人。",
+                    "🛡️ {time}，八一建军节。山河无恙，是因为有人在负重前行。",
+                    "🇨🇳 {time}。有一种安全感，叫子弟兵在身边。"
+                ]
+            },
+            "10-01": {
+                "chinese": [
+                    "🇨🇳 国庆节快乐！{time} —— 祝祖国繁荣昌盛，也祝你假期快乐。",
+                    "🎆 {time}，国庆！七天假期，别忘了给自己放个真正的假。",
+                    "🇨🇳 {time}。国庆日，愿山河无恙，人间皆安。",
+                    "🎊 {time}。今天是祖国的生日——也祝每个努力生活的你，节日快乐。"
+                ]
+            },
+            "11-11": {
+                "chinese": [
+                    "🛒 双十一！{time} —— 单身快乐，购物的快乐也快乐。钱包提前哭一下。",
+                    "💸 {time}，双十一。想买的想清楚，不想买的别手滑。",
+                    "🎁 {time}。光棍节 or 购物节——你开心就好。"
+                ]
+            }
         }
     }
 }

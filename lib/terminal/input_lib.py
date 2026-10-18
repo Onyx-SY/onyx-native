@@ -418,14 +418,13 @@ def _clean_display_text(cmd: str, decode_escapes: bool = True) -> str:
     真实换行符；这里不再做 ^J / \\n / \\r / \\t 的替换，避免把用户命令
     （如 `echo ^J done` 或 `printf "a\\nb"`）静默改写成另一条命令。
 
+    也不再做 "^[" → "" 替换（见下方注释）。
+
     decode_escapes 参数保留仅为兼容旧调用点，实际不再生效。
     """
     if not cmd:
         return cmd
-    result = _ANSI_ESCAPE_RE.sub('', cmd)
-    result = result.replace('^[', '')
-    return result
-
+    return _ANSI_ESCAPE_RE.sub('', cmd)
 
 # ── 终端控制序列泄漏过滤 ──
 # CPR 应答（ESC[row;colR 或其残余 row;colR）、鼠标上报、OSC 标题等，可能绕过
@@ -1770,12 +1769,32 @@ def universal_input(
         _use_dropdown = bool(_comp_cfg.get("use_dropdown_menu", True))
         _reserve_space = int(_comp_cfg.get("reserve_space_for_menu", 6)) if _use_dropdown else 0
 
+        # 修复（缓存键完整专项 · P1）：
+        # 原键只覆盖 virtual_root / sys_type / terminal / valid_cmds / ptk / home
+        # / dropdown，完全忽略 cmd_config_path / com_cmd_config_path /
+        # other_terminal_cmd_path。用户切换配置源（如通过 manage 命令切换
+        # com_cmd.json 路径）时会命中旧缓存 → 补全表不更新、命令树不重建、
+        # 新加的命令补不出来。
+        # 这里把三个配置路径 + 各自 mtime 一并纳入缓存键。
+        def _path_sig(p: str) -> tuple:
+            if not p:
+                return ("", 0.0)
+            try:
+                if os.path.exists(p):
+                    return (p, os.path.getmtime(p))
+            except OSError:
+                pass
+            return (p, 0.0)
+        
         _cache_key = (
             virtual_root, sys_type, get_terminal_type(), _vhash, _ptk_mtime,
             user_home_dir,
             repr(sorted((_ptk_config.get("colors") or {}).items())),
             repr(sorted((_ptk_config.get("key_bindings") or {}).items())),
             _use_dropdown,
+            _path_sig(cmd_config_path),
+            _path_sig(actual_com_cmd_path or ""),
+            _path_sig(other_terminal_cmd_path or ""),
         )
 
         _bundle = _SESSION_CACHE.get("bundle")

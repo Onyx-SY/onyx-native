@@ -26,6 +26,12 @@
   · 只在极端环境（老 conhost）下才回退到 os.system('cls')。
 - POSIX（macOS/Linux）保持 clear 命令，保留回滚缓冲。
 - 顶部补 import sys，供 ANSI 分支写 stdout 使用。
+
+修复（静默失败可视化专项 · P2）：
+- _add() 三级回退时，若用户键位配置无效 / 内置默认也无效 / 完全无绑定，
+  在 stderr 打印一次 warning。此前会静默返回 no-op lambda，
+  用户侧表现为「某个功能毫无反应且没有任何提示」，无从排查。
+- 每个 action_key 只警告一次（模块级 _CONFIG_WARNED_KEYS 去重）。
 """
 
 import os
@@ -39,6 +45,9 @@ from typing import Dict, Any
 # True = 补全被锁定（输入时不自动弹出补全菜单）
 # False = 正常模式（输入时自动触发补全）
 _completion_locked = False
+
+# 键位配置警告去重集合（模块级：同一进程只警告一次）
+_CONFIG_WARNED_KEYS: set = set()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -114,24 +123,46 @@ def create_key_bindings(
           3. 无绑定（lambda f: f）—— 至少不让 create_key_bindings 抛异常
 
         返回一个可当装饰器使用的函数，保证所有绑定路径统一走这里。
+
+        修复（静默失败可视化）：每一级回退若发生，打一次 stderr warning。
+        使用模块级 _CONFIG_WARNED_KEYS 去重，避免每次重建 session 刷屏。
         """
         raw = default_keys.get(action_key) or ""
         parts = _split_keys(raw)
         if parts:
             try:
                 return kb.add(*parts)
-            except Exception:
-                pass
+            except Exception as e:
+                if action_key not in _CONFIG_WARNED_KEYS:
+                    _CONFIG_WARNED_KEYS.add(action_key)
+                    print(
+                        f"\033[33m[onyx] 键位配置 '{action_key}={raw}' 无效 "
+                        f"({type(e).__name__}: {e})，已回退内置默认\033[0m",
+                        file=sys.stderr,
+                    )
 
         # 回退内置默认
         fallback_parts = _split_keys(_BUILTIN_DEFAULTS.get(action_key, ""))
         if fallback_parts:
             try:
                 return kb.add(*fallback_parts)
-            except Exception:
-                pass
+            except Exception as e:
+                if action_key not in _CONFIG_WARNED_KEYS:
+                    _CONFIG_WARNED_KEYS.add(action_key)
+                    print(
+                        f"\033[31m[onyx] 内置默认键位 "
+                        f"'{action_key}={_BUILTIN_DEFAULTS[action_key]}' 也无效 "
+                        f"({type(e).__name__}: {e})，该功能不可用\033[0m",
+                        file=sys.stderr,
+                    )
 
         # 最后兜底：什么都不绑，但也不抛异常
+        if action_key not in _CONFIG_WARNED_KEYS:
+            _CONFIG_WARNED_KEYS.add(action_key)
+            print(
+                f"\033[31m[onyx] 键位 '{action_key}' 无任何可用绑定\033[0m",
+                file=sys.stderr,
+            )
         return lambda f: f
 
     # ── 普通上下键：永远遍历全部历史 ──

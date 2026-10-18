@@ -639,13 +639,20 @@ class PathResolver:
     @staticmethod
     def _clamp_to_root(resolved: str, virtual_root: str) -> str:
         """把 resolved 钳制在 virtual_root 之内。
-
+    
         跨平台修复：Windows 文件系统大小写不敏感，
         commonpath 前先 normcase，否则 C:\\Users\\Foo 与 c:\\users\\foo
         会被判为越界，导致路径补全失效。
+    
+        修复（异常兜底 · P1）：
+        原代码在 except 分支里引用局部变量 root，但 root 是在 try 内赋值的——
+        若 os.path.normpath(virtual_root) 本身抛异常（如 virtual_root 为非 str、
+        含 surrogate 等），except 分支会 NameError 并向上冒泡，补全直接崩。
+        现在把 root 提到 try 之前初始化；同时把 TypeError 一并纳入捕获范围。
         """
         if not virtual_root:
             return resolved
+        root = virtual_root          # ← try 之前先初始化，except 分支安全引用
         try:
             root = os.path.normpath(virtual_root)
             resolved_n = os.path.normpath(resolved)
@@ -659,7 +666,7 @@ class PathResolver:
                 common = os.path.commonpath([resolved_n, root])
                 if common != root:
                     return root
-        except (ValueError, OSError):
+        except (ValueError, OSError, TypeError):
             return root
         return resolved_n
 

@@ -272,7 +272,44 @@ class PtyCmdProxy:
         return getattr(sh, "pid", None)
 
     def poll(self):
-        return None      # 命令是否结束由调用方（run_cmd_sync）负责注销
+        """判断 PTY 前台命令是否已结束。
+    
+        返回非 None = 已结束；None = 仍在运行。
+    
+        修复（Ctrl+C 误杀专项 · P2）：
+        旧实现恒返回 None —— interrupt_active_ai_cmds 里
+        `if proc.poll() is not None: continue` 永远为 False，即使命令
+        已经结束，proxy 仍留在注册表里并继续接收信号；若紧接着有另一条
+        命令在跑（shell 已切到新命令），Ctrl+C 转发就会误杀新命令。
+        典型场景：AI 连续执行两条命令，第一条结束时立即按 Ctrl+C，
+        信号被转发到已结束 proxy 的 pid（可能已复用）→ 杀掉无关进程。
+    
+        判据：PTY 前台进程组 == shell 自身进程组时，说明没有子进程
+        占据前台，即命令已退出、shell 已回到提示符。
+        - Unix（有 master_fd）：tcgetpgrp + getpgid 双查
+        - Windows（winpty 无 master_fd）：无 tcgetpgrp，保守视为已结束
+        """
+        sh = self._shell
+        try:
+            fd = getattr(sh, "master_fd", None)
+            if fd is None:
+                # Windows winpty 路径：无法探测前台进程组，保守返回已结束
+                return 0
+            try:
+                fg = os.tcgetpgrp(fd)
+            except (OSError, AttributeError):
+                return None
+            if not fg:
+                return 0
+            try:
+                shell_pgid = os.getpgid(sh.pid)
+            except (OSError, AttributeError):
+                shell_pgid = sh.pid
+            if shell_pgid is not None and fg == shell_pgid:
+                return 0     # shell 回到前台 = 命令已结束
+        except Exception:
+            pass
+        return None
 
     def send_signal(self, sig) -> None:
         pid = self.pid
@@ -1006,8 +1043,11 @@ class PersistentShell:
                         # cd 这类「无输出」命令最常见。
                         if not _head.endswith((b'\n', b'\r')):
                             _head += b'\n'   # 输出未以换行结束 → 补一个
-                    elif _last_out_byte[0] not in (None, b'\n'):
-                        _head = b'\n'        # 上次输出没换行结尾 → 补一个，避免粘连
+                    # 只有上次输出既不是 \n 也不是 \r 结尾时才补：
+                    # 为 \r 时补会把 PTY 的 \r\n 拆成 \r + \n + \n，凭空多出空行
+                    # （echo 空参数 / cd 等"无输出"命令最常触发）。
+                    elif _last_out_byte[0] not in (None, b'\n', b'\r'):
+                        _head = b'\n'
                     _scan_bytes = bytearray(_buf[_m.end():])
                     if _head:
                         _emit(_head)

@@ -51,6 +51,12 @@ Python 脚本接口（三选一，按顺序探测）：
         · 直接调 ctx.static_candidates() → 手工取静态树候选
         · 什么都不用 → 完全接管，返回空就是空
     - 新增任何命令语义，只需写脚本，com.py 永不需要修改
+
+修复（生成器安全专项 · P2）：
+- static_fallback 装饰器原实现在生成器 finally 里 yield，调用方
+  .close() / GC 时会抛 RuntimeError: generator ignored GeneratorExit。
+  表现为偶发补全崩溃 / 菜单错乱。现在改为「先 list() 收集结果，
+  再决定是否回退」—— 补全列表很短，无性能损失。
 """
 
 import os
@@ -249,16 +255,24 @@ def static_fallback(fn: Callable[[CompletionContext], Iterable[Any]]):
             if ctx.args and ctx.args[0] == "known":
                 yield CompletionItem("foo", meta="known")
             # 其它情况什么都不 yield → 装饰器补上静态树候选
+
+    修复（生成器安全专项 · P2）：
+        原实现在 finally 里 yield，调用方 .close() 或 GC 时 ptk 会抛
+        RuntimeError: generator ignored GeneratorExit —— 表现为偶发
+        补全崩溃 / 菜单错乱。
+        现在改为「先 list() 收集结果，再决定是否回退」。补全列表本身
+        就很短（一般 <200 条），一次性收集无性能损失，但换来生成器
+        语义干净、无 finally-yield 陷阱。
     """
     def wrapper(ctx: CompletionContext):
-        produced = False
         try:
-            for item in fn(ctx) or []:
-                produced = True
-                yield item
-        finally:
-            if not produced:
-                yield from ctx.static_yield()
+            items = list(fn(ctx) or [])
+        except Exception:
+            items = []
+        if items:
+            yield from items
+        else:
+            yield from ctx.static_yield()
     return wrapper
 
 

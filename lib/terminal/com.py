@@ -2534,11 +2534,25 @@ class SmartCompleter(Completer):
     
         if token.startswith('-'):
             return False
-    
+
+        # ── 修复（虚影路径校验覆盖"带扩展名文件名" · P1）──
+        # 原逻辑只把含 / \ 或以 . ~ 开头的 token 当路径 → `python a.py`
+        # 这类"参数是带扩展名文件名"的场景会漏掉存在性检查。结果：
+        # 用户在目录 A 执行过 `python a.py`，cd 到目录 B（没有 a.py）后，
+        # 敲 `python ` 时旧虚影 a.py 仍然显示 —— 与实际文件系统不符。
+        # 现在：PATH_COMMANDS 的实参里出现"带扩展名的文件名"也纳入路径检查，
+        # 判定为不存在就丢弃这条虚影，让 SmartAutoSuggest 回退到列表第一项。
+        _basename = token.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+        _has_ext = (
+            '.' in _basename
+            and not _basename.startswith('.')
+            and not _basename.endswith('.')
+        )
         looks_like_path = (
             '/' in token
             or '\\' in token
             or token.startswith(('.', '~'))
+            or (cmd in self.PATH_COMMANDS and _has_ext)
         )
         if not looks_like_path:
             return False
@@ -2616,10 +2630,37 @@ class SmartCompleter(Completer):
                 return hist_fp
             return None
     
-        # ── 分支 ②：参数位置（保持原逻辑）──
+        # ── 分支 ②：参数位置 ──
+        # 修复（多级补全同步 · P1）：
+        # 原实现返回"剩余完整参数"（如 token='a/b/c'），而 _promote_history_next
+        # 在 strip_trailing_sep=True 下按当前层级的目录名（'b'）匹配，两边形式
+        # 不一致 → 精确匹配失败 → 退到"互为前缀"兜底 → 把当前目录 'a/' 提升
+        # 到第一，而虚影显示的却是 'b/c'（历史剩余部分），列表与虚影错位。
+        # 现在只返回"当前层级的下一段"，形式与候选列表对齐：
+        #   'cd '   → next_seg = 'a'
+        #   'cd a'  → next_seg = 'a'
+        #   'cd a/' → next_seg = 'b'   ← 修复点
+        #   'cd a/b'→ next_seg = 'b'
         if not base[-1].isspace():
             return None
-    
+
+        # 解析 current_word 的层级前缀与当前层输入：
+        #   'a/'  → prefix='a/', level=''
+        #   'a/b' → prefix='a/', level='b'
+        #   'a'   → prefix='',   level='a'
+        _sep_chars = '/\\'
+        _last_sep_idx = -1
+        for _i in range(len(current_word) - 1, -1, -1):
+            if current_word[_i] in _sep_chars:
+                _last_sep_idx = _i
+                break
+        if _last_sep_idx >= 0:
+            _current_prefix = current_word[:_last_sep_idx + 1]
+            _current_level = current_word[_last_sep_idx + 1:]
+        else:
+            _current_prefix = ''
+            _current_level = current_word
+
         for cmd in self.history_buffer:
             if not cmd or '\n' in cmd:
                 continue
@@ -2632,9 +2673,29 @@ class SmartCompleter(Completer):
             if not m:
                 continue
             token = m.group(0)
-            if current_word and not token.startswith(current_word):
-                continue
-            return token
+
+            if _current_prefix:
+                # 历史参数必须起始于当前前缀，才能进入当前层级匹配
+                if not token.startswith(_current_prefix):
+                    continue
+                after_prefix = token[len(_current_prefix):]
+                if not after_prefix:
+                    continue
+                _seg = re.match(r'[^/\\]+', after_prefix)
+                if not _seg:
+                    continue
+                next_seg = _seg.group(0)
+                if _current_level and not next_seg.startswith(_current_level):
+                    continue
+                return next_seg
+            else:
+                _seg = re.match(r'[^/\\]+', token)
+                if not _seg:
+                    continue
+                first_seg = _seg.group(0)
+                if _current_level and not first_seg.startswith(_current_level):
+                    continue
+                return first_seg
         return None
 
     def _promote_history_next(self, candidates: list,

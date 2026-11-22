@@ -102,6 +102,26 @@ from .ai_lib.memory_tools import (
     _exec_list_timeline,
 )
 from .ai_lib.grep_utils import _run_grep_lines  # 文件搜索核心（MemorySearch/grep_search 共用）
+
+
+def _ui_t(cn: str, en: str, **fmt) -> str:
+    """按当前界面语言取文案（语言文件为准，/lang 切换后立即生效）。
+
+    用于引擎侧直接打印到界面上的零散文案（活动行、面板标题等）——这些文案
+    原来只有中文，英文界面里会突然冒出中文，观感上就是「双语没做全」。
+    """
+    try:
+        from .ai_lib.config import get_current_lang as _gcl
+        _cn = _gcl() != "english"
+    except Exception:
+        _cn = True
+    text = cn if _cn else en
+    if fmt:
+        try:
+            text = text.format(**fmt)
+        except (KeyError, IndexError, ValueError):
+            pass
+    return text
 from .ai_lib.helpers import (
     handle_sleep_wait, set_ai_thread_priority, confirm_plan,
     parse_arguments, show_loading,
@@ -421,10 +441,22 @@ def _exec_run_command(command: str) -> str:
     executor = get_main_command_executor()
     if executor is None:
         return "⛔ RunCommand 不可用：主会话未初始化命令执行器（安全管线未注入）"
+    # 感官：命令执行窗口内的文件变化视为「疑似 AI 自己改的」（视觉照改、不主动提醒）
+    try:
+        from .ai_lib import senses as _senses_cmd
+        _senses_cmd.begin_command_window()
+    except Exception:
+        pass
     try:
         return executor(command)
     except Exception as e:
         return f"命令执行失败: {e}"
+    finally:
+        try:
+            from .ai_lib import senses as _senses_cmd2
+            _senses_cmd2.end_command_window()
+        except Exception:
+            pass
 
 
 def _format_run_command_result(cmd: str, rc, captured: str) -> str:
@@ -612,13 +644,15 @@ class AICmdTimer:
         while not self._stop.wait(1.0):
             try:
                 secs = int(time.time() - self._start)
-                self._render(f"⏳ AI 正在执行命令: {secs} 秒")
+                self._render(_ui_t(f"⏳ AI 正在执行命令: {secs} 秒",
+                                   f"⏳ AI is running a command: {secs}s"))
             except Exception:
                 pass
 
     def __enter__(self):
         self._start = time.time()
-        self._render("⏳ AI 正在执行命令: 0 秒")
+        self._render(_ui_t("⏳ AI 正在执行命令: 0 秒",
+                           "⏳ AI is running a command: 0s"))
         self._t = threading.Thread(target=self._loop, daemon=True)
         self._t.start()
         return self
@@ -929,6 +963,18 @@ def handle_ai(
     memory_base_dir: str = None,
     plus_think: str = None,
 ) -> None:
+    # ── 感官：标记 AI 回合开始（回合内文件变化只更新视觉，不主动唤醒）──
+    try:
+        from .ai_lib import senses as _senses_turn
+        try:
+            # 工作区跟随当前目录：换了目录就切到那个目录的注意力集（无变化时零开销）
+            _senses_turn.sync_workspace()
+        except Exception:
+            pass
+        _senses_turn.turn_begin()
+    except Exception:
+        pass
+
     from io import StringIO
     import sys as sys_module
     # api 模块（含 requests 重依赖）延迟到首次调用时导入——启动提速，行为不变
@@ -1218,6 +1264,16 @@ def handle_ai(
     if content_type == "mcp_command":
         # ai -mcp <install|list|remove> [args]
         handle_mcp_command(content, extra_info if isinstance(extra_info, list) else [])
+        return
+
+    if content_type == "config_command":
+        # ai config <show|get|set|test|backup|restore|doctor|path>
+        try:
+            from bin.ai_lib.config_cli import run as _config_run
+        except ImportError:
+            from .ai_lib.config_cli import run as _config_run
+        _config_run(content or "show",
+                    extra_info if isinstance(extra_info, list) else [])
         return
 
     if content_type == "model_command":
@@ -1783,6 +1839,15 @@ def handle_ai(
             _dynamic_env_parts.append(_git_context.rstrip())
         if _hippocampus_index:
             _dynamic_env_parts.append(f"#历史会话索引\n{_hippocampus_index}".rstrip())
+        # ── 感官（视觉）：实时视觉块，拼在记忆/动态段的**最底部** ──
+        # 不写入 messages[0] 静态前缀，也不写入会话记忆；开关关闭时为空串（零成本）。
+        try:
+            from .ai_lib import senses as _senses_env
+            _vision_block = _senses_env.get_vision_block()
+            if _vision_block:
+                _dynamic_env_parts.append(_vision_block.rstrip())
+        except Exception:
+            pass
         _dynamic_env = "\n\n".join(_dynamic_env_parts) if _dynamic_env_parts else ""
 
         _system_msg = {"role": "system", "content": _env_info}
@@ -2026,7 +2091,8 @@ def handle_ai(
             # 纯 Markdown 直通：流式文本原样渲染为回复面板（无标记语言）
             if stream_text.strip():
                 parts.append(tui_plain(Markdown(stream_text.strip()),
-                                       title="💬 回复", border_style="green", box=ROUNDED))
+                                       title=_ui_t("💬 回复", "💬 Reply"),
+                                       border_style="green", box=ROUNDED))
 
             # MCP 工具执行结果（前4行）
             if tool_results_display:
@@ -2297,7 +2363,7 @@ def handle_ai(
                         _text = "".join(_reasoning_buffer[-100:])
                         live.update(tui_plain(
                             RichText(_text, style="dim italic"),
-                            title="🤖 AI 思考中...",
+                            title=_ui_t("🤖 AI 思考中...", "🤖 AI thinking..."),
                             border_style="bright_black",
                             box=ROUNDED,
                         ))
@@ -2988,6 +3054,13 @@ def handle_ai(
                             _status.stop()
                         if tool_name == "Agent":
                             _SUBAGENT_STATUS = None
+
+                    # ── 感官：工具注意力（有 tool 注意力时才记录，否则零开销）──
+                    try:
+                        from .ai_lib import senses as _senses_tool
+                        _senses_tool.emit_tool_event(tool_name, str(params)[:800], output)
+                    except Exception:
+                        pass
 
                     # ── Plan 模式：用户通过 choose_ask 选择切换到自由模式 → 记录待系统处理 ──
                     # mode=="plan" 时 ExitPlanMode 工具无法解除（mode 是局部变量），

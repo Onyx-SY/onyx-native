@@ -871,12 +871,33 @@ def _capture_stdout(fn):
 
 
 def _plugin_bin_path(entry: dict) -> Optional[str]:
-    """定位插件同款二进制（子进程隔离执行用，优先 index.daemon_bin）。"""
+    """定位插件同款二进制（子进程隔离执行用，优先 index.daemon_bin）。
+
+    候选顺序：daemon_bin → 与插件同名的二进制（<name> / <name>.bin /
+    lib 名去掉 .so）→ 仅当插件本身是 system_monitor 时才回退到
+    system_monitor / mpm_daemon 系列名。
+    原实现把 system_monitor 系列名写死，导致同目录下的其它插件
+    （如 code_view）被 system_monitor 二进制冒名执行 —— 参数不认识、
+    退出码 0、stdout 为空，看着像"插件没输出"。
+    """
     cand = entry.get("daemon_bin")
     if cand and os.path.isfile(cand):
         return cand
-    d = os.path.dirname(entry.get("lib") or "")
-    for cand_name in ("system_monitor", "system_monitor.bin", "mpm_daemon"):
+    lib = entry.get("lib") or ""
+    d = os.path.dirname(lib)
+    stem = os.path.splitext(os.path.basename(lib))[0]
+    if stem.startswith("lib") and len(stem) > 3:
+        stem = stem[3:]
+    name = (entry.get("name") or stem or "").strip()
+    names = []
+    for n in (name, stem, "%s.bin" % name, "%s.bin" % stem):
+        if n and n not in names:
+            names.append(n)
+    if name == "system_monitor" or stem == "system_monitor":
+        for n in ("system_monitor", "system_monitor.bin", "mpm_daemon"):
+            if n not in names:
+                names.append(n)
+    for cand_name in names:
         p = os.path.join(d, cand_name)
         if os.path.isfile(p) and os.access(p, os.X_OK):
             return p

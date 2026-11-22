@@ -46,7 +46,8 @@ from .tool_executors import (
     _exec_task_board, _exec_task_create, _exec_task_get, _exec_task_list,
     _exec_task_remove, _exec_task_stop, _exec_task_update, _exec_team_create,
     _exec_team_delete, _exec_team_list, _exec_todo_write, _exec_tool_search,
-    _exec_undo_last_edit, _exec_validate_edit, _exec_write_file,
+    _exec_undo_last_edit, _exec_validate_edit, _exec_write_file, _exec_eyes,
+    _exec_plugin, _exec_computer_use,
 )
 from .tools import code_analysis
 from .web_search import _exec_web_search_multi
@@ -207,6 +208,20 @@ def execute_mcp_tool(tool_name: str, params: Dict, name: str = "filesystem",
         "preview_edit": lambda p: _exec_preview_edit(_path_arg(p), _arg(p, *_OLD_ALIASES, default=""), _arg(p, *_NEW_ALIASES, default="")),
         "get_file_info": lambda p: _exec_get_file_info(_path_arg(p)),
         "read_file":    lambda p: _exec_read_file(_path_arg(p), p.get("range", None), p.get("head", None), p.get("tail", None)),
+        # ── 感官（视觉注意力）：参数不经过路径归一，path 由 senses 自己解析 ──
+        "eyes":         lambda p: _exec_eyes(p),
+        "plugin":       lambda p: _exec_plugin(p),
+        # ── 桌面操控（AI 的手）：截图 / 控件树 / 点击 / 输入 / 窗口 / 启动 ──
+        # 参数名刻意避开 path/target/file 等键，避免被文件沙盒当作路径校验。
+        "computer_use": lambda p: _exec_computer_use(
+            p.get("action", ""), p.get("x"), p.get("y"), p.get("text", ""),
+            p.get("key", ""), p.get("control"), p.get("app", ""),
+            p.get("save_to", ""), p.get("button", "left"), p.get("backend", "auto"),
+            p.get("timeout"), p.get("limit"), p.get("depth"),
+            p.get("pattern", ""), p.get("role", ""), p.get("title", ""),
+            p.get("op", "list"), p.get("amount"), p.get("direction", "down"),
+            p.get("to_x"), p.get("to_y"), p.get("count"),
+        ),
         "write_file":   lambda p: _exec_write_file(_path_arg(p), _arg(p, "content", "text", default="")),
         "edit_file":    lambda p: _exec_edit_file(_path_arg(p), _arg(p, *_OLD_ALIASES, default=""), _arg(p, *_NEW_ALIASES, default=""),
                                                   _bool_arg(p, "replace_all")),

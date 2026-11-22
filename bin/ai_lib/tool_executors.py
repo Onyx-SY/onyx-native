@@ -291,6 +291,55 @@ def _exec_read_file(file_path: str, range_str: str = None, head: int = None, tai
         return _i18n("read_failed", "bilingual", err=e)
 
 
+def _note_self_edit(path: str) -> None:
+    """告诉感官系统：这次改动是 AI 自己做的（视觉照改，但不主动提醒）。"""
+    try:
+        from . import senses
+        senses.note_self_edit(path)
+    except Exception:
+        pass
+
+
+def _exec_eyes(params: dict) -> str:
+    """eyes 工具：设置/查看 AI 的视觉注意力。"""
+    try:
+        from . import senses
+        return senses.handle_eyes_action(**(params or {}))
+    except Exception as e:
+        return "❌ eyes failed: %r" % (e,)
+
+
+def _exec_plugin(params: dict) -> str:
+    """plugin 工具：AI 侧插件管理（注册/查看/校验/移除）。"""
+    try:
+        from . import plugin_tool
+        return plugin_tool.dispatch(**(params or {}))
+    except Exception as e:
+        return "❌ plugin tool failed: %r" % (e,)
+
+
+def _exec_computer_use(action="", x=None, y=None, text="", key="", control=None,
+                       app="", save_to="", button="left", backend="auto",
+                       timeout=None, limit=None, depth=None, pattern="", role="",
+                       title="", op="list", amount=None, direction="down",
+                       to_x=None, to_y=None, count=None) -> str:
+    """computer_use 工具：跨平台桌面操控（截图/控件树/点击/输入/窗口/启动）。
+
+    参数显式展开是为了让 schema 与调度层一一对应（有静态一致性测试）。
+    """
+    try:
+        from . import computer_use
+        return computer_use.handle_computer_use(
+            action=action, x=x, y=y, text=text, key=key, control=control,
+            app=app, save_to=save_to, button=button, backend=backend,
+            timeout=timeout, limit=limit, depth=depth, pattern=pattern,
+            role=role, title=title, op=op, amount=amount, direction=direction,
+            to_x=to_x, to_y=to_y, count=count,
+        )
+    except Exception as e:  # noqa: BLE001
+        return "error: computer_use failed: %r" % (e,)
+
+
 def _exec_write_file(file_path: str, content: str) -> str:
     """写入文件（全量覆盖）。返回中包含 original_file 供撤销。"""
     try:
@@ -307,6 +356,7 @@ def _exec_write_file(file_path: str, content: str) -> str:
             is_update = True
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
+        _note_self_edit(file_path)
         total_lines = content.count("\n") + (1 if content else 0)
         # 保存到全局撤销记录
         global _LAST_EDIT
@@ -353,6 +403,7 @@ def _exec_edit_file(file_path: str, old_string: str, new_string: str,
                 pass
         ok, msg = apply_edit(file_path, old_string, new_string, replace_all=replace_all)
         if ok:
+            _note_self_edit(file_path)
             # 保存到全局撤销记录
             global _LAST_EDIT
             _LAST_EDIT = {"path": file_path, "original": old_content, "action": "edit"}
@@ -1019,6 +1070,7 @@ def _exec_undo_last_edit() -> str:
         # 写回原始内容
         with open(path, "w", encoding="utf-8") as f:
             f.write(original)
+        _note_self_edit(path)
         _LAST_EDIT = {}
         return f"↩️ 已撤销: {path} 已恢复为修改前的内容"
     except Exception as e:

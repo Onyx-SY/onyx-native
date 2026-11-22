@@ -2047,7 +2047,9 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
     with _ai_sandbox.session_guard():
         if not _enter_session:
             from bin.ai_cmd import handle_ai as _handle_ai
-            _handle_ai(
+            from bin.ai_lib import senses as _senses_turn
+            try:
+                _handle_ai(
                 cmd_parts=cmd_parts,
                 request_id=request_id,
                 onyx_module=sys.modules[__name__],
@@ -2067,7 +2069,9 @@ def handle_ai(cmd_parts: List[str], request_id: str) -> None:
                 log_error=log_error,
                 log_warning=log_warning,
                 security_log=security_log,
-            )
+                )
+            finally:
+                _senses_turn.turn_end()
         else:
             # ── 交互会话：按模式分发（REPL / TUI 各自独立实现，互不感知）──
             _resolved_mode = _ai_mode.resolve_ai_mode(_mode_flag)
@@ -3577,6 +3581,17 @@ def main_loop() -> None:
             except Exception as e:
                 log_warning(f"后台手册页扫描启动失败: {str(e)}", request_id)
         threading.Thread(target=_deferred_start_man_scan, daemon=True, name="man-scanner-delayed").start()
+
+        # ========== 感官系统（视觉）：后台独立线程，有注意力时才启动 ==========
+        try:
+            from bin.ai_lib import senses as _senses
+            # 注意力按工作区隔离：绑定启动时所在目录（~/.ai_s/senses/workspaces/<slug>/）
+            _senses.set_workspace(os.getcwd())
+            if _senses.load_config().get("attentions"):
+                _senses.start()
+                log_info("感官线程已启动（视觉）", request_id)
+        except Exception as e:
+            log_warning(f"感官线程启动失败: {str(e)}", request_id)
         
         # ========== 阶段7: 交互循环 ==========
         log_info(f"   阶段7-进入交互模式: 等待用户输入", request_id)

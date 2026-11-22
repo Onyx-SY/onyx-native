@@ -13,6 +13,29 @@ def graceful_shutdown(ctx: "AppContext", request_id: str = "") -> None:
     if not request_id:
         request_id = str(uuid.uuid4())
 
+    # 感官线程先收尾（之后日志会被关闭，且要落盘 vision.md）
+    try:
+        from bin.ai_lib import senses as _senses
+        _senses.stop()
+    except Exception:
+        pass
+
+    # MCP server 子进程统一收掉：它们是长驻 node 进程，退出不收就成孤儿；
+    # 且每个都带一个卡在管道 read 上的 daemon 线程 —— 解释器 finalize（GC）时
+    # 与这些活线程撞车，会偶发 SIGSEGV/SIGABRT（用户实测的「退出时 segmentation
+    # fault」）。放在最前面：此时日志/终端都还可用，收不掉还能留下记录。
+    try:
+        from bin.ai_lib.mcp_client import disconnect_all_mcp_servers as _mcp_kill_all
+        _killed = _mcp_kill_all()
+        if _killed:
+            try:
+                from core.log_manager import log_info
+                log_info(f"已终止 {_killed} 个 MCP server 子进程", request_id)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     _disable_logging(ctx)
 
     try:

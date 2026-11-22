@@ -19,7 +19,9 @@ sys.path.insert(0, ROOT)
 from bin.ai_lib import native_tools as nt  # noqa: E402
 
 # 整表转发（把整个 params 交给执行器）的工具，无法用静态推断
-_PASS_THROUGH = {"web_search"}
+# eyes / plugin / computer_use 都在执行器内部自行解析参数（dict 透传或显式展开），
+# 其中 computer_use 在 dispatch 里显式展开全部参数，仍会走静态校验。
+_PASS_THROUGH = {"web_search", "eyes", "plugin"}
 # 由外部 MCP server / 插件定义的 schema，参数由其自行解析
 _EXTERNAL_PREFIX = ("mcp_",)
 _EXTERNAL = {"code_view", "system_monitor", "py_diagnostics", "py_symbols",

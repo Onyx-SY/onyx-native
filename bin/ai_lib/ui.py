@@ -83,13 +83,36 @@ def drain_pending_input() -> List[str]:
     return out
 
 
+_UI_LANG_PROVIDER = None      # 由 TUI / REPL 注入的「运行时语言」取值函数
+_UI_LANG_FALLBACK = "chinese"  # 无 provider 时的最后兜底
+
+
+def set_ui_lang_provider(provider=None) -> None:
+    """注册运行时语言来源（TUI / REPL 在启动与切换语言时调用）。
+
+    为什么需要：语言有三个来源 —— 语言文件（get_current_lang）、
+    global_config[display_info].language、以及会话 ctx["lang"]。三者会不同步
+    （例如 /lang 刚切换、文件还没写），此时弹窗按钮 / 危险命令确认框就会跟主界面
+    语言不一致。注册 provider 后，ui 层统一以「界面当前正在用的语言」为准。
+    """
+    global _UI_LANG_PROVIDER
+    _UI_LANG_PROVIDER = provider
+
+
 def _ui_lang() -> str:
-    """获取当前语言（延迟导入避免与 config 循环依赖）。"""
+    """获取当前语言（优先运行时 provider，其次语言文件；延迟导入避免循环依赖）。"""
+    if _UI_LANG_PROVIDER is not None:
+        try:
+            v = _UI_LANG_PROVIDER()
+            if v:
+                return "english" if str(v).lower() in ("en", "english") else "chinese"
+        except Exception:
+            pass
     try:
         from .config import get_current_lang
         return get_current_lang()
     except Exception:
-        return "chinese"
+        return _UI_LANG_FALLBACK
 
 
 # ============================================================
@@ -271,7 +294,7 @@ def confirm_dangerous(
     title: str,
     command: str,
     reason: str,
-    lang: str = "chinese",
+    lang: Optional[str] = None,
     timeout: Optional[float] = None,
     timeout_default: bool = False,
 ) -> Tuple[bool, str, str]:
@@ -279,11 +302,15 @@ def confirm_dangerous(
     危险命令确认对话框。
 
     参数:
+      lang: None → 用当前界面语言（_ui_lang()）。显式传值可覆盖。
       timeout: 等待用户输入的秒数。None=一直等待；>0 超时后按 timeout_default 返回。
       timeout_default: 超时时的默认确认结果（True=放行 / False=拒绝）。
 
     返回: (confirmed: bool, user_response: str, refuse_reason: str)
     """
+    # 默认语言必须跟随界面：旧实现默认 "chinese"，英文模式下确认框按钮/提示
+    # 永远是中文（用户反馈「英文界面里弹出来还是中文」）。
+    lang = lang or _ui_lang()
     # ── 适配器优先（TUI → ModalScreen）；无适配器时保持原 REPL 行为 ──
     _adapter = get_ui_adapter()
     if _adapter is not None and hasattr(_adapter, "confirm_dangerous"):

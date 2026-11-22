@@ -714,6 +714,45 @@ def get_current_lang() -> str:
             return "chinese"
     return "chinese"
 
+
+def normalize_lang(lang: str) -> str:
+    """把 'cn' / 'zh' / 'en' / 'English' 等写法统一成 'chinese' / 'english'。"""
+    s = str(lang or "").strip().lower()
+    if s in ("en", "english", "en-us", "en-gb"):
+        return "english"
+    return "chinese"
+
+
+def set_current_lang(lang: str) -> str:
+    """把界面语言写进语言文件（`~/.config/onyx/language`），返回归一化后的值。
+
+    为什么必须落盘：AI 界面里 `/lang` 原来只改内存里的 ctx["lang"]，而
+    `bin/ai_cmd.py`、`bin/ai_lib/ui.py`、`bin/ai_lib/helpers.py` 等都是直接读这个
+    文件 → 同一屏里两套语言来源必然打架（用户反馈的「输入框/提示一会儿中文一会儿
+    英文」）。写文件后所有读者自动对齐，跨会话也记得上次选的语言。
+
+    原子写（临时文件 + rename）：中途被 Ctrl+C 也不会留下半截文件（半截文件会让
+    get_current_lang 读不到合法值、静默退回中文）。
+    """
+    value = normalize_lang(lang)
+    try:
+        lang_dir = os.path.dirname(LANGUAGE_CONFIG_PATH)
+        if lang_dir:
+            os.makedirs(lang_dir, exist_ok=True)
+        tmp_path = LANGUAGE_CONFIG_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(value)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp_path, LANGUAGE_CONFIG_PATH)
+    except Exception:
+        # 写盘失败不阻断界面切换：内存里的语言仍然生效，只是不跨会话记忆
+        pass
+    return value
+
 def get_prompt_text(lang: str) -> Dict[str, str]:
     if lang == "english":
         return {

@@ -396,6 +396,44 @@ def is_mcp_server_running(name: str) -> bool:
     return False
 
 
+def disconnect_all_mcp_servers(timeout: float = 3.0) -> int:
+    """终止所有已连接的 MCP server 子进程并清空工具缓存，返回被收掉的进程数。
+
+    为什么需要这个：MCP server 是长驻子进程（node/npx 等），进程退出时不显式收掉
+    就会变成孤儿进程继续吃内存；更关键的是每个 server 都带一个读 stderr 的 daemon
+    线程，它们会一直卡在管道 read 上 —— 解释器 finalize 阶段（GC 回收 Popen / 文件
+    对象）与这些还活着的线程撞在一起，实测会偶发 SIGSEGV / SIGABRT（用户看到的
+    「退出 AI 界面后 segmentation fault」）。所以退出前统一收干净。
+
+    幂等：可重复调用；单个 server 收不掉不影响其他 server。
+    """
+    count = 0
+    for name in list(MCP_SERVER_PROCESSES.keys()):
+        proc = MCP_SERVER_PROCESSES.pop(name, None)
+        MCP_TOOLS_CACHE.pop(name, None)
+        if proc is None:
+            continue
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=timeout)
+                except Exception:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=1.0)
+                    except Exception:
+                        pass
+            count += 1
+        except Exception:
+            pass
+        try:
+            _cleanup_mcp_stderr_buffers(proc.pid)
+        except Exception:
+            pass
+    return count
+
+
 def install_default_mcp_server(user_home_dir: str = None, auto_extras: bool = False) -> bool:
     """默认零 MCP：不再自动注册/标记任何 server（取消默认下载/连接）。
 

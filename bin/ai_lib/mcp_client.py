@@ -232,6 +232,37 @@ def disconnect_mcp_server(name: str) -> bool:
     return False
 
 
+def disconnect_all_mcp_servers(timeout: float = 3.0) -> int:
+    """收掉所有 MCP server 子进程（退出清理用），返回被终止的进程数。
+
+    优先委托 mcp_client_core（真正持有运行中进程的模块），失败再退回本模块注册表。
+    目的：进程退出时不留孤儿 node 进程、不留卡在管道 read 上的 daemon 线程
+    （它们会在解释器 finalize 阶段与 GC 撞车，导致退出期 SIGSEGV/SIGABRT）。
+    """
+    total = 0
+    try:
+        from .mcp_client_core import disconnect_all_mcp_servers as _core_disconnect_all
+        total += int(_core_disconnect_all(timeout=timeout) or 0)
+    except Exception:
+        pass
+    for name in list(MCP_SERVER_PROCESSES.keys()):
+        proc = MCP_SERVER_PROCESSES.pop(name, None)
+        MCP_TOOLS_CACHE.pop(name, None)
+        if proc is None:
+            continue
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=timeout)
+                except Exception:
+                    proc.kill()
+            total += 1
+        except Exception:
+            pass
+    return total
+
+
 def preload_mcp_servers(user_home_dir: str = None) -> None:
     """预加载所有已配置的 MCP 服务器"""
     global MCP_PRELOADED

@@ -84,6 +84,28 @@ TOOL_SETS: Dict[str, Tuple[str, ...]] = {
     "web_search_agent": EXPLORE_TOOL_WHITELIST + WEB_TOOL_WHITELIST + COMMAND_TOOL,
 }
 
+# 感官工具：AI 本体私有。子代理既不共享视觉，也不允许设置/修改注意力，
+# 因此即使模型幻觉调用也必须显式拒绝（白名单本就不含它，这里是双保险 + 明确理由）。
+SENSES_TOOL = "eyes"
+
+
+def gate_rejection(name: str, agent_type: str) -> Optional[str]:
+    """子代理工具闸门：返回拒绝文案（None = 放行）。
+
+    - eyes：AI 本体私有（不共享视觉、不能设注意力）
+    - 其余：按 agent_type 的只读白名单判定
+    """
+    agent_type = _normalize_type(agent_type)
+    if name == SENSES_TOOL:
+        return ("⛔ `eyes`（感官/视觉注意力）是 AI 本体私有工具，子代理不可用。"
+                "子代理既不共享视觉，也不能设置注意力。")
+    whitelist = TOOL_SETS.get(agent_type, TOOL_SETS["explore"])
+    if name not in whitelist:
+        return (f"⛔ 工具 `{name}` 不在当前子代理（{agent_type}）的白名单内，已拒绝执行。"
+                f"本子代理可用工具：{', '.join(whitelist)}")
+    return None
+
+
 _ROLE_PROMPTS: Dict[str, str] = {
     "explore": (
         "\n\n## Explore Sub-agent Mode\n"
@@ -727,13 +749,10 @@ class ExploreManager:
                 # 防止模型幻觉调用未授权工具造成越权执行：
                 #   - explore/plan 调 Agent → 嵌套委托套娃（日志里出现「🔧 Agent」就是它）
                 #   - explore/plan 调 RunCommand → 非只读命令执行
-                _whitelist = TOOL_SETS.get(task.agent_type, TOOL_SETS["explore"])
-                if name not in _whitelist:
-                    task.log(f"⛔ 拒绝非白名单工具: {name}")
-                    ok, output = False, (
-                        f"⛔ 工具 `{name}` 不在当前子代理（{task.agent_type}）的白名单内，已拒绝执行。"
-                        f"本子代理可用工具：{', '.join(_whitelist)}"
-                    )
+                _reject = gate_rejection(name, task.agent_type)
+                if _reject:
+                    task.log(f"⛔ 拒绝工具: {name}")
+                    ok, output = False, _reject
                 # ── RunCommand：lint/test 类型专用，经 Onyx 安全管线执行 ──
                 elif name == "RunCommand":
                     cmd = params.get("command", "")

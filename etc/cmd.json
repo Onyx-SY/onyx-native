@@ -143,6 +143,7 @@
       "-tui",
       "-mcp",
       "-model",
+      "-config",
       "-effort",
       "-plugin",
       "-plugin-add",
@@ -1078,6 +1079,7 @@
   "micro": {
     "options": [
       "-plugin",
+      "-config",
       "-syntax",
       "-config-dir",
       "-version"

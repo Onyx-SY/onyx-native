@@ -20,6 +20,7 @@ the shell that actually runs your commands is a real `bash`/`zsh` attached throu
 - [Path-level Permissions](#path-level-permissions)
 - [Dangerous Command Blacklist](#dangerous-command-blacklist)
 - [AI Features](#ai-features)
+- [Proactive Perception (Senses)](#proactive-perception-senses)
 - [Ghost Completion](#ghost-completion)
 - [Project Structure](#project-structure)
 
@@ -56,6 +57,7 @@ Onyx never replaces your shell: it owns the input layer and lets a real `bash`/`
 | `switch-prompt <style>` | Switch the prompt style (`kali` / `ubuntu` / `zsh` / `onyx` / `termux` / `def` / `skali`) |
 | `ai <prompt>` | AI assistant (requires platform API key) |
 | `ai -key <API Key>` | Set the API key for the current platform (stored in `~/.config/onyx/ai/key.json`) |
+| `ai config <sub>` | Personal config without the menu: `show` / `get` / `set` / `test` / `doctor` / `backup` / `restore` / `path` |
 | `ai -repl` / `ai -tui` | Force the interactive mode (REPL / full-screen TUI); bare `ai` uses the default |
 | `set-adv-pwd` | Set the advanced-mode password |
 | `help` | Show this help |
@@ -202,6 +204,43 @@ Bare `ai` enters the default interactive mode; override it explicitly:
   typed messages queue as live guidance), a chat pane, and — on wide terminals — side panels
   (TODO + files). Dangerous-command confirmations and captchas appear as modal dialogs.
 
+## Proactive Perception (Senses)
+
+The AI can set **visual attentions** — its "eyes" — on slices of files or on tool results. A
+background *senses* thread (independent from the main thread) watches them. When a file is changed
+**externally** and stays quiet for `debounce_sec` (default 3s), the AI is woken once **while idle**
+with the before/after content attached. Files the AI changes itself (`write_file` / `edit_file` /
+`UndoLastEdit`) update the vision document but never trigger a wake-up.
+
+- Toggle: `/config` → 👁 Proactive perception (off by default)
+- The first time the AI sets an attention, a confirmation dialog explains that information may be
+  sent to the AI while you are not chatting — **this consumes your tokens**; approve once, never asked again
+- Commands: `/senses list` (attentions the AI has set), `/senses on` / `/senses off`, `/senses clear`
+- Vision content is appended to the bottom of each request's dynamic context and is **never**
+  written into conversation memory; rate limits: `min_interval_sec` 60s, `max_per_hour` 6
+- Sub-agents neither share the vision nor can they set attentions
+- Credential files (`.ssh/`, `id_rsa`, `.env`, `*.pem`, `credentials`, …) and binaries are
+  refused: vision content is sent to the model API, so secrets never enter it
+
+## Computer Use (The AI's Hands)
+
+On Windows / Linux the AI can drive the real desktop: screenshot, read the accessibility tree,
+click, type, press keys, scroll, drag, manage windows and launch apps. On Android only a
+lightweight `launch` survives — without root, `screencap` / `input` / `uiautomator` need shell
+privileges.
+
+- `ui_tree` returns a **text** control tree (`[3] push button "Save" rect=… center=…`); `find`
+  filters it by name / role; `click` accepts `control=<n>` (the index) — steadier than raw coordinates
+- `screenshot` writes a PNG under `~/.ai_s/computer_use/shots/` and returns path / size / dims /
+  sha1 / changed — the image itself is **not** sent to the model (tool results are text-only)
+- Backends: Windows (ctypes `user32` + PowerShell capture + UIA / Win32 tree), Linux X11
+  (`xdotool` + `scrot`/`maim` + `wmctrl`, optional `pyatspi`), Linux Wayland (`grim` +
+  `ydotool`/`wtype` + `swaymsg`), Android (`am start` only)
+- Zero hard dependencies: missing tools are reported as `error:` with the install hint;
+  `safe_mode` blocks destructive combos such as Ctrl+Alt+Delete
+- Config: `~/.ai_s/computer_use/config.json` (`backend`, `shots_dir`, `timeout`,
+  `max_tree_nodes`, `max_depth`, `safe_mode`, …)
+
 ## Ghost Completion
 
 Based on command frequency: as you type, the most likely completion appears in grey directly after
@@ -244,6 +283,7 @@ Onyx 是一个用 Python 编写的终端模拟器、Shell 与安全沙箱。语�
 - [路径级权限](#路径级权限)
 - [高危命令黑名单](#高危命令黑名单)
 - [AI 功能](#ai-功能)
+- [主动感知（感官 / 视觉）](#主动感知感官--视觉)
 - [幽灵补全](#幽灵补全)
 - [项目结构](#项目结构)
 
@@ -279,6 +319,7 @@ Onyx 不替换你的 shell：它接管输入层，把真正的执行交给 `bash
 | `switch-prompt <style>` | 切换提示符风格（`kali` / `ubuntu` / `zsh` / `onyx` / `termux` / `def` / `skali`） |
 | `ai <prompt>` | AI 助手（需平台 API Key） |
 | `ai -key <API Key>` | 为当前平台设置 API Key（存入 `~/.config/onyx/ai/key.json`） |
+| `ai config <子命令>` | 不进交互菜单改私人配置：`show` / `get` / `set` / `test` / `doctor` / `backup` / `restore` / `path` |
 | `ai -repl` / `ai -tui` | 强制交互模式（REPL / 全屏 TUI）；裸 `ai` 走默认模式 |
 | `set-adv-pwd` | 设置高级模式密码 |
 | `help` | 显示本帮助 |
@@ -418,6 +459,39 @@ Onyx 会自动判断使用哪种模式：当 `ROOT_DIR` 等于系统根目录（
 - `ai -repl` —— 行式 REPL
 - `ai -tui` —— 全屏 TUI：底部固定输入框（AI 运行时仍可输入，消息排队作为实时引导）、
   对话面板，宽终端下显示侧栏（TODO + 文件）。危险命令确认与验证码以模态框弹出。
+
+## 主动感知（感官 / 视觉）
+
+AI 可以给自己设「视觉注意力」—— 它的「眼睛」：盯住文件的某些行段，或某个工具的返回值。
+一条**独立的后台感官线程**（与主线程完全分离）实时监视它们。当文件被**外部**改动、并且静默
+`debounce_sec`（默认 3 秒）后，会在你没和 AI 对话时主动唤醒它一次，并附上改前/改后内容。
+AI 自己用 `write_file` / `edit_file` / `UndoLastEdit` 改的文件只更新视觉文档，**不会**触发唤醒。
+
+- 开关：`/config` → 👁 主动感知（默认关闭）
+- AI 第一次设置注意力时会弹窗确认：开启后可能在你没有对话时把信息发给 AI，**会消耗 Token**；
+  同意一次后不再询问
+- 命令：`/senses list`（看 AI 设了哪些注意力）、`/senses on` / `/senses off`、`/senses clear`
+- 视觉内容只拼在每次请求动态上下文的末尾，**不写入**会话记忆；限流：间隔 60 秒、每小时最多 6 次
+- 子代理既不共享视觉，也不能设置注意力
+- 凭证类文件（`.ssh/`、`id_rsa`、`.env`、`*.pem`、`credentials` 等）与二进制文件会被拒绝：
+  视觉内容会发送给模型 API，密钥不允许进入视觉
+
+## 桌面操控（AI 的手）
+
+Windows / Linux 上，AI 可以直接操作桌面：截图、读无障碍控件树、点击、输入、按键、滚动、拖拽、
+管理窗口、启动应用。Android 上只保留轻量 `launch`（`am start`）—— 无 root 时 `screencap` /
+`input` / `uiautomator` 都需要 shell 权限。
+
+- `ui_tree` 返回**文本**控件树（`[3] push button "Save" rect=… center=…`），`find` 按名称/角色
+  过滤，`click` 支持 `control=<n>` 按索引点击 —— 比裸坐标稳
+- `screenshot` 把 PNG 存到 `~/.ai_s/computer_use/shots/`，只返回路径/大小/尺寸/sha1/是否变化，
+  图片本身**不会**发给模型（工具结果只支持纯文本）
+- 后端：Windows（ctypes `user32` + PowerShell 截图 + UIA / Win32 控件树）、Linux X11
+  （`xdotool` + `scrot`/`maim` + `wmctrl`，可选 `pyatspi`）、Linux Wayland（`grim` +
+  `ydotool`/`wtype` + `swaymsg`）、Android（仅 `am start`）
+- 零硬依赖：缺命令时返回 `error:` 并给出安装提示；`safe_mode` 拦截 Ctrl+Alt+Delete 等高危组合键
+- 配置：`~/.ai_s/computer_use/config.json`（`backend`、`shots_dir`、`timeout`、
+  `max_tree_nodes`、`max_depth`、`safe_mode` 等）
 
 ## 幽灵补全
 

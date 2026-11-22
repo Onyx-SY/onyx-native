@@ -181,6 +181,13 @@ def parse_arguments(cmd_parts: List[str], lang_text: Dict[str, str], onyx_module
                     j += 1
             return ("plugin_add_command", lib_path, [key_path] if key_path else [],
                     auto_exec, new_key, None, None, mode, times)
+        elif arg in ("-config", "config"):
+            # ai config <show|get|set|test|backup|restore|doctor|path>
+            sub = (ai_args[i + 1]
+                   if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-")
+                   else "show")
+            extra = ai_args[i + 2:] if i + 2 < len(ai_args) else []
+            return ("config_command", sub, extra, auto_exec, new_key, None, None, mode, times)
         elif arg in ("-plugin", "plugin"):
             sub = ai_args[i + 1] if i + 1 < len(ai_args) and not ai_args[i + 1].startswith("-") else "list"
             extra = []
@@ -624,6 +631,9 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
                 title=_lt("danger_cmd_title"),
                 command=f"{_lt('danger_cmd_display')}: {cmd_str}",
                 reason=_lt('danger_cmd_msg').format(cmd_name),
+                # 语言必须显式传：不传时确认框会退回「界面默认语言」，
+                # 英文模式下按钮仍是「是 (y)/否 (n)」。
+                lang=current_lang,
                 timeout=_CONFIRM_TIMEOUT_SECONDS,
                 # fail-open（用户指示）：大上下文易误判，超时 = 执行。
                 # 想回到 fail-closed 就设 ONYX_DANGER_TIMEOUT_DENY=1。
@@ -649,6 +659,7 @@ def confirm_dangerous_command(cmd_str: str, cmd_name: str, lang_text: dict,
                 title=_lt("danger_cmd_title"),
                 command=f"{_lt('danger_cmd_display')}: {cmd_str}",
                 reason=_lt('danger_cmd_msg').format(cmd_name),
+                lang=current_lang,      # 语言必须显式传，否则英文界面弹中文按钮
                 timeout=None,           # 一直等待，强制用户回答
                 timeout_default=False,
             )

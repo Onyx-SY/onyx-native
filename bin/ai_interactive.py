@@ -71,6 +71,7 @@ _SLASH_COMMANDS_CN: Dict[str, str] = {
     "/mode":   "切换 AI 模式 (normal/plan)",
     "/time":   "切换是否显示每轮耗时",
     "/config": "⚙️ 统一配置 AI 模型/密钥/参数",
+    "/senses": "👁 主动感知/视觉注意力 (list / on / off / clear)",
     "/model":  "查看/切换 AI 模型与参数",
     "/param":  "查看/设置模型参数 (temperature/top_p/max_tokens/effort)",
     "/key":    "查看/更换 API 密钥",
@@ -103,6 +104,7 @@ _SLASH_COMMANDS_EN: Dict[str, str] = {
     "/mode":   "Switch AI mode (normal/plan)",
     "/time":   "Toggle per-round timing display",
     "/config": "⚙️ Unified AI config (model/key/params)",
+    "/senses": "👁 Proactive perception / visual attention (list / on / off / clear)",
     "/model":  "View/switch AI model and params",
     "/param":  "View/set model params (temperature/top_p/max_tokens/effort)",
     "/key":    "View/change API key",
@@ -896,6 +898,14 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             invalidate_cwd_cache()
         except Exception:
             pass
+        # 感官注意力按目录隔离：切目录 → 立即切到该目录的注意力集
+        try:
+            from bin.ai_lib import senses as _senses_cd
+            if _senses_cd.sync_workspace(target):
+                console.print(f"[dim]👁 {'注意力已切换到' if lang == 'chinese' else 'attention switched to'}: "
+                              f"{_senses_cd.current_workspace()}[/]")
+        except Exception:
+            pass
         try:
             from bin.ai_lib import sandbox as _sb_cd2
             shown = _sb_cd2.display(target) if _sb_cd2.is_active() else target
@@ -1055,10 +1065,12 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             # ── 菜单 ──
             if lang == "chinese":
                 opts = ["🔄 切换平台", "🤖 切换模型", "🔑 更换密钥",
-                        "⚙️ 编辑参数", "🌐 自定义 URL", "⌨️ 按键设置", "❌ 关闭"]
+                        "⚙️ 编辑参数", "🌐 自定义 URL", "⌨️ 按键设置",
+                        "👁 主动感知", "🧪 测试连接", "❌ 关闭"]
             else:
                 opts = ["🔄 Change platform", "🤖 Change model", "🔑 Change key",
-                        "⚙️ Edit params", "🌐 Custom URL", "⌨️ Key bindings", "❌ Close"]
+                        "⚙️ Edit params", "🌐 Custom URL", "⌨️ Key bindings",
+                        "👁 Proactive perception", "🧪 Test connection", "❌ Close"]
             choice = select_option(
                 "选择操作:" if lang == "chinese" else "Action:",
                 opts, default=opts[0], lang=lang
@@ -1098,7 +1110,10 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
                     conf["platform"] = new_plat
                     info = _SUPPORTED_PLATFORMS[new_plat]
                     conf["model"] = info.get("default_model", info["models"][0])
-                    conf["params"] = dict(info.get("params", {}))
+                    # 保留用户调过的参数：新平台默认打底，旧值覆盖（只补缺的默认）
+                    _merged = dict(info.get("params", {}))
+                    _merged.update(conf.get("params") or {})
+                    conf["params"] = _merged
                     if platform == "custom":
                         conf.pop("api_url", None)
                 _save_conf(conf, ctx)
@@ -1177,6 +1192,49 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             elif idx == 5:
                 _keymap_menu(lang, ctx)
 
+            # ── 👁 主动感知（视觉感官总开关）──
+            elif idx == 6:
+                from bin.ai_lib import senses as _senses
+                _on = not _senses.is_enabled()
+                _senses.set_enabled(_on, approve=_on)
+                if lang == "chinese":
+                    _ok = ("✅ 主动感知已开启：AI 可在你没对话时感知文件/工具变化"
+                           "（会消耗 Token）" if _on else "✅ 主动感知已关闭（不再主动提醒）")
+                else:
+                    _ok = ("✅ Proactive perception ON (may consume tokens while idle)"
+                           if _on else "✅ Proactive perception OFF")
+                console.print(f"[green]{_ok}[/]")
+
+            # ── 🧪 测试连接 ──
+            elif idx == 7:
+                from bin.ai_lib.config_cli import test_connection
+                console.print("[dim]" + ("测试中（max_tokens=1）…" if lang == "chinese"
+                                         else "testing (max_tokens=1)…") + "[/]")
+                ok_c, msg = test_connection()
+                console.print(("[green]" if ok_c else "[red]") + msg + "[/]")
+
+        return True
+
+    elif cmd == "/senses":
+        """👁 主动感知 / 视觉注意力管理"""
+        from bin.ai_lib import senses as _senses
+        sub = (args[0].lower() if args else "list")
+        if sub in ("on", "enable", "1"):
+            _senses.set_enabled(True, approve=True)
+            console.print("👁 " + ("主动感知已开启（后台感官线程运行中）" if lang == "chinese"
+                                   else "proactive perception ON"))
+        elif sub in ("off", "disable", "0"):
+            _senses.set_enabled(False)
+            console.print("👁 " + ("主动感知已关闭（视觉不再注入、不再主动提醒）" if lang == "chinese"
+                                   else "proactive perception OFF"))
+        elif sub in ("clear", "reset"):
+            _r = _senses.clear_attentions()
+            console.print("👁 " + (("已清空 %d 个注意力" % _r.get("removed", 0)) if lang == "chinese"
+                                   else ("cleared %d attention(s)" % _r.get("removed", 0))))
+        elif sub in ("status", "st"):
+            console.print(_senses.status_text())
+        else:
+            console.print(_senses.handle_eyes_action(action="list"))
         return True
 
     elif cmd == "/param":
@@ -1370,6 +1428,14 @@ def _dispatch_slash(cmd_line: str, ctx: Dict[str, Any]) -> bool:
             # 无参数时切换
             ctx["lang"] = "english" if lang == "chinese" else "chinese"
             console.print(f"[green]{_t('lang_switched', ctx['lang'])}[/]")
+        # 落盘：界面里改语言必须写进 ~/.config/onyx/language。
+        # 否则 ai_cmd / ui.py / helpers.py 这些「读文件」的模块仍用旧语言，
+        # 同一屏会出现中英混杂（输入框中文、确认框英文之类）。
+        try:
+            from .ai_lib.config import set_current_lang as _set_lang_file
+            _set_lang_file(ctx.get("lang") or "chinese")
+        except Exception:
+            pass
         return True
 
     elif cmd == "/mode":
@@ -1854,6 +1920,18 @@ def ai_interactive_session(
         )
 
         while True:
+            # ── 感官：AI 空闲时的事件驱动回合（用户说话 + 事件 联合驱动）──
+            _wake_text = _senses_take_wake()
+            if _wake_text:
+                try:
+                    _call_ai_engine(_wake_text, user_home_dir, onyx_module, global_config,
+                                    user_info, user_mode, parse_and_execute, ctx, **kwargs)
+                except KeyboardInterrupt:
+                    console.print("\n  [bold yellow]⏹ 已中断[/]" if current_lang == "chinese"
+                                  else "\n  [bold yellow]⏹ Interrupted[/]")
+                except Exception as e:
+                    console.print(f"[red]{_t('ai_error', current_lang, reason=str(e))}[/]")
+                continue
             try:
                 user_input = session.prompt()
             except KeyboardInterrupt:
@@ -1891,6 +1969,41 @@ def ai_interactive_session(
         console.print(f"[red]{_t('ai_exception', current_lang, reason=str(e))}[/]")
     finally:
         console.print(f"[dim]{_t('ai_exited', current_lang)}[/]")
+
+
+def _senses_take_wake() -> str:
+    """取一条待投递的感官事件（无事件/不可提醒 → 空串）。
+
+    只在「AI 空闲 + 主循环回到提示符」时调用：事件驱动回合交还**主线程 AI**
+    执行，不另开子线程/子代理。
+    """
+    try:
+        from bin.ai_lib import senses as _s
+        if _s.is_busy() or not _s.can_notify():
+            return ""
+        evs = _s.pop_events()
+        if not evs:
+            return ""
+        _s.mark_notified()
+        _lang = "chinese"
+        try:
+            _lang = ctx_lang()
+        except Exception:
+            pass
+        console.print("[dim]" + ("👁 感官：检测到变化，主动唤醒 AI…"
+                                 if _lang == "chinese" else
+                                 "👁 senses: change detected, waking AI…") + "[/]")
+        return _s.build_wake_prompt(evs)
+    except Exception:
+        return ""
+
+
+def ctx_lang() -> str:
+    try:
+        from bin.ai_lib.config import get_current_lang
+        return get_current_lang()
+    except Exception:
+        return "chinese"
 
 
 def _call_ai_engine(
@@ -1954,7 +2067,9 @@ def _call_ai_engine(
                     console.print("[yellow]⚠️ Plus 思考未产出规划，按普通模式继续[/]" if ctx.get("lang", "chinese") == "chinese" else "[yellow]⚠️ Plus produced no plan, continuing normal[/]")
             except Exception as e:
                 console.print(f"[yellow]⚠️ Plus 思考失败（{e}），按普通模式继续[/]" if ctx.get("lang", "chinese") == "chinese" else f"[yellow]⚠️ Plus thinking failed ({e}), continuing normal[/]")
-        handle_ai(
+        from bin.ai_lib import senses as _senses_turn
+        try:
+            handle_ai(
             cmd_parts=cmd_parts,
             request_id=call_request_id,
             onyx_module=onyx_module,
@@ -1968,7 +2083,9 @@ def _call_ai_engine(
             conversation_history=_conv_hist,
             plus_think=_plus_think,
             **{k: v for k, v in kwargs.items() if k not in ("cmd_parts", "request_id", "onyx_module", "user_home_dir", "global_config", "user_info", "user_mode", "parse_and_execute", "plus_think")}
-        )
+            )
+        finally:
+            _senses_turn.turn_end()
         # handle_ai 原地修改了 _conv_hist → 存回 ctx 供下一轮使用
         ctx["_conversation_history"] = _conv_hist
         # ── 成本统计：本轮 token 用量写入 cost.json（跟随记忆模式）──

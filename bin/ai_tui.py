@@ -35,6 +35,15 @@ def _t(key: str, lang: str = "chinese", **fmt) -> str:
         return key
 
 
+def _cur_lang() -> str:
+    """当前界面语言（无 App 上下文时用：语言文件为准）。"""
+    try:
+        from bin.ai_lib.config import get_current_lang
+        return "english" if get_current_lang() == "english" else "chinese"
+    except Exception:
+        return "chinese"
+
+
 def _slash_commands(lang: str = "chinese"):
     """当前语言的 AI 斜杠命令表（复用 REPL 的命令表，保证两边一致）。"""
     try:
@@ -600,6 +609,10 @@ class _QueueStream(io.TextIOBase):
 
 
 _TUI_APP_CLASS = None
+# 当前构建键位绑定所用的语言（_kb/_kb_desc 在构造 Binding 时读取它；
+# Textual 的 Binding.description 会显示在键位栏 / 帮助面板 / 命令面板里，
+# 所以绑定必须能按语言重建，而不是在类定义时就把英文写死）。
+_tui_bind_lang = ["chinese"]
 # 计划确认弹窗类（在 _build_tui 内定义，导出供无头测试直接推屏）
 _TUI_PLAN_SCREEN = None
 # 通用选项弹窗类（同上：SelectScreen / HistorySearchScreen 也导出，便于无头测试）
@@ -637,10 +650,24 @@ def _build_tui():
     # ── AI 按键绑定：全部来自 bin/ai_lib/keymap 注册表（用户可在 /config 里改键）──
     from bin.ai_lib import keymap as _keymap
 
-    def _kb(action_id: str, action: str, description: str, **kw):
-        """按注册表生成 Textual Binding 列表（一个动作可绑多个键）。"""
-        return [Binding(_k, action, description, **kw)
+    def _kb(action_id: str, action: str, description: str = "", **kw):
+        """按注册表生成 Textual Binding 列表（一个动作可绑多个键）。
+
+        description 传空 → 用 keymap 注册表里的双语标签（中文/英文）。
+        Textual 会把 description 显示在底部键位栏 / 帮助面板 / 命令面板里，
+        硬编码英文会让中文界面冒出 "Quit / Cancel / History prev"。
+        """
+        return [Binding(_k, action, _kb_desc(action_id, description, kw), **kw)
                 for _k in _keymap.combos(action_id)]
+
+    def _kb_desc(action_id: str, description: str, kw) -> str:
+        """取键位描述：显式传入优先；否则按当前语言从 keymap 注册表取。"""
+        if description:
+            return description
+        try:
+            return _keymap.label(action_id, _tui_bind_lang[0])
+        except Exception:
+            return action_id
 
     def _kbs(*specs):
         """specs: (action_id, action, description, kwargs) → 合并的 Binding 列表。"""
@@ -648,6 +675,67 @@ def _build_tui():
         for action_id, action, description, kw in specs:
             out.extend(_kb(action_id, action, description, **kw))
         return out
+
+    # ── 命令面板子类：只改「无匹配」这句（其余沿用 Textual 实现）──
+    OnyxCommandPalette = None
+    try:
+        from textual.command import (CommandPalette as _BasePalette,
+                                      CommandList as _BaseCommandList)
+        from textual.widgets.option_list import Option as _Opt
+
+        class OnyxCommandPalette(_BasePalette):
+            """命令面板：placeholder 由调用方按语言传入，「无匹配」也跟随语言。"""
+
+            def _start_no_matches_countdown(self, search_value: str) -> None:
+                try:
+                    self._stop_no_matches_countdown()
+                except Exception:
+                    pass
+                _msg = _t("tui_palette_no_match", _cur_lang())
+
+                def _show_no_matches() -> None:
+                    if not search_value:
+                        self._list_visible = False
+                        return
+                    try:
+                        from rich.text import Text as _RichText
+                        from rich.align import Align as _Align
+                        self.query_one(_BaseCommandList).add_option(
+                            _Opt(_Align.center(_RichText(_msg, style="not bold")),
+                                 disabled=True, id=self._NO_MATCHES))
+                        self._list_visible = True
+                    except Exception:
+                        pass
+
+                try:
+                    self._no_matches_timer = self.set_timer(
+                        self._NO_MATCHES_COUNTDOWN, _show_no_matches)
+                except Exception:
+                    pass
+    except Exception:
+        OnyxCommandPalette = None
+
+    def _make_bindings(lang: str = "chinese"):
+        """主界面键位绑定（描述跟随语言；`_kb(..., "")` = 用 keymap 注册表标签）。
+
+        Textual 会把 Binding.description 渲染到键位栏 / 帮助面板 / 命令面板，
+        所以描述必须本地化，不能硬编码英文。
+        """
+        _tui_bind_lang[0] = lang
+        return (
+            _kb("tui.cancel", "cancel", "", priority=True)
+            + _kb("tui.quit", "quit", "")
+            + _kb("tui.eof_quit", "eof_quit", "", priority=True)
+            + _kb("tui.history_prev", "menu_up", "", show=False, priority=True)
+            + _kb("tui.history_next", "menu_down", "", show=False, priority=True)
+            + _kb("tui.history_search", "hist_search", "", show=False, priority=True)
+            + _kb("tui.clear_log", "clear_log", "", show=False, priority=True)
+            + _kb("tui.word_left", "word_left", "", show=False)
+            + _kb("tui.word_right", "word_right", "", show=False)
+            + _kb("tui.scroll_up", "log_page_up", "", show=False, priority=True)
+            + _kb("tui.scroll_down", "log_page_down", "", show=False, priority=True)
+            + _kb("tui.multiline", "to_multiline", "", show=False)
+        )
 
     # ── 选项弹窗：上下「还有 N 项」计数 ────────────────────────────────
     # 需求：弹窗里一眼只看到几项时，用户会误以为「就这几个选项」。
@@ -760,8 +848,9 @@ def _build_tui():
 
         def __init__(self, title: str = "", hint: str = ""):
             super().__init__()
-            self._title = title or "按下要绑定的按键…"
-            self._hint = hint or "（Esc 取消）"
+            _lg = _cur_lang()
+            self._title = title or _t("tui_keycap_title", _lg)
+            self._hint = hint or _t("tui_keycap_hint", _lg)
 
         def compose(self):
             with Vertical(id="modal"):
@@ -976,7 +1065,7 @@ def _build_tui():
             cn = self.lang != "english"
             with Vertical(id="modal"):
                 yield Static(self.message, id="modal-msg")
-                yield Static(("≡ 计划" if cn else "≡ Plan"), id="modal-title")
+                yield Static(_t("tui_plan_title", self.lang), id="modal-title")
                 from textual.containers import VerticalScroll
                 with VerticalScroll(id="modal-body"):
                     yield self._body_widget()
@@ -1375,6 +1464,24 @@ def _build_tui():
             self.show_vertical_scrollbar = False
             self.show_horizontal_scrollbar = False
 
+        @property
+        def omitted_template(self) -> str:
+            """省略提示行模板（如「⋯ 此处省略 {n} 行 ⋯」）。
+
+            旧代码在 _apply_lang 里给 `omitted_template` 赋值，但本类只有私有
+            `_omitted_template` → 赋值落到一个新建的普通属性上，折叠行永远不刷新。
+            这里补一个真正的可写属性。
+            """
+            return self._omitted_template
+
+        @omitted_template.setter
+        def omitted_template(self, value: str) -> None:
+            self._omitted_template = value or "⋯ {n} ⋯"
+            try:
+                self.refresh()
+            except Exception:
+                pass
+
         # ── 行映射 ──
         def _row_map(self):
             """返回 [(显示行, 文档行 | None)]；文档行为 None 表示省略提示行。"""
@@ -1602,20 +1709,125 @@ def _build_tui():
         # 主界面键位全部来自 keymap 注册表（用户可在 /config → 按键设置 里改）。
         # 默认值与历史行为完全一致。
         # 注：字节层把 ESC+CR / ESC+LF 改写成了 CSI-u shift+enter（见 _ALT_ENTER_CSI_U）
-        BINDINGS = (
-            _kb("tui.cancel", "cancel", "Cancel", show=False, priority=True)
-            + _kb("tui.quit", "quit", "Quit")
-            + _kb("tui.eof_quit", "eof_quit", "Quit", priority=True)
-            + _kb("tui.history_prev", "menu_up", "History prev", show=False, priority=True)
-            + _kb("tui.history_next", "menu_down", "History next", show=False, priority=True)
-            + _kb("tui.history_search", "hist_search", "History search", show=False, priority=True)
-            + _kb("tui.clear_log", "clear_log", "Clear log", show=False, priority=True)
-            + _kb("tui.word_left", "word_left", "Word left", show=False)
-            + _kb("tui.word_right", "word_right", "Word right", show=False)
-            + _kb("tui.scroll_up", "log_page_up", "Scroll up", show=False, priority=True)
-            + _kb("tui.scroll_down", "log_page_down", "Scroll down", show=False, priority=True)
-            + _kb("tui.multiline", "to_multiline", "Multiline", show=False)
-        )
+        # 描述由 _make_bindings 按语言生成；切语言时 _rebuild_bindings() 重建。
+        BINDINGS = _make_bindings("chinese")
+
+        def _rebuild_bindings(self) -> None:
+            """按当前语言刷新绑定**描述**（键位映射本身不动）。
+
+            描述会显示在键位栏 / 帮助面板 / 命令面板里，必须跟着语言走。
+            但不能整表重建：Textual 在 App.__init__ 里往 self._bindings 注入过
+            命令面板绑定（ctrl+p → command_palette），整表替换会把它一起丢掉
+            （点左上角 ◆ / Ctrl+P 就打不开面板了）。
+            """
+            try:
+                import dataclasses as _dc
+                labels = {}
+                for _b in _make_bindings(getattr(self, "_lang", "chinese")):
+                    labels.setdefault(_b.action, _b.description)
+                k2b = getattr(self._bindings, "key_to_bindings", None)
+                if not k2b:
+                    return
+                for _key, _blist in list(k2b.items()):
+                    _new = []
+                    _changed = False
+                    for _b in _blist:
+                        _desc = labels.get(_b.action)
+                        if _desc and _desc != _b.description:
+                            try:
+                                _b = _dc.replace(_b, description=_desc)
+                                _changed = True
+                            except Exception:
+                                pass
+                        _new.append(_b)
+                    if _changed:
+                        k2b[_key] = _new
+                self.refresh_bindings()
+            except Exception:
+                pass
+
+        # ── 命令面板（点左上角 ◆ / Ctrl+P）本地化 ──
+        # Textual 内置面板的 placeholder 与系统命令条目（Theme / Quit / Keys /
+        # Maximize / Minimize / Screenshot…）全是库里的英文硬编码 → 中文模式下这一屏
+        # 纯英文。这里两件事：① 重写 action_command_palette，用本地化 placeholder 的
+        # 子类；② 重写 get_system_commands，把条目文案换成当前语言。
+        def get_system_commands(self, screen):
+            """命令面板条目（按当前界面语言；与 Textual 默认条目一一对应）。
+
+            注意 maximize/minimize 是 Screen 的动作（App 上没有）——用 self.* 会抛
+            AttributeError，把生成器后面所有条目一起吞掉。
+            """
+            _cn = getattr(self, "_lang", "chinese") != "english"
+
+            def _s(cn: str, en: str) -> str:
+                return cn if _cn else en
+
+            try:
+                from textual.app import SystemCommand as _SC
+            except Exception:
+                return
+            yield _SC(_s("切换主题", "Theme"),
+                      _s("切换界面配色主题", "Change the current theme"),
+                      self.action_change_theme)
+            yield _SC(_s("退出", "Quit"),
+                      _s("退出 AI 界面，回到 shell",
+                         "Quit the AI interface and return to the shell"),
+                      self.action_quit)
+            try:
+                _help_open = bool(screen.query("HelpPanel"))
+            except Exception:
+                _help_open = False
+            if _help_open:
+                yield _SC(_s("键位帮助", "Keys"),
+                          _s("隐藏按键与控件帮助面板",
+                             "Hide the keys and widget help panel"),
+                          self.action_hide_help_panel)
+            else:
+                yield _SC(_s("键位帮助", "Keys"),
+                          _s("显示当前控件的按键说明与可用键位",
+                             "Show help for the focused widget and a summary of available keys"),
+                          self.action_show_help_panel)
+            try:
+                if screen.maximized is not None:
+                    yield _SC(_s("还原", "Minimize"),
+                              _s("把当前面板还原为正常大小",
+                                 "Minimize the widget and restore to normal size"),
+                              screen.action_minimize)
+                elif screen.focused is not None and screen.focused.allow_maximize:
+                    yield _SC(_s("最大化", "Maximize"),
+                              _s("最大化当前聚焦的面板", "Maximize the focused widget"),
+                              screen.action_maximize)
+            except Exception:
+                pass
+            try:
+                yield _SC(_s("截图", "Screenshot"),
+                          _s("保存当前界面的 SVG 截图",
+                             "Save an SVG 'screenshot' of the current screen"),
+                          lambda: self.set_timer(0.1, self.deliver_screenshot))
+            except Exception:
+                pass
+
+        def action_command_palette(self) -> None:
+            """打开命令面板（placeholder 跟随界面语言）。"""
+            try:
+                from textual.command import CommandPalette as _CP
+            except Exception:
+                try:
+                    super().action_command_palette()
+                except Exception:
+                    pass
+                return
+            try:
+                if not self.use_command_palette or _CP.is_open(self):
+                    return
+                _ph = _t("tui_palette_ph", getattr(self, "_lang", "chinese"))
+                try:
+                    self.push_screen(OnyxCommandPalette(placeholder=_ph,
+                                                        id="--command-palette"))
+                except Exception:
+                    self.push_screen(_CP(placeholder=_ph, id="--command-palette"))
+            except Exception:
+                pass
 
         def get_theme_variable_defaults(self):
             """CSS 引用的 $onyx-* 变量默认值。
@@ -1683,6 +1895,14 @@ def _build_tui():
             self._spin_timer = None
             self._adapter = TUIAdapter(self)
             self._lang = (ctx or {}).get("lang", "chinese") or "chinese"
+            # 键位描述跟随启动语言（BINDINGS 是类属性，实例化后按语言重建一次）
+            self._rebuild_bindings()
+            # ui 层（确认框 / 选择器 / 验证码）统一取「界面当前语言」
+            try:
+                from bin.ai_lib.ui import set_ui_lang_provider as _set_lang_provider
+                _set_lang_provider(lambda: getattr(self, "_lang", "chinese"))
+            except Exception:
+                pass
             self._menu_cands = []      # 当前补全候选 [(插入文本, 描述, 替换长度)]
             self._menu_base_text = None  # Tab 循环补全的基准文本（None=尚未开始循环）
             self._menu_cycle_idx = -1    # 当前已应用的候选下标（-1=还没选过）
@@ -1767,9 +1987,11 @@ def _build_tui():
                 with Vertical(id="sidebar"):
                     # 侧栏面板顶部：本 Python 进程的 PID（os.getpid()，非 shell 子进程）
                     yield Static(f"PID {os.getpid()}", classes="panel-title", id="pid-line")
-                    yield Static(_t("tui_todo_title", self._lang), classes="panel-title")
+                    yield Static(_t("tui_todo_title", self._lang),
+                                 classes="panel-title", id="todo-body-title")
                     yield Static(_t("tui_tasks_none", self._lang), id="todo-body")
-                    yield Static(_t("tui_files_title", self._lang), classes="panel-title")
+                    yield Static(_t("tui_files_title", self._lang),
+                                 classes="panel-title", id="files-title")
                     yield OnyxDirectoryTree(os.getcwd(), id="files")
             with Vertical(id="prompt-wrap"):
                 yield Static("", id="todo-strip")
@@ -1919,9 +2141,11 @@ def _build_tui():
 
             # 5) 注销适配器 / 输入桥
             try:
-                from bin.ai_lib.ui import set_ui_adapter, set_pending_input_provider
+                from bin.ai_lib.ui import (set_ui_adapter, set_pending_input_provider,
+                                       set_ui_lang_provider)
                 set_ui_adapter(None)
                 set_pending_input_provider(None)
+                set_ui_lang_provider(None)
             except Exception:
                 pass
             _mode.set_render_mode("repl")
@@ -2564,6 +2788,33 @@ def _build_tui():
                     self._suggester._slash = _slash_commands(self._lang)
             except Exception:
                 pass
+            # 键位描述 / 命令面板条目 / 帮助面板都吃 self._lang → 重建绑定
+            self._rebuild_bindings()
+            # 侧栏标题、任务区、窄屏状态条、状态栏都是语言相关文案，必须一起刷
+            for _wid, _key in (("#todo-body-title", "tui_todo_title"),
+                               ("#files-title", "tui_files_title")):
+                try:
+                    self.query_one(_wid, Static).update(_t(_key, self._lang))
+                except Exception:
+                    pass
+            try:
+                self._render_todos(getattr(self, "_todos", []) or [])
+            except Exception:
+                pass
+            try:
+                if getattr(self, "_last_status", None):
+                    self._render_status(self._last_status)
+            except Exception:
+                pass
+            # 补全菜单的描述来自上一语言的命令表 → 清缓存，下次输入重建
+            try:
+                self._menu_cache.clear()
+            except Exception:
+                pass
+            try:
+                self._menu_hide()
+            except Exception:
+                pass
             self._set_hint()
 
         def _drain_inputs(self):
@@ -2982,6 +3233,7 @@ def _build_tui():
                 try:
                     text = self._in_q.get(timeout=0.2)
                 except queue.Empty:
+                    self._maybe_senses_wake()
                     continue
                 self._busy = True
                 try:
@@ -2998,6 +3250,29 @@ def _build_tui():
                         pass
                 finally:
                     self._busy = False
+
+        def _maybe_senses_wake(self):
+            """感官：空闲时把事件交还主线程 AI 引擎（用户说话 + 事件 联合驱动）。"""
+            if self._busy or self._stop.is_set():
+                return
+            try:
+                from bin.ai_lib import senses as _s
+                if _s.is_busy() or not _s.can_notify():
+                    return
+                evs = _s.pop_events()
+                if not evs:
+                    return
+                _s.mark_notified()
+                text = _s.build_wake_prompt(evs)
+            except Exception:
+                return
+            self._busy = True
+            try:
+                self._run_one(text)
+            except BaseException:
+                pass
+            finally:
+                self._busy = False
 
         def _run_one(self, text):
             ctx = self._ctx
@@ -3222,11 +3497,9 @@ def _build_tui():
                 self._stream_kind = kind
                 try:
                     from bin.ai_lib.ui import onyx_label as _ol
-                    _cn = self._lang != "english"
-                    if kind == "reason":
-                        w.write(_ol("reason", "思考中" if _cn else "Thinking"))
-                    else:
-                        w.write(_ol("ai", "回复" if _cn else "Reply"))
+                    _key = "tui_stream_reason" if kind == "reason" else "tui_stream_reply"
+                    w.write(_ol("reason" if kind == "reason" else "ai",
+                                _t(_key, self._lang)))
                 except Exception:
                     pass
             delta = text[len(self._stream_prev):]

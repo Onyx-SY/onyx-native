@@ -215,6 +215,85 @@ ULTRA_FAST_FLAG_FILE = os.path.join(PERMANENT_CACHE_DIR, "ultra_fast.flag")
 TERMUX_C_COPIED_FLAG = os.path.join(PERMANENT_CACHE_DIR, "termux_c_copied.flag")
 # 性能日志文件
 PERFORMANCE_LOG_FILE = os.path.join(PERMANENT_CACHE_DIR, "performance_stats.json")
+
+# ========== 原生崩溃诊断（faulthandler）==========
+# 背景：用户实测「退出 AI 界面后 shell 报 segmentation fault」。这类崩溃发生在
+# 解释器 finalize 阶段（faulthandler 抓到的栈是 Garbage-collecting / <no Python
+# frame>），Python 层看不到任何异常。默认的 faulthandler 只写 stderr，而退出瞬间
+# stderr 往往已经跟着终端/捕获流一起没了 → 事后无从查证。
+# 这里把原生栈**落盘**，下次再崩能直接看到崩在哪个 C 扩展 / 哪个线程。
+_FAULT_LOG = None            # 保持文件对象引用，进程存活期间不能被回收
+_FAULT_LOG_PATH = ""         # 落盘路径（供日志里提示用户）
+
+
+def _enable_faulthandler() -> None:
+    """启用 faulthandler 并把原生栈写入文件（失败则退回 stderr，绝不影响启动）。"""
+    global _FAULT_LOG, _FAULT_LOG_PATH
+    try:
+        import faulthandler
+    except Exception:
+        return
+    try:
+        home = os.environ.get("HOME") or _ORIGINAL_HOME or os.path.expanduser("~")
+        log_dir = os.path.join(home, ".ai_s", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        path = os.path.join(log_dir, "faulthandler.log")
+        # 追加 + 行缓冲：崩溃时最后几行一定落盘（缓冲丢失就等于没日志）
+        _FAULT_LOG = open(path, "a", encoding="utf-8", buffering=1)
+        _FAULT_LOG_PATH = path
+        try:
+            _FAULT_LOG.write("\n===== onyx start %s =====\n"
+                             % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            _FAULT_LOG.flush()
+        except Exception:
+            pass
+        faulthandler.enable(file=_FAULT_LOG, all_threads=True)
+    except Exception:
+        try:
+            faulthandler.enable(all_threads=True)   # 退回 stderr
+        except Exception:
+            pass
+
+
+def _flush_streams() -> None:
+    """退出前把 Python 侧缓冲全部刷出去（os._exit 不会替我们做这件事）。"""
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.flush()
+        except Exception:
+            pass
+    try:
+        import logging
+        for _h in logging.getLogger().handlers:
+            try:
+                _h.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _hard_exit(code: int = 0) -> None:
+    """flush 之后直接 os._exit，跳过解释器的 finalize（GC）阶段。
+
+    为什么必须这样：退出期的 GC 会回收进程内所有原生资源 —— ctypes 加载的插件 .so
+    在此时 dlclose、MCP 子进程/后台线程的收尾也挤在这一刻，实测偶发 SIGABRT/SIGSEGV
+    （栈：Garbage-collecting / <no Python frame>）。而 Onyx 的 graceful_shutdown 早已
+    把历史 / 配置 / 缓存 / 终端属性全部处理完，finalize 阶段没有任何「必须执行」的收尾，
+    所以这里显式 flush 后直接退出，绕过整段 finalize。
+
+    排障开关：ONYX_NO_HARD_EXIT=1 → 退回「正常返回、让解释器自己 finalize」的旧行为。
+    """
+    if os.environ.get("ONYX_NO_HARD_EXIT", "0") == "1":
+        return
+    _flush_streams()
+    try:
+        os._exit(int(code or 0))
+    except Exception:
+        sys.exit(code)
+
+
+_enable_faulthandler()
 # First-run forced check flag filename (path resolved dynamically after HOME is set)
 _FIRST_RUN_FLAG_FILENAME = "first_run_check_done.flag"
 
@@ -2427,4 +2506,15 @@ def main() -> None:
 
 if __name__ == "__main__":
     # anti_sudo_check 已禁用（用户要求取消 sudo 检测）
-    main()
+    # 统一收尾：捕获 SystemExit 的退出码（-c / --list-shells 等路径），
+    # 然后 flush + 硬退出，绕开解释器 finalize 阶段的 GC（退出期崩溃就发生在那里）。
+    _exit_code = 0
+    try:
+        main()
+    except SystemExit as _e:
+        _exit_code = _e.code if isinstance(_e.code, int) else (0 if _e.code is None else 1)
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        _exit_code = 1
+    _hard_exit(_exit_code)
